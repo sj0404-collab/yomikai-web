@@ -1,0 +1,1669 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>KOMA Web · локальная библиотека и читалка</title>
+<style>
+  :root{
+    --bg:#171a17; --panel:#232822; --panel2:#2e342c; --text:#f2f4ef; --dim:#b2b8ad;
+    --orange:#ff8a4c; --line:#39412f; --red:#e57373; --accent:#b9a7ff;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+  .screen{position:fixed;inset:0;display:none;flex-direction:column}
+  .screen.on{display:flex}
+  header{display:flex;align-items:center;gap:8px;padding:calc(env(safe-area-inset-top) + 8px) 10px 8px;
+    background:#101310;border-bottom:1px solid var(--line);z-index:30}
+  header .title{flex:1;min-width:0}
+  header .title b{display:block;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  header .title span{display:block;font-size:10.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .icon{width:38px;height:38px;display:grid;place-items:center;border-radius:12px;font-size:17px}
+  .icon:active{background:var(--panel2)}
+  .icon.hot{color:var(--orange)}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:9px 14px;border-radius:12px;
+    background:var(--panel2);font-size:13px}
+  .btn.primary{background:#6c5ce7}
+  .btn.warn{background:#7a3030}
+  .btn:disabled{opacity:.45}
+  .scroll{flex:1;overflow:auto;-webkit-overflow-scrolling:touch}
+  .pad{padding:14px}
+  .row{display:flex;align-items:center;gap:10px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:12px}
+  .card{background:var(--panel);border-radius:12px;overflow:hidden;position:relative}
+  .card img,.card .nofoto{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:#0c0f0c}
+  .card .nofoto{display:grid;place-items:center;color:#4a5449;font-size:11px}
+  .card .cap{padding:6px 8px;font-size:11.5px;line-height:1.25}
+  .card .cap span{display:block;color:var(--dim);font-size:10px}
+  .card .del{position:absolute;top:4px;right:4px;background:#000a;border-radius:50%;width:24px;height:24px;
+    display:grid;place-items:center;font-size:13px}
+  .sheet{position:fixed;left:0;right:0;bottom:0;max-height:88%;background:var(--panel);
+    border-radius:20px 20px 0 0;transform:translateY(102%);transition:transform .22s;z-index:60;
+    display:flex;flex-direction:column}
+  .sheet.on{transform:translateY(0)}
+  .sheet .head{padding:12px 18px 4px;font-size:19px;font-weight:700}
+  .sheet .body{overflow:auto;padding:0 18px calc(22px + env(safe-area-inset-bottom))}
+  .lbl{font-size:10px;letter-spacing:1.2px;font-weight:700;color:var(--dim);margin:20px 0 8px}
+  .hint{font-size:11px;color:var(--dim)}
+  .kv{font-size:12.5px;margin:2px 0}
+  textarea,input[type=text],input[type=number]{width:100%;background:#12160f;color:var(--text);
+    border:1px solid var(--line);border-radius:12px;padding:10px;font:12.5px/1.5 ui-monospace,monospace}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{padding:7px 11px;border-radius:10px;background:var(--panel2);font-size:12px}
+  .chip.on{background:#4b3f7a}
+  .lineitem{padding:6px 0;border-bottom:1px solid #ffffff10;font-size:12px}
+  .lineitem b{color:var(--orange);font-size:10px;margin-right:6px}
+  .empty{padding:40px 20px;text-align:center;color:var(--dim);font-size:13px}
+  .badge{font-size:9.5px;padding:2px 6px;border-radius:6px;background:#00000055;color:var(--dim)}
+  /* читалка */
+  #reader{background:#000}
+  #strip{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:0;scroll-behavior:auto}
+  #strip .pagewrap{position:relative;margin:0 auto}
+  #strip canvas,#strip img{display:block;width:100%;height:auto}
+  #strip .frames{position:absolute;inset:0;pointer-events:none}
+  #strip .frame{position:absolute;border:1.5px solid var(--orange);border-radius:8px;pointer-events:auto}
+  #strip .frame.done{border-color:#ff8a4c33}
+  #strip .frame.cur{background:#ff8a4c33;border-width:2.5px;border-color:var(--orange)}
+  #strip .frame.spk::after{content:"🔊";position:absolute;right:-4px;top:-22px;font-size:15px}
+  /* постраничный режим */
+  #paged{position:absolute;inset:0;display:none;overflow:hidden}
+  #paged.on{display:block}
+  #paged .pagebox{position:absolute;inset:0;overflow:auto;display:none}
+  #paged .pagebox.on{display:block}
+  #paged .pagebox .inner{position:relative;transform-origin:0 0}
+  .bottombar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;
+    padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:#232822ee;backdrop-filter:blur(6px);
+    z-index:25;transition:transform .2s}
+  .bottombar.hide{transform:translateY(110%)}
+  .bottombar .grow{flex:1;min-width:0}
+  .progressbar{height:5px;background:#3a4436;border-radius:3px;overflow:hidden;flex:1;margin:0 6px}
+  .progressbar i{display:block;height:100%;background:var(--orange);width:0}
+  .floatbar{position:absolute;left:50%;transform:translateX(-50%);bottom:86px;display:flex;gap:6px;
+    background:#232822e6;border-radius:26px;padding:6px 8px;z-index:26;align-items:center}
+  .nextArrow{position:absolute;z-index:27;background:#232822e6;border-radius:28px;padding:8px 13px;
+    display:flex;align-items:center;gap:6px;font-size:12px;box-shadow:0 6px 20px #0008}
+  .nextArrow.down{left:50%;transform:translateX(-50%);bottom:150px}
+  .nextArrow.left{left:10px;top:50%;transform:translateY(-50%)}
+  .nextArrow.right{right:10px;top:50%;transform:translateY(-50%)}
+  .toast{position:fixed;left:50%;bottom:120px;transform:translate(-50%,20px);background:#000d;color:#fff;
+    padding:9px 14px;border-radius:12px;font-size:12.5px;z-index:99;opacity:0;transition:.25s;max-width:86%;
+    text-align:center;pointer-events:none}
+  .toast.on{opacity:1;transform:translate(-50%,0)}
+  .scanbadge{position:absolute;top:calc(env(safe-area-inset-top) + 60px);left:50%;transform:translateX(-50%);
+    background:#000c;padding:6px 12px;border-radius:20px;font-size:11.5px;z-index:28;display:none}
+  .scanbadge.on{display:block}
+</style>
+</head>
+<body>
+
+<!-- ═══ Библиотека ═══ -->
+<section id="library" class="screen on">
+  <header>
+    <div class="title"><b>Локальная библиотека</b><span id="libSub">папки, CBZ и отдельные страницы</span></div>
+    <button class="icon" id="btnImport" title="Добавить">＋</button>
+    <button class="icon" id="btnModels" title="Модели OCR">⚙</button>
+    <button class="icon" id="btnRulesLib" title="Правила">☰</button>
+  </header>
+  <div class="scroll pad">
+    <div id="libEmpty" class="empty">
+      Пока пусто.<br><br>
+      Нажмите ＋ и выберите папку с главой (или CBZ).<br>
+      Файлы остаются на устройстве — в браузере, без сервера.
+    </div>
+    <div id="libGrid" class="grid"></div>
+  </div>
+</section>
+
+<!-- ═══ Читалка ═══ -->
+<section id="reader" class="screen">
+  <header id="readerHeader" style="position:absolute;left:0;right:0;top:0;background:#101310e8;backdrop-filter:blur(6px);transition:transform .2s">
+    <button class="icon" id="btnBack">←</button>
+    <div class="title"><b id="rTitle">…</b><span id="rSub">KOMA · лента</span></div>
+    <button class="icon" id="btnScan" title="Распознать">▣</button>
+    <button class="icon" id="btnSettings" title="Голос и чтение">🎙</button>
+    <button class="icon" id="btnMore" title="Ещё">⋮</button>
+  </header>
+
+  <div id="strip"></div>
+  <div id="paged"></div>
+  <div class="scanbadge" id="scanBadge">Распознаём…</div>
+
+  <div class="floatbar" id="playBar" style="display:none">
+    <button class="icon" id="btnPause">⏸</button>
+    <button class="icon" id="btnSkip">⏭</button>
+    <button class="icon" id="btnStop" style="color:var(--red)">⏹</button>
+    <span id="playStatus" style="font-size:11px;color:var(--dim);padding-right:6px"></span>
+  </div>
+
+  <div class="nextArrow down" id="nextArrow" style="display:none">▼ Прокрутить</div>
+
+  <div class="bottombar" id="readerBar">
+    <button class="btn" id="btnOcr2">✨ Текст страницы</button>
+    <span class="grow"></span>
+    <button class="icon" id="btnRead" title="Читать">▶</button>
+    <button class="icon" id="btnFrames" title="Рамки">⛶</button>
+    <span style="font-size:11.5px;color:var(--dim);min-width:44px;text-align:right" id="pageNum">1</span>
+    <span style="font-size:11px;color:var(--dim)">/</span>
+    <span style="font-size:11.5px;color:var(--dim);min-width:24px" id="pageTotal">1</span>
+  </div>
+</section>
+
+<!-- ═══ Шторка: модели ═══ -->
+<div class="sheet" id="sheetModels">
+  <div class="head">Модели OCR</div>
+  <div class="body">
+    <div class="hint">Нужны три файла из папки <code>assets/koma/models</code> АПК:<br>
+      <b>detection.onnx</b>, <b>cyrillic.onnx</b>, <b>cyrillic.txt</b>.</div>
+    <div class="lbl">СОСТОЯНИЕ</div>
+    <div id="modelsState" class="kv"></div>
+    <div class="row" style="margin-top:12px;gap:8px">
+      <button class="btn primary" id="btnPickModels">Выбрать файлы</button>
+      <button class="btn" id="btnClearModels">Убрать</button>
+    </div>
+    <div class="lbl">ДВИЖОК</div>
+    <div id="ortState" class="kv hint"></div>
+    <div class="hint" style="margin-top:10px">
+      Распознавание целиком в браузере: ни один кадр никуда не отправляется.
+      Модели хранятся в IndexedDB этого сайта.
+    </div>
+    <button class="btn" id="closeSheets" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: правила и буфер ═══ -->
+<div class="sheet" id="sheetRules">
+  <div class="head">Правила и буфер строк</div>
+  <div class="body">
+    <div class="lbl">ДЕЙСТВУЮЩИЕ ПРАВИЛА</div>
+    <div class="kv" id="rulesVer"></div>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <button class="btn primary" id="btnRulesImport">Загрузить файл</button>
+      <button class="btn" id="btnRulesExport">Скачать</button>
+      <button class="btn" id="btnRulesReset">Сброс</button>
+    </div>
+    <div class="lbl">БУФЕР СТРОК</div>
+    <div class="kv" id="bufferInfo"></div>
+    <div id="bufferList" style="max-height:190px;overflow:auto;margin-top:8px"></div>
+    <div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn" id="btnBufferExport">Выгрузить</button>
+      <button class="btn" id="btnBufferClear">Очистить</button>
+    </div>
+    <div class="lbl">ПРАВКИ СЛОВ (wordFixes)</div>
+    <div class="hint">Ключ — что вернул OCR, значение — как надо. Сравнение без регистра.</div>
+    <textarea id="wordFixesBox" rows="4" placeholder='{"Пвтор":"Автор","Форирование":"Формирование"}'></textarea>
+    <button class="btn" id="btnWordFixesSave" style="margin-top:8px">Сохранить правки</button>
+    <button class="btn" id="closeSheets2" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: настройки чтения ═══ -->
+<div class="sheet" id="sheetSettings">
+  <div class="head">Как читать</div>
+  <div class="body">
+    <div class="lbl">ПОРЯДОК ЧТЕНИЯ</div>
+    <div class="chips" id="modeChips">
+      <button class="chip" data-mode="vertical">Вертикальная лента · манхва</button>
+      <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
+      <button class="chip" data-mode="ltr">Страницы слева направо</button>
+    </div>
+    <div class="lbl">АВТОЧТЕНИЕ</div>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Читать вслух</span>
+      <input type="checkbox" id="cbAuto">
+    </label>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Полуручной режим <span class="hint">— прочитает видимое и ждёт прокрутки</span></span>
+      <input type="checkbox" id="cbSemi">
+    </label>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Ждать остановки, мс</span>
+      <input type="number" id="numSettle" style="width:90px" min="0" max="5000" step="100">
+    </label>
+    <div class="lbl">ГОЛОС</div>
+    <div class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Голос</span>
+      <select id="selVoice" style="max-width:62%;background:#12160f;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:7px"></select>
+    </div>
+    <div class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Скорость</span>
+      <input type="range" id="rngRate" min="0.6" max="1.6" step="0.05" style="max-width:60%">
+    </div>
+    <div class="lbl">РАМКИ</div>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Показывать рамки реплик</span>
+      <input type="checkbox" id="cbFrames">
+    </label>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Подсвечивать читаемую реплику</span>
+      <input type="checkbox" id="cbFollow">
+    </label>
+    <button class="btn" id="closeSheets3" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: текст страницы ═══ -->
+<div class="sheet" id="sheetText">
+  <div class="head" id="textTitle">Текст страницы</div>
+  <div class="body">
+    <div class="kv" id="textStats"></div>
+    <div class="lbl">КАК ЧИТАЕТСЯ</div>
+    <div id="textOrdered"></div>
+    <div class="lbl">КАК РАСПОЗНАНО</div>
+    <div id="textRaw" class="hint" style="max-height:150px;overflow:auto"></div>
+    <div class="row" style="gap:8px;margin-top:12px">
+      <button class="btn primary" id="btnRescan">Распознать заново</button>
+      <button class="btn" id="btnSpeakPage">Прочитать</button>
+    </div>
+    <button class="btn" id="closeSheets4" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<input type="file" id="filePick" multiple accept="image/*,.cbz,.zip,.onnx,.txt,.json" style="display:none">
+<input type="file" id="dirPick" webkitdirectory directory multiple style="display:none">
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+<script>
+'use strict';
+/* ───────────────────────── 0. Мелкие утилиты ───────────────────────── */
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function toast(msg, ms = 2200) {
+  const el = $('#toast');
+  el.textContent = msg; el.classList.add('on');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove('on'), ms);
+}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
+   Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
+   Ничего не уходит в сеть: сервера у этой страницы нет.                        */
+const DB = (() => {
+  let dbp = null;
+  function open() {
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('koma-web', 1);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains('books')) db.createObjectStore('books', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('pages')) db.createObjectStore('pages', { keyPath: 'key' });
+        if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv', { keyPath: 'k' });
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return dbp;
+  }
+  async function tx(store, mode, fn) {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction(store, mode);
+      const s = t.objectStore(store);
+      let out;
+      const p = fn(s);
+      if (p && p.onsuccess !== undefined) p.onsuccess = () => { out = p.result; };
+      t.oncomplete = () => res(out);
+      t.onerror = () => rej(t.error);
+    });
+  }
+  return {
+    put: (store, val) => tx(store, 'readwrite', s => s.put(val)),
+    get: (store, key) => tx(store, 'readonly', s => s.get(key)),
+    del: (store, key) => tx(store, 'readwrite', s => s.delete(key)),
+    all: (store) => tx(store, 'readonly', s => s.getAll()),
+    clear: (store) => tx(store, 'readwrite', s => s.clear()),
+  };
+})();
+
+/* ───────────────────────── 2. ZIP/CBZ без библиотек ─────────────────────────
+   Используем DecompressionStream('deflate-raw') — есть в Chrome 80+/Safari 16+. */
+async function unzip(buf) {
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  // ищем End of Central Directory
+  let eocd = -1;
+  for (let i = u8.length - 22; i >= Math.max(0, u8.length - 66000); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('не ZIP');
+  const count = dv.getUint16(eocd + 10, true);
+  let off = dv.getUint32(eocd + 16, true);
+  const files = [];
+  for (let i = 0; i < count; i++) {
+    if (dv.getUint32(off, true) !== 0x02014b50) break;
+    const method = dv.getUint16(off + 10, true);
+    const csize = dv.getUint32(off + 20, true);
+    const nameLen = dv.getUint16(off + 28, true);
+    const extraLen = dv.getUint16(off + 30, true);
+    const cmtLen = dv.getUint16(off + 32, true);
+    const localOff = dv.getUint32(off + 42, true);
+    const name = new TextDecoder().decode(u8.subarray(off + 46, off + 46 + nameLen));
+    off += 46 + nameLen + extraLen + cmtLen;
+    if (name.endsWith('/')) continue;
+    if (!/\.(jpe?g|png|webp|avif|bmp|gif)$/i.test(name)) continue;
+    // локальный заголовок
+    const lnLen = dv.getUint16(localOff + 26, true);
+    const leLen = dv.getUint16(localOff + 28, true);
+    const dataStart = localOff + 30 + lnLen + leLen;
+    const raw = u8.subarray(dataStart, dataStart + csize);
+    let data;
+    if (method === 0) data = raw.slice();
+    else if (method === 8) {
+      const ds = new DecompressionStream('deflate-raw');
+      const blob = new Blob([raw.slice()]);
+      data = new Uint8Array(await new Response(blob.stream().pipeThrough(ds)).arrayBuffer());
+    } else throw new Error('метод сжатия ' + method);
+    files.push({ name, data });
+  }
+  files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  return files;
+}
+
+/* ───────────────────────── 3. Библиотека ───────────────────────── */
+const Library = {
+  books: [],
+  async load() {
+    this.books = (await DB.all('books') || []).sort((a, b) => (b.at || 0) - (a.at || 0));
+    renderLibrary();
+  },
+  async addBook(title, files, kind) {
+    const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const pages = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const name = f.name.split('/').pop();
+      const blob = f.blob || new Blob([f.data], { type: mimeOf(name) });
+      const key = id + '/' + i;
+      await DB.put('pages', { key, id, index: i, name, blob });
+      pages.push({ key, name });
+    }
+    const cover = pages.length ? (await DB.get('pages', pages[0].key))?.blob : null;
+    const book = { id, title, kind, count: pages.length, at: Date.now(), progress: 0, mode: 'vertical', cover };
+    await DB.put('books', book);
+    return book;
+  },
+  async pages(bookId) {
+    const rows = (await DB.all('pages') || []).filter(p => p.id === bookId);
+    rows.sort((a, b) => a.index - b.index);
+    return rows;
+  },
+  async remove(bookId) {
+    const rows = (await DB.all('pages') || []).filter(p => p.id === bookId);
+    for (const p of rows) await DB.del('pages', p.key);
+    await DB.del('books', bookId);
+  },
+};
+function mimeOf(name) {
+  const e = name.split('.').pop().toLowerCase();
+  return e === 'png' ? 'image/png' : e === 'webp' ? 'image/webp' : e === 'gif' ? 'image/gif' : 'image/jpeg';
+}
+
+function renderLibrary() {
+  const grid = $('#libGrid');
+  $('#libEmpty').style.display = Library.books.length ? 'none' : 'block';
+  grid.innerHTML = '';
+  for (const b of Library.books) {
+    const el = document.createElement('div');
+    el.className = 'card';
+    const url = b.cover ? URL.createObjectURL(b.cover) : '';
+    el.innerHTML = `${url ? `<img src="${url}" alt="">` : '<div class="nofoto">нет обложки</div>'}
+      <button class="del">✕</button>
+      <div class="cap">${escapeHtml(b.title)}<span>${b.count} стр. · ${b.mode === 'vertical' ? 'лента' : b.mode === 'rtl' ? 'справа налево' : 'слева направо'}</span></div>`;
+    el.querySelector('.del').onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm('Удалить «' + b.title + '» из библиотеки?')) return;
+      await Library.remove(b.id); await Library.load();
+    };
+    el.onclick = () => openBook(b);
+    grid.appendChild(el);
+  }
+}
+const escapeHtml = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/* Импорт: папка / CBZ / отдельные картинки */
+async function importDir(fileList) {
+  const imgs = Array.from(fileList).filter(f => /\.(jpe?g|png|webp|avif|bmp|gif)$/i.test(f.name));
+  if (!imgs.length) return toast('В выбранной папке нет картинок');
+  imgs.sort((a, b) => a.webkitRelativePath.localeCompare(b.webkitRelativePath, undefined, { numeric: true }));
+  const title = (imgs[0].webkitRelativePath || imgs[0].name).split('/')[0] || 'Глава';
+  toast('Сохраняю ' + imgs.length + ' страниц…', 5000);
+  await Library.addBook(title, imgs.map(f => ({ name: f.name, blob: f })), 'dir');
+  await Library.load();
+  toast('Добавлено: ' + title + ' (' + imgs.length + ' стр.)');
+}
+async function importZip(file) {
+  toast('Разбираю архив…', 5000);
+  const files = await unzip(await file.arrayBuffer());
+  if (!files.length) return toast('В архиве нет картинок');
+  const title = file.name.replace(/\.(cbz|zip)$/i, '');
+  await Library.addBook(title, files, 'zip');
+  await Library.load();
+  toast('Добавлено: ' + title + ' (' + files.length + ' стр.)');
+}
+
+/* ───────────────────────── 4. Правила (тот же файл, что у АПК) ───────────────────────── */
+const DEFAULT_RULES = {
+  version: 'web-1',
+  inkLowPercentile: 0.02, inkHighPercentile: 0.98, inkFlatSpread: 10,
+  inkCoefficient: 0.45, inkMin: 40, inkMax: 235, binarizeFallback: 110,
+  inkTileRows: 4, inkLevels: 1,
+  contrastGain: 2.2, contrastOffset: -140,
+  rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.25,
+  cutMargin: 0.06, bandOverlap: 0.15, bandsMax: 8, wholeThreshold: 0.72,
+  bubbleGap: 0.45, mergeHeightRatio: 1.8,
+  speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
+  wordFixes: {},
+};
+let RULES = { ...DEFAULT_RULES };
+function sanitizeRules(r) {
+  const R = { ...DEFAULT_RULES, ...(r || {}) };
+  const num = (k, a, b) => { R[k] = clamp(Number(R[k]) || 0, a, b); };
+  num('inkLowPercentile', 0, .5); num('inkHighPercentile', .5, 1); num('inkFlatSpread', 0, 128);
+  num('inkCoefficient', 0, .95); num('inkMin', 0, 254); num('inkMax', 1, 255);
+  num('binarizeFallback', 0, 255); num('inkTileRows', 1, 16); num('inkLevels', 1, 2);
+  num('contrastGain', 1, 8); num('contrastOffset', -255, 100);
+  num('rescueMinRegions', 0, 100000); num('pageSide', 320, 4000); num('rescueSide', 320, 4000);
+  num('minConfidence', 0, 1); num('cutMargin', 0, .4); num('bandOverlap', 0, .5);
+  num('bandsMax', 1, 32); num('wholeThreshold', .3, 1); num('bubbleGap', .05, 3);
+  num('mergeHeightRatio', 1.05, 6); num('speechRate', 0, 3); num('autoScrollStep', .05, .9);
+  num('semiManualSettleMs', 0, 5000);
+  if (R.inkMax <= R.inkMin) R.inkMax = Math.min(255, R.inkMin + 1);
+  R.inkTileRows = Math.round(R.inkTileRows); R.bandsMax = Math.round(R.bandsMax);
+  R.inkLevels = Math.round(R.inkLevels); R.semiManualSettleMs = Math.round(R.semiManualSettleMs);
+  R.semiManual = !!R.semiManual;
+  if (typeof R.wordFixes !== 'object' || !R.wordFixes) R.wordFixes = {};
+  return R;
+}
+
+/* ───────────────────────── 5. OCR: модели в браузере ───────────────────────── */
+const OCR = {
+  det: null, rec: null, dict: null, ready: false,
+  async loadModels() {
+    const det = await DB.get('kv', 'model:det');
+    const rec = await DB.get('kv', 'model:rec');
+    const dict = await DB.get('kv', 'model:dict');
+    if (!det || !rec || !dict) { this.ready = false; return false; }
+    if (typeof ort === 'undefined') return false;
+    ort.env.wasm.numThreads = 1;                 // без COOP/COEP потоки не нужны
+    ort.env.wasm.simd = true;
+    ort.env.logLevel = 'error';
+    this.det = await ort.InferenceSession.create(det.v, { executionProviders: ['wasm'] });
+    this.rec = await ort.InferenceSession.create(rec.v, { executionProviders: ['wasm'] });
+    const lines = String(dict.v).split('\n');
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
+    // Ровно как в KomaOcrEngine: blank(0) + символы словаря + пробел.
+    this.dict = [''].concat(lines).concat([' ']);
+    this.ready = true;
+    return true;
+  },
+};
+
+/* ── порог «чернил»: перцентили 2%/98% и коэффициент (KomaOcrEngine.inkThreshold) ── */
+function inkThreshold(luma, R) {
+  if (!luma.length) return -1;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < luma.length; i++) hist[luma[i] | 0]++;
+  const pct = (p) => {
+    const target = Math.max(1, Math.floor(luma.length * p));
+    let acc = 0;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= target) return i; }
+    return 255;
+  };
+  const low = pct(R.inkLowPercentile), high = pct(R.inkHighPercentile);
+  if (high - low < R.inkFlatSpread) return -1;
+  return clamp(Math.round(low + (high - low) * R.inkCoefficient), R.inkMin, R.inkMax);
+}
+/* ── второй уровень «чернил»: серый горб между фоном и тёмным текстом ── */
+function greyInkRange(luma, R) {
+  if (luma.length < 64) return null;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < luma.length; i++) hist[luma[i] | 0]++;
+  const pct = (p) => {
+    const target = Math.max(1, Math.floor(luma.length * p));
+    let acc = 0;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= target) return i; }
+    return 255;
+  };
+  const low = pct(R.inkLowPercentile), high = pct(R.inkHighPercentile);
+  const spread = high - low;
+  if (spread < 24) return null;
+  const from = clamp(Math.floor(low + spread * 0.25), 0, 255);
+  const to = clamp(Math.floor(low + spread * 0.80), 0, 255);
+  let bestBin = -1, bestMass = 0;
+  for (let i = from; i <= to; i++) {
+    const mass = hist[Math.max(0, i - 1)] + hist[i] + hist[Math.min(255, i + 1)];
+    if (mass > bestMass) { bestMass = mass; bestBin = i; }
+  }
+  if (bestBin < 0 || bestMass < Math.max(3, Math.floor(luma.length / 500))) return null;
+  const lo = Math.max(low + 1, Math.floor(bestBin - spread * 0.10));
+  const hi = Math.min(high - 1, Math.floor(bestBin + spread * 0.18));
+  if (hi <= lo) return null;
+  return [lo, hi];
+}
+
+/* ── холст ── */
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h));
+  return c;
+}
+function canvasFromImage(img) {
+  const c = makeCanvas(img.naturalWidth || img.width, img.naturalHeight || img.height);
+  c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
+  return c;
+}
+function lumaFrom(data, w, h) {
+  const out = new Uint8Array(w * h);
+  for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+    out[i] = (data[p] * 77 + data[p + 1] * 151 + data[p + 2] * 28) >> 8;
+  }
+  return out;
+}
+
+/* ── детектор: боксы текстовых блоков (KomaOcrEngine.detectTile) ── */
+function detectBoxes(imgCanvas, side) {
+  const { width: w0, height: h0 } = imgCanvas;
+  const ratio = Math.min(1, side / Math.max(w0, h0));
+  const w = Math.max(32, Math.round((w0 * ratio) / 32) * 32);
+  const h = Math.max(32, Math.round((h0 * ratio) / 32) * 32);
+  const c = makeCanvas(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(imgCanvas, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const run = (normalize) => {
+    const data = new Float32Array(3 * w * h);
+    const mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
+    for (let ch = 0; ch < 3; ch++) {
+      const off = ch * w * h;
+      for (let i = 0; i < w * h; i++) {
+        const v = px[i * 4 + ch] / 255;
+        data[off + i] = normalize ? (v - mean[ch]) / std[ch] : v;
+      }
+    }
+    const t = new ort.Tensor('float32', data, [1, 3, h, w]);
+    const name = OCR.det.inputNames[0];
+    const out = OCR.det.run({ [name]: t });
+    const map = out[OCR.det.outputNames[0]].data;   // [1,1,h,w]
+    return components(map, h, w);
+  };
+  let boxes = run(false);
+  if (!boxes.length) boxes = run(true);
+  return boxes.slice(0, 400).map(b => ({
+    left: clamp(Math.round((b[0] / w) * w0), 0, w0 - 1),
+    top: clamp(Math.round((b[1] / h) * h0), 0, h0 - 1),
+    right: clamp(Math.round((b[2] / w) * w0), 1, w0),
+    bottom: clamp(Math.round((b[3] / h) * h0), 1, h0),
+  })).filter(b => b.right > b.left && b.bottom > b.top);
+}
+/* ── компоненты карты вероятностей (тот же BFS, порог 0.3) ── */
+function components(map, h, w) {
+  const visited = new Uint8Array(w * h);
+  const queue = new Int32Array(w * h);
+  const boxes = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (visited[idx] || map[idx] < 0.3) continue;
+      let start = 0, end = 1; queue[0] = idx; visited[idx] = 1;
+      let minX = x, maxX = x, minY = y, maxY = y, score = 0;
+      while (start < end) {
+        const n = queue[start++]; const xx = n % w, yy = (n - xx) / w;
+        score += map[n];
+        if (xx < minX) minX = xx; if (xx > maxX) maxX = xx;
+        if (yy < minY) minY = yy; if (yy > maxY) maxY = yy;
+        const nb = [xx > 0 ? n - 1 : -1, xx < w - 1 ? n + 1 : -1, yy > 0 ? n - w : -1, yy < h - 1 ? n + w : -1];
+        for (const ni of nb) {
+          if (ni >= 0 && !visited[ni] && map[ni] > 0.3) { visited[ni] = 1; queue[end++] = ni; }
+        }
+      }
+      if (end < 6 || score / end < 0.5 || maxX - minX < 2 || maxY - minY < 2) continue;
+      const expand = Math.max(2, Math.round(((maxX - minX) * (maxY - minY) * 1.5) / (2 * (maxX - minX + maxY - minY + 1))));
+      boxes.push([Math.max(0, minX - expand), Math.max(0, minY - expand),
+        Math.min(w, maxX + expand + 1), Math.min(h, maxY + expand + 1)]);
+    }
+  }
+  return boxes.sort((a, b) => a[1] - b[1]);
+}
+
+/* ── нарезка бокса на строки по профилю «чернил» (KomaOcrEngine.textLines) ── */
+function textLines(imgCanvas, box, R) {
+  const pad = Math.max(2, Math.floor((box.bottom - box.top) * 0.12));
+  const left = Math.max(0, box.left - pad), right = Math.min(imgCanvas.width, box.right + pad);
+  const top = Math.max(0, box.top - pad), bottom = Math.min(imgCanvas.height, box.bottom + pad);
+  if (right - left < 4 || bottom - top < 4) return [];
+  const scale = Math.min(1, 400 / (right - left));
+  const w = Math.max(4, Math.round((right - left) * scale));
+  const h = Math.max(4, Math.round((bottom - top) * scale));
+  const c = makeCanvas(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(imgCanvas, left, top, right - left, bottom - top, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const luma = lumaFrom(data, w, h);
+  if (inkThreshold(luma, R) < 0) return [];
+
+  // подблочные пороги: несколько шрифтов в одном боксе
+  const rows = clamp(Math.round(R.inkTileRows), 1, 16);
+  const tileH = Math.max(1, Math.ceil(h / rows));
+  const thr = new Array(rows);
+  for (let i = 0; i < rows; i++) {
+    const y0 = i * tileH, y1 = Math.min(h, y0 + tileH);
+    thr[i] = y1 <= y0 ? -1 : inkThreshold(luma.subarray(y0 * w, y1 * w), R);
+  }
+  const grey = R.inkLevels >= 2 ? greyInkRange(luma, R) : null;
+  const thrAt = (y) => thr[clamp(Math.floor(y / tileH), 0, rows - 1)];
+  const isInk = (y, x) => {
+    const l = luma[y * w + x];
+    if (l < thrAt(y)) return true;
+    return !!grey && l >= grey[0] && l <= grey[1];
+  };
+  const need = Math.max(1, Math.floor(w / 60));
+  const rowHasInk = (y) => {
+    let cnt = 0;
+    for (let x = 0; x < w; x++) if (isInk(y, x)) { if (++cnt >= need) return true; }
+    return false;
+  };
+  const runs = [];
+  let y = 0;
+  while (y < h) {
+    if (!rowHasInk(y)) { y++; continue; }
+    let end = y;
+    while (end < h && rowHasInk(end)) end++;
+    if (end > y) runs.push([y, end]);
+    y = Math.max(end, y + 1);
+  }
+  if (!runs.length) return [];
+  const heights = runs.map(r => r[1] - r[0]).sort((a, b) => a - b);
+  const median = Math.max(1, heights[heights.length >> 1]);
+  const merged = [];
+  for (const r of runs) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] - last[1] <= Math.max(1, Math.floor(median * 0.35))) last[1] = r[1];
+    else merged.push([r[0], r[1]]);
+  }
+  const lines = [];
+  for (const r of merged) {
+    if (r[1] - r[0] < Math.max(2, Math.floor(median * 0.4))) continue;
+    let x0 = w, x1 = -1;
+    for (let yy = r[0]; yy < r[1]; yy++) for (let xx = 0; xx < w; xx++) {
+      if (isInk(yy, xx)) { if (xx < x0) x0 = xx; if (xx > x1) x1 = xx; }
+    }
+    if (x1 < 0) continue;
+    lines.push({
+      left: clamp(Math.round(left + x0 / scale), left, right - 1),
+      top: clamp(Math.round(top + r[0] / scale), top, bottom - 1),
+      right: clamp(Math.round(left + (x1 + 1) / scale), left + 1, right),
+      bottom: clamp(Math.round(top + (r[1] + 1) / scale), top + 1, bottom),
+    });
+  }
+  return lines;
+}
+
+/* ── распознавание кропа (KomaOcrEngine.decode) ── */
+function decodeCrop(cropCanvas) {
+  let w0 = cropCanvas.width, h0 = cropCanvas.height;
+  if (w0 < 2 || h0 < 2) return ['', 0];
+  let src = cropCanvas;
+  if (h0 > w0 * 1.8) {                    // как в paddlePage: вертикальный кроп поворачиваем
+    const rot = makeCanvas(h0, w0);
+    const rc = rot.getContext('2d', { willReadFrequently: true });
+    rc.translate(rot.width / 2, rot.height / 2); rc.rotate(Math.PI / 2);
+    rc.drawImage(cropCanvas, -w0 / 2, -h0 / 2);
+    src = rot; w0 = rot.width; h0 = rot.height;
+  }
+  const width = clamp(Math.round((48 * w0) / h0), 8, 960);
+  const padded = Math.max(320, width);
+  const c = makeCanvas(padded, 48);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, width, 48);
+  const px = ctx.getImageData(0, 0, width, 48).data;
+  const norm = (ch) => px[0]; void norm;
+  const data = new Float32Array(3 * 48 * padded);
+  for (let ch = 0; ch < 3; ch++) {
+    const off = ch * 48 * padded;
+    for (let y = 0; y < 48; y++) for (let x = 0; x < width; x++) {
+      data[off + y * padded + x] = ((px[(y * width + x) * 4 + ch] / 255) - 0.5) / 0.5;
+    }
+  }
+  const t = new ort.Tensor('float32', data, [1, 3, 48, padded]);
+  const out = OCR.rec.run({ [OCR.rec.inputNames[0]]: t });
+  const logits = out[OCR.rec.outputNames[0]];    // [1,T,519]
+  const T = logits.dims[1], C = logits.dims[2], values = logits.data;
+  let text = '', prev = 0, score = 0, count = 0;
+  for (let ti = 0; ti < T; ti++) {
+    const base = ti * C;
+    let best = 0, bestV = values[base];
+    for (let ci = 1; ci < C; ci++) { const v = values[base + ci]; if (v > bestV) { bestV = v; best = ci; } }
+    if (best !== 0 && best !== prev) {
+      text += OCR.dict[best] ?? '';
+      score += bestV; count++;
+    }
+    prev = best;
+  }
+  return [text, count ? score / count : 0];
+}
+function binarizeCanvas(src, polarity, R) {
+  const w = src.width, h = src.height;
+  if (w < 2 || h < 2) return src;
+  const ctx = src.getContext('2d', { willReadFrequently: true });
+  const img = ctx.getImageData(0, 0, w, h);
+  const luma = lumaFrom(img.data, w, h);
+  let t = inkThreshold(luma, R);
+  if (t < 0) t = R.binarizeFallback;
+  for (let i = 0; i < luma.length; i++) {
+    const dark = luma[i] < t;
+    const v = polarity === 0 ? (dark ? 0 : 255) : (dark ? 255 : 0);
+    const p = i * 4;
+    img.data[p] = img.data[p + 1] = img.data[p + 2] = v; img.data[p + 3] = 255;
+  }
+  const out = makeCanvas(w, h);
+  out.getContext('2d').putImageData(img, 0, 0);
+  return out;
+}
+function decodeBetter(cropCanvas, R) {
+  const first = decodeCrop(cropCanvas);
+  const letters = (s) => (s.match(/\p{L}/gu) || []).length;
+  if (letters(first[0]) >= 3) return first;
+  let best = first;
+  for (const pol of [0, 1]) {
+    const att = decodeCrop(binarizeCanvas(cropCanvas, pol, R));
+    if (letters(att[0]) > letters(best[0])) best = att;
+  }
+  return best;
+}
+
+/* ── страница целиком: детектор → строки → распознавание ── */
+async function recognizePage(imgCanvas, R, onProgress) {
+  const t0 = performance.now();
+  const boxes = detectBoxes(imgCanvas, R.pageSide);
+  const regions = [];
+  let done = 0;
+  for (const box of boxes) {
+    const lines = textLines(imgCanvas, box, R);
+    for (const ln of lines) {
+      const c = makeCanvas(ln.right - ln.left, ln.bottom - ln.top);
+      c.getContext('2d', { willReadFrequently: true })
+        .drawImage(imgCanvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
+      const [text, conf] = decodeBetter(c, R);
+      if (text.trim() && conf > R.minConfidence) {
+        regions.push({
+          text,
+          left: ln.left / imgCanvas.width, top: ln.top / imgCanvas.height,
+          right: ln.right / imgCanvas.width, bottom: ln.bottom / imgCanvas.height,
+          confidence: conf,
+        });
+      }
+    }
+    done++;
+    if (onProgress) onProgress(done, boxes.length);
+    await sleep(0);      // не блокируем кадр
+  }
+  return { regions, boxes: boxes.length, ms: Math.round(performance.now() - t0) };
+}
+
+/* ───────────────────────── 6. Порядок чтения ───────────────────────── */
+const isCyr = (t) => {
+  const all = (t.match(/\p{L}/gu) || []).length;
+  if (!all) return false;
+  const ru = (t.match(/[а-яёА-ЯЁ]/gi) || []).length;
+  return ru > 0 && ru * 2 >= all;
+};
+/* Правки слов из правил: до словаря, без учёта регистра, регистр сохраняем. */
+function applyWordFixes(text, fixes) {
+  const keys = Object.keys(fixes || {});
+  if (!keys.length) return text;
+  const low = {}; keys.forEach(k => low[k.toLowerCase()] = fixes[k]);
+  return text.replace(/[\p{L}\p{N}]+/gu, (word) => {
+    const rep = low[word.toLowerCase()];
+    if (!rep) return word;
+    if (word === word.toUpperCase()) return rep.toUpperCase();
+    if (/^\p{Lu}/u.test(word)) return rep.charAt(0).toUpperCase() + rep.slice(1);
+    return rep;
+  });
+}
+/* облачка: склейка строк одной высоты (bubbleGap + mergeHeightRatio) */
+function bubblesOf(group, rtl, R) {
+  const bubbleGap = R.bubbleGap;
+  if (!group.length) return [];
+  const sorted = group.slice().sort((a, b) => a.top - b.top || a.left - b.left);
+  const blocks = [];
+  for (const rg of sorted) {
+    let target = null, bestGap = Infinity;
+    for (const block of blocks) {
+      const head = block[block.length - 1];
+      const lineHeight = Math.max(head.bottom - head.top, 0.01);
+      const overlap = Math.min(head.bottom, rg.bottom) - Math.max(head.top, rg.top);
+      if (overlap <= lineHeight * 0.35) continue;
+      const blockLeft = Math.min(...block.map(r => r.left));
+      const blockRight = Math.max(...block.map(r => r.right));
+      const gap = rg.left > blockRight ? rg.left - blockRight : (rg.right < blockLeft ? blockLeft - rg.right : 0);
+      const rh = Math.max(rg.bottom - rg.top, 0.01);
+      if (Math.max(lineHeight, rh) / Math.min(lineHeight, rh) > R.mergeHeightRatio) continue;
+      const shortHead = (head.text.match(/[\p{L}\p{N}]/gu) || []).length <= 3;
+      const shortRg = (rg.text.match(/[\p{L}\p{N}]/gu) || []).length <= 3;
+      const limit = (shortHead && shortRg && overlap >= lineHeight * 0.7) ? lineHeight * 2.5 : lineHeight * R.bubbleGap;
+      if (gap > limit) continue;
+      if (gap < -lineHeight * 0.9) continue;
+      if (gap < bestGap) { bestGap = gap; target = block; }
+    }
+    if (target) target.push(rg); else blocks.push([rg]);
+  }
+  const lines = blocks.map(block => {
+    const ordered = block.slice().sort((a, b) => rtl ? b.left - a.left : a.left - b.left);
+    const text = ordered.map(r => r.text.trim()).filter(Boolean).join(' ');
+    return {
+      text,
+      left: Math.min(...block.map(r => r.left)), top: Math.min(...block.map(r => r.top)),
+      right: Math.max(...block.map(r => r.right)), bottom: Math.max(...block.map(r => r.bottom)),
+    };
+  });
+  // Строки одного облачка — в ОДНУ реплику, обрывки — в соседнюю (как в АПК:
+  // mergeBubbles + absorbOrphans).
+  return orderBubbles(absorbOrphans(mergeBubbles(lines, bubbleGap, R.mergeHeightRatio)), rtl);
+}
+
+/* Склейка переноса: дефис/тире — без пробела. */
+function joinBubbleText(a, b) {
+  const left = String(a || '').trim(), right = String(b || '').trim();
+  if (!left) return right;
+  if (!right) return left;
+  const last = left[left.length - 1];
+  return ('-\u2010\u2011\u2013\u2014\u2015'.includes(last)) ? left.slice(0, -1) + right : left + ' ' + right;
+}
+/* Строки внутри одного облачка: перекрытие по ширине, центры рядом, зазор мал. */
+function sameBubble(a, b, bubbleGap, mergeHeightRatio) {
+  const aW = a.right - a.left, bW = b.right - b.left;
+  const aH = a.bottom - a.top, bH = b.bottom - b.top;
+  if (aW <= 0 || bW <= 0 || aH <= 0 || bH <= 0) return false;
+  const overlap = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  if (overlap <= 0) return false;
+  if (overlap / Math.min(aW, bW) < 0.30) return false;
+  const centerShift = Math.abs((a.left + a.right) / 2 - (b.left + b.right) / 2);
+  if (centerShift > Math.max(aW, bW) * 0.8) return false;
+  const gap = b.top - a.bottom;
+  if (gap < -aH * 0.6 || gap > Math.max(aH, bH) * Math.max(1.2, bubbleGap)) return false;
+  if (aH > aW * 3 || bH > bW * 3) return false;   // вертикальные колонки — не строки
+  // Крупное название и мелкие титры — РАЗНЫЕ реплики: иначе рамка рисуется по
+  // объединению двух шрифтов и не совпадает с тем, что читается.
+  if (Math.max(aH, bH) / Math.min(aH, bH) > mergeHeightRatio) return false;
+  return true;
+}
+function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
+  if (lines.length <= 1) return lines;
+  const sorted = lines.slice().sort((a, b) => a.top - b.top || a.left - b.left);
+  const result = [];
+  for (const line of sorted) {
+    let bestIndex = -1, bestGap = Infinity;
+    for (let i = 0; i < result.length; i++) {
+      if (!sameBubble(result[i], line, bubbleGap, mergeHeightRatio)) continue;
+      const gap = line.top - result[i].bottom;
+      if (gap < bestGap) { bestGap = gap; bestIndex = i; }
+    }
+    if (bestIndex >= 0) {
+      const b = result[bestIndex];
+      result[bestIndex] = {
+        text: joinBubbleText(b.text, line.text),
+        left: Math.min(b.left, line.left), top: Math.min(b.top, line.top),
+        right: Math.max(b.right, line.right), bottom: Math.max(b.bottom, line.bottom),
+      };
+    } else result.push(line);
+  }
+  return result;
+}
+/* Обрывок в 1-3 буквы внутри чужой рамки — часть её слова. */
+function absorbOrphans(bubbles) {
+  if (bubbles.length <= 1) return bubbles;
+  const alive = bubbles.slice();
+  for (let pass = 0; pass < 4; pass++) {
+    let merged = false;
+    for (const orphan of alive.slice()) {
+      if ((orphan.text.match(/[\p{L}\p{N}]/gu) || []).length > 3) continue;
+      const cx = (orphan.left + orphan.right) / 2, cy = (orphan.top + orphan.bottom) / 2;
+      let targetIndex = -1, bestDistance = Infinity;
+      for (let i = 0; i < alive.length; i++) {
+        const b = alive[i];
+        if (b === orphan) continue;
+        const padX = (b.right - b.left) * 0.12, padY = (b.bottom - b.top) * 0.35;
+        if (cx < b.left - padX || cx > b.right + padX) continue;
+        if (cy < b.top - padY || cy > b.bottom + padY) continue;
+        const d = Math.abs(cy - (b.top + b.bottom) / 2);
+        if (d < bestDistance) { bestDistance = d; targetIndex = i; }
+      }
+      if (targetIndex < 0) continue;
+      const b = alive[targetIndex];
+      {   // разная высота — разные реплики, обрывок не втягиваем
+        const oh = orphan.bottom - orphan.top, bh = b.bottom - b.top;
+        if (oh > 0 && bh > 0 && Math.max(oh, bh) / Math.min(oh, bh) > 2.5) continue;
+      }
+      const above = cy < (b.top + b.bottom) / 2;
+      alive[targetIndex] = {
+        text: above ? joinBubbleText(orphan.text, b.text) : joinBubbleText(b.text, orphan.text),
+        left: Math.min(b.left, orphan.left), top: Math.min(b.top, orphan.top),
+        right: Math.max(b.right, orphan.right), bottom: Math.max(b.bottom, orphan.bottom),
+      };
+      const idx = alive.indexOf(orphan);
+      if (idx >= 0) alive.splice(idx, 1);
+      merged = true;
+      break;
+    }
+    if (!merged) break;
+  }
+  return alive;
+}
+/* Полосы сверху вниз, внутри полосы — по направлению чтения. */
+function orderBubbles(bubbles, rtl) {
+  if (bubbles.length <= 1) return bubbles;
+  const heights = bubbles.map(b => b.bottom - b.top).sort((a, b) => a - b);
+  const median = heights[heights.length >> 1];
+  const tolerance = Math.max(0.02, median * 0.8);
+  const bands = [];
+  let bandTop = 0;
+  for (const b of bubbles.slice().sort((x, y) => x.top - y.top)) {
+    if (bands.length && b.top - bandTop <= tolerance) bands[bands.length - 1].push(b);
+    else { bands.push([b]); bandTop = b.top; }
+  }
+  // rtl: правые реплики первыми (по убыванию left), ltr: по возрастанию.
+  return bands.flatMap(band => band.sort((x, y) => rtl ? y.left - x.left : x.left - y.left));
+}
+/* панели: горизонтальные «желоба» между кадрами (упрощённый KomaPanels) */
+function splitPanels(regions) {
+  if (regions.length < 3) return [regions];
+  const sorted = regions.slice().sort((a, b) => a.top - b.top);
+  const panels = [];
+  let cur = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = cur[cur.length - 1], rg = sorted[i];
+    const gap = rg.top - prev.bottom;
+    const h = Math.max(prev.bottom - prev.top, 0.01);
+    if (gap > h * 1.2 && cur.length >= 2) { panels.push(cur); cur = [rg]; }
+    else cur.push(rg);
+  }
+  panels.push(cur);
+  return panels;
+}
+function readingOrder(regions, rtl, onlyCyr, R) {
+  let source = regions
+    .filter(r => r.text && /[\p{L}\p{N}]/u.test(r.text))
+    .map(r => ({ ...r, text: applyWordFixes(r.text, R.wordFixes) }))
+    .filter(r => !onlyCyr || isCyr(r.text));
+  if (!source.length) return [];
+  return splitPanels(source).flatMap(p => bubblesOf(p, rtl, R)).filter(l => (l.text.match(/\p{L}/gu) || []).length >= 2);
+}
+
+/* ───────────────────────── 7. Полосы экрана (KomaBands) ───────────────────────── */
+function bandsOf(viewportFraction, R) {
+  const whole = R.wholeThreshold, overlap = R.bandOverlap, max = Math.round(R.bandsMax);
+  if (!viewportFraction || viewportFraction <= 0 || viewportFraction >= whole) {
+    return [{ index: 0, top: 0, bottom: 1, whole: true }];
+  }
+  const visible = clamp(viewportFraction, 0.12, whole);
+  const bands = [];
+  let top = 0, idx = 0;
+  while (idx < max) {
+    const bottom = Math.min(1, top + visible);
+    bands.push({ index: idx, top, bottom, whole: false });
+    if (bottom >= 0.999) break;
+    top = Math.max(0.0001, bottom - visible * overlap);
+    idx++;
+  }
+  const last = bands[bands.length - 1];
+  if (last && last.bottom < 0.999) last.bottom = 1;
+  return bands;
+}
+function cutAtBandBottom(line, band, cutMargin) {
+  if (band.whole) return false;
+  if (band.bottom <= line.bottom - 0.001) return false;
+  if (line.bottom < band.bottom - cutMargin) return false;
+  const t = line.text.trimEnd();
+  if (!t) return false;
+  return !/[.!?…"»)]$/.test(t);
+}
+
+/* ───────────────────────── 8. Читалка ───────────────────────── */
+const Reader = {
+  book: null, pages: [], urls: [], canvases: [], imgEls: [],
+  mode: 'vertical', page: 0, frames: false, follow: true,
+  regions: new Map(),          // page → {regions, boxes, ms}
+  spoken: new Set(),
+  current: null,
+  scrollBusy: false,
+
+  async open(book) {
+    this.book = book;
+    this.pages = await Library.pages(book.id);
+    if (!this.pages.length) return toast('В книге нет страниц');
+    this.mode = book.mode || 'vertical';
+    this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
+    this.regions.clear(); this.spoken.clear();
+    $('#rTitle').textContent = book.title;
+    $('#pageTotal').textContent = String(this.pages.length);
+    show('reader');
+    this.syncSub();
+    await this.buildStrip();
+    this.scrollToPage(this.page, false);
+  },
+
+  syncSub() {
+    const modeText = this.mode === 'vertical' ? 'Вертикально' : this.mode === 'rtl' ? 'Справа налево' : 'Слева направо';
+    $('#rSub').textContent = `KOMA · веб · ${this.page + 1} из ${this.pages.length} · ${modeText}`;
+    $('#pageNum').textContent = String(this.page + 1);
+  },
+
+  async buildStrip() {
+    const strip = $('#strip');
+    strip.innerHTML = '';
+    this.urls.forEach(u => URL.revokeObjectURL(u));
+    this.urls = []; this.imgEls = []; this.canvases = [];
+    strip.style.display = this.mode === 'vertical' ? 'block' : 'none';
+    $('#paged').classList.toggle('on', this.mode !== 'vertical');
+    if (this.mode === 'vertical') {
+      for (let i = 0; i < this.pages.length; i++) {
+        const wrap = document.createElement('div');
+        wrap.className = 'pagewrap'; wrap.dataset.page = i;
+        const img = document.createElement('img');
+        img.alt = 'Страница ' + (i + 1);
+        img.decoding = 'async';
+        img.onload = () => { this.onPageSized(i); };
+        wrap.appendChild(img);
+        const frames = document.createElement('div');
+        frames.className = 'frames'; frames.dataset.frames = i;
+        wrap.appendChild(frames);
+        strip.appendChild(wrap);
+        this.imgEls[i] = img;
+        this.paintPage(i);
+      }
+    } else {
+      const paged = $('#paged');
+      paged.innerHTML = '';
+      for (let i = 0; i < this.pages.length; i++) {
+        const box = document.createElement('div');
+        box.className = 'pagebox'; box.dataset.page = i;
+        box.innerHTML = '<div class="inner"><img alt="Страница ' + (i + 1) + '"></div>';
+        paged.appendChild(box);
+        this.imgEls[i] = box.querySelector('img');
+        this.imgEls[i].onload = () => this.onPageSized(i);
+      }
+    }
+    // грузим страницы лениво: сначала текущую и соседние
+    for (const i of this.loadOrder()) this.ensureLoaded(i);
+  },
+
+  loadOrder() {
+    const out = [];
+    for (let d = 0; d <= this.pages.length; d++) {
+      for (const i of [this.page - d, this.page + d]) {
+        if (i >= 0 && i < this.pages.length && !out.includes(i)) out.push(i);
+      }
+      if (out.length > 6) break;
+    }
+    return out;
+  },
+
+  async ensureLoaded(i) {
+    const img = this.imgEls[i];
+    if (!img || img.dataset.src) return;
+    img.dataset.src = '1';
+    const row = this.pages[i];
+    const blob = (await DB.get('pages', row.key))?.blob;
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    this.urls[i] = url;
+    img.src = url;
+  },
+
+  async onPageSized(i) {
+    const img = this.imgEls[i];
+    if (!img || !img.naturalWidth) return;
+    if (!this.canvases[i]) {
+      // рабочий холст для OCR — один раз на страницу
+      this.canvases[i] = canvasFromImage(img);
+    }
+    this.paintPage(i);
+    if (i === this.page) this.afterPageReady();
+  },
+
+  paintPage(i) {
+    const framesEl = this.mode === 'vertical'
+      ? document.querySelector(`[data-frames="${i}"]`)
+      : null;
+    if (!framesEl) return;
+    framesEl.innerHTML = '';
+    if (!this.frames) return;
+    const data = this.regions.get(i);
+    if (!data) return;
+    for (const line of data.lines) {
+      const d = document.createElement('div');
+      d.className = 'frame';
+      d.style.left = (line.left * 100) + '%';
+      d.style.top = (line.top * 100) + '%';
+      d.style.width = ((line.right - line.left) * 100) + '%';
+      d.style.height = ((line.bottom - line.top) * 100) + '%';
+      const isCur = this.current && this.current.text === line.text;
+      const isDone = this.spoken.has(line.text);
+      if (isCur) d.classList.add('cur');
+      else if (isDone) d.classList.add('done');
+      d.onclick = () => TTS.speakLine(line);
+      framesEl.appendChild(d);
+    }
+  },
+
+  paintAllFrames() {
+    for (let i = 0; i < this.pages.length; i++) this.paintPage(i);
+  },
+
+  afterPageReady() {
+    const i = this.page;
+    const c = this.canvases[i];
+    if (!c) return;
+    // Видимая доля страницы: полосы (как KomaBands в АПК)
+    const rect = this.pageRect(i);
+    const vp = window.innerHeight - 0;
+    const frac = rect && rect.height > 0 ? clamp(vp / rect.height, 0.12, 1) : 1;
+    this.bands = bandsOf(frac, RULES);
+    this.band = this.bands[clamp(this.bandIndex || 0, 0, this.bands.length - 1)];
+    this.syncSub();
+    if (RULES.semiManual && State.semi) return;         // ждём остановки и прокрутки
+    if (!this.scrollBusy && !this.regions.get(i)) this.scanCurrent(false);
+  },
+
+  pageRect(i) {
+    const img = this.imgEls[i];
+    if (!img) return null;
+    return img.getBoundingClientRect();
+  },
+
+  scrollToPage(i, animate = true) {
+    const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`) || document.querySelector(`.pagebox[data-page="${i}"]`);
+    if (!wrap) return;
+    wrap.scrollIntoView({ block: 'start', behavior: animate ? 'smooth' : 'auto' });
+    this.page = i;
+    this.syncSub();
+    this.ensureLoaded(i);
+    this.ensureLoaded(i + 1);
+    this.saveProgress();
+  },
+
+  saveProgress() {
+    if (!this.book) return;
+    this.book.progress = this.page;
+    this.book.mode = this.mode;
+    DB.put('books', this.book);
+  },
+
+  async scanCurrent(force = true) {
+    const i = this.page;
+    const c = this.canvases[i];
+    if (!c) return toast('Страница ещё не загрузилась');
+    if (!OCR.ready) { openSheet('sheetModels'); return toast('Сначала добавьте модели OCR (⚙)'); }
+    if (State.scanning) return;
+    State.scanning = true;
+    $('#scanBadge').classList.add('on');
+    $('#scanBadge').textContent = 'Распознаём…';
+    try {
+      const res = await recognizePage(c, RULES, (done, total) => {
+        $('#scanBadge').textContent = `Распознаём… ${done}/${total}`;
+      });
+      const rtl = this.mode === 'rtl';
+      const lines = readingOrder(res.regions, rtl, true, RULES);
+      this.regions.set(i, { ...res, lines });
+      Buffer.put(i, lines);
+      this.paintPage(i);
+      toast(`Страница ${i + 1}: ${lines.length} реплик · ${res.ms} мс`);
+      const sheet = $('#sheetText');
+      if (sheet.classList.contains('on')) renderTextSheet(i);
+    } catch (e) {
+      console.error(e);
+      toast('Ошибка распознавания: ' + (e.message || e));
+    } finally {
+      State.scanning = false;
+      $('#scanBadge').classList.remove('on');
+    }
+  },
+
+  /* Реплики текущей полосы — то, что читается */
+  visibleLines() {
+    const data = this.regions.get(this.page);
+    if (!data) return [];
+    if (!this.band || this.band.whole) return data.lines;
+    const b = this.band;
+    return data.lines.filter(l => l.bottom > b.top && l.top < b.bottom);
+  },
+};
+
+/* ───────────────────────── 9. Буфер строк ───────────────────────── */
+const Buffer = {
+  async put(page, lines) {
+    const key = 'buf:' + Reader.book.id + ':' + page;
+    await DB.put('kv', { k: key, v: { page, at: Date.now(), rules: RULES.version, lines } });
+  },
+  async get(page) {
+    return (await DB.get('kv', 'buf:' + Reader.book.id + ':' + page))?.v || null;
+  },
+  async all() {
+    const rows = (await DB.all('kv') || []).filter(r => r.k.startsWith('buf:' + (Reader.book?.id || '')));
+    return rows.map(r => r.v).sort((a, b) => a.page - b.page);
+  },
+  async clear() {
+    const rows = (await DB.all('kv') || []).filter(r => r.k.startsWith('buf:' + (Reader.book?.id || '')));
+    for (const r of rows) await DB.del('kv', r.k);
+  },
+};
+
+/* ───────────────────────── 10. Озвучка ───────────────────────── */
+const TTS = {
+  voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0,
+  init() {
+    const fill = () => {
+      this.voices = speechSynthesis.getVoices().filter(v => /ru/i.test(v.lang)).concat(
+        speechSynthesis.getVoices().filter(v => !/ru/i.test(v.lang)));
+      const sel = $('#selVoice');
+      sel.innerHTML = this.voices.map((v, i) => `<option value="${i}">${escapeHtml(v.name)} (${v.lang})</option>`).join('');
+      const saved = localStorage.getItem('koma.voice');
+      if (saved && this.voices[+saved]) sel.value = saved;
+      this.voice = this.voices[+sel.value] || null;
+    };
+    fill();
+    speechSynthesis.onvoiceschanged = fill;
+    $('#selVoice').onchange = (e) => {
+      this.voice = this.voices[+e.target.value] || null;
+      localStorage.setItem('koma.voice', e.target.value);
+    };
+    const r = $('#rngRate');
+    r.value = +(localStorage.getItem('koma.rate') || (RULES.speechRate || 1));
+    this.rate = +r.value;
+    r.oninput = () => { this.rate = +r.value; localStorage.setItem('koma.rate', r.value); };
+  },
+  stop() {
+    this.stopped = true; this.speaking = false; this.queue = [];
+    speechSynthesis.cancel();
+    Reader.current = null;
+    Reader.paintAllFrames();
+    $('#playBar').style.display = 'none';
+    $('#btnRead').textContent = '▶';
+  },
+  speakLine(line, then) {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(line.text);
+    if (this.voice) u.voice = this.voice;
+    u.lang = this.voice?.lang || 'ru-RU';
+    u.rate = this.rate;
+    Reader.current = line;
+    Reader.paintAllFrames();
+    u.onend = () => { if (then) then(); };
+    speechSynthesis.speak(u);
+  },
+  async readVisible() {
+    const lines = Reader.visibleLines();
+    if (!lines.length) { toast('На этой полосе нет распознанного текста'); return; }
+    this.queue = lines.slice();
+    this.stopped = false; this.idx = 0;
+    $('#playBar').style.display = 'flex';
+    $('#btnRead').textContent = '⏸';
+    this.step();
+  },
+  step() {
+    if (this.stopped) return;
+    if (this.idx >= this.queue.length) {
+      this.onQueueEnd();
+      return;
+    }
+    const line = this.queue[this.idx++];
+    $('#playStatus').textContent = (RULES.semiManual && State.semi) ? 'ждём прокрутки' : '';
+    this.speakLine(line, () => { if (!this.stopped) this.step(); });
+  },
+  async onQueueEnd() {
+    Reader.current = null;
+    Reader.paintAllFrames();
+    if (!RULES.semiManual || !State.semi) {
+      // обычный режим: листаем дальше и читаем следующую страницу
+      if (Reader.page < Reader.pages.length - 1) {
+        Reader.scrollToPage(Reader.page + 1);
+        await sleep(350);
+        Reader.scanCurrent(false).then(() => { if (!this.stopped) this.readVisible(); });
+      } else { this.stop(); toast('Конец книги'); }
+      return;
+    }
+    // полуручной: встали и ждём прокрутки
+    State.waitingScroll = true;
+    $('#playBar').style.display = 'flex';
+    $('#playStatus').textContent = 'ждём прокрутки';
+    showArrow();
+  },
+};
+
+/* ───────────────────────── 11. Состояние и интерфейс ───────────────────────── */
+const State = { scanning: false, semi: false, waitingScroll: false, autoScroll: true };
+
+function show(id) {
+  $$('.screen').forEach(s => s.classList.toggle('on', s.id === id));
+}
+function openSheet(id) {
+  $$('.sheet').forEach(s => s.classList.toggle('on', s.id === id));
+}
+function closeSheets() { $$('.sheet').forEach(s => s.classList.remove('on')); }
+
+function showArrow() {
+  const a = $('#nextArrow');
+  a.className = 'nextArrow ' + (Reader.mode === 'vertical' ? 'down' : Reader.mode === 'rtl' ? 'left' : 'right');
+  a.textContent = Reader.mode === 'vertical' ? '▼ Прокрутить' : Reader.mode === 'rtl' ? '◀ Прокрутить' : '▶ Прокрутить';
+  a.style.display = 'flex';
+}
+function hideArrow() { $('#nextArrow').style.display = 'none'; }
+
+function renderTextSheet(i) {
+  const data = Reader.regions.get(i);
+  $('#textTitle').textContent = `Текст страницы ${i + 1}`;
+  if (!data) { $('#textStats').textContent = 'Страница ещё не распознана'; $('#textOrdered').innerHTML = ''; $('#textRaw').textContent = ''; return; }
+  $('#textStats').textContent = `${data.regions.length} строк · ${data.boxes} блоков · ${data.ms} мс`;
+  $('#textOrdered').innerHTML = data.lines.length
+    ? data.lines.map((l, n) => `<div class="lineitem"><b>${n + 1}</b>${escapeHtml(l.text)}</div>`).join('')
+    : '<div class="hint">Реплик не найдено</div>';
+  $('#textRaw').textContent = data.regions.map(r => r.text).join('\n');
+}
+async function renderBufferSheet() {
+  const items = await Buffer.all();
+  const total = items.reduce((a, b) => a + b.lines.length, 0);
+  $('#bufferInfo').textContent = `Страниц в буфере: ${items.length} · строк: ${total}`;
+  $('#bufferList').innerHTML = items.map(p => p.lines.map(l =>
+    `<div class="lineitem"><b>${p.page + 1}</b>${escapeHtml(l.text)}</div>`).join('')).join('');
+}
+function renderRulesInfo() {
+  $('#rulesVer').textContent = `Версия: ${RULES.version}`+
+    (RULES.wordFixes && Object.keys(RULES.wordFixes).length ? ` · правок слов: ${Object.keys(RULES.wordFixes).length}` : '');
+  $('#wordFixesBox').value = JSON.stringify(RULES.wordFixes || {}, null, 2);
+}
+
+/* ─── модели ─── */
+async function renderModels() {
+  const det = await DB.get('kv', 'model:det');
+  const rec = await DB.get('kv', 'model:rec');
+  const dict = await DB.get('kv', 'model:dict');
+  const f = (x, n) => x ? `${n}: ${(x.v.byteLength / 1048576).toFixed(1)} МБ` : `${n}: нет`;
+  $('#modelsState').innerHTML = [f(det, 'detection.onnx'), f(rec, 'cyrillic.onnx'),
+    dict ? `cyrillic.txt: ${String(dict.v).split('\n').filter(Boolean).length} символов` : 'cyrillic.txt: нет'].join('<br>');
+  $('#ortState').textContent = (typeof ort === 'undefined')
+    ? 'onnxruntime-web не загрузился (нет сети?). Откройте файл на устройстве с интернетом.'
+    : (OCR.ready ? 'движок готов: ' + (OCR.det.inputNames[0]) : 'движок загружен, моделей нет');
+}
+async function pickModels() {
+  const inp = $('#filePick');
+  inp.accept = '.onnx,.txt';
+  inp.onchange = async () => {
+    const files = Array.from(inp.files || []);
+    inp.value = '';
+    if (!files.length) return;
+    const has = (n) => files.some(f => f.name.toLowerCase() === n);
+    if (!has('detection.onnx') || !has('cyrillic.onnx') || !has('cyrillic.txt')) {
+      if (files.length < 3) return toast('Выберите три файла: detection.onnx, cyrillic.onnx, cyrillic.txt');
+    }
+    for (const f of files) {
+      const n = f.name.toLowerCase();
+      if (n === 'detection.onnx') await DB.put('kv', { k: 'model:det', v: await f.arrayBuffer() });
+      else if (n === 'cyrillic.onnx') await DB.put('kv', { k: 'model:rec', v: await f.arrayBuffer() });
+      else if (n === 'cyrillic.txt') await DB.put('kv', { k: 'model:dict', v: await f.text() });
+    }
+    toast('Модели сохранены, загружаю движок…', 4000);
+    const ok = await OCR.loadModels().catch(e => { toast('Модели не загрузились: ' + e.message); return false; });
+    await renderModels();
+    if (ok) toast('Готово: можно распознавать');
+  };
+  inp.click();
+}
+
+/* ─── прокрутка: ждём остановки ─── */
+function watchScroll() {
+  const strip = $('#strip');
+  let t = null;
+  const busy = () => {
+    Reader.scrollBusy = true;
+    clearTimeout(t);
+    t = setTimeout(async () => {
+      Reader.scrollBusy = false;
+      onScrollSettled();
+    }, Math.max(120, RULES.semiManualSettleMs));
+  };
+  strip.addEventListener('scroll', () => {
+    busy();
+    // определяем текущую страницу и полосу
+    const vh = window.innerHeight;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < Reader.pages.length; i++) {
+      const r = Reader.pageRect(i);
+      if (!r) continue;
+      const d = Math.abs(r.top - 0);
+      if (r.bottom > 0 && r.top < vh && d < bestD) { bestD = d; best = i; }
+    }
+    if (best !== Reader.page) {
+      Reader.page = best;
+      Reader.ensureLoaded(best); Reader.ensureLoaded(best + 1);
+      Reader.afterPageReady();
+      Reader.saveProgress();
+    }
+  }, { passive: true });
+  $('#paged').addEventListener('scroll', (e) => {
+    if (e.target.classList?.contains('pagebox')) busy();
+  }, true);
+  $('#paged').addEventListener('touchmove', () => busy(), { passive: true });
+  document.addEventListener('keydown', (e) => {
+    if (!document.getElementById('reader').classList.contains('on')) return;
+    if (e.key === 'ArrowRight' || e.key === 'PageDown') turnPage(1);
+    if (e.key === 'ArrowLeft' || e.key === 'PageUp') turnPage(-1);
+  });
+}
+async function onScrollSettled() {
+  if (!$('#reader').classList.contains('on')) return;
+  const i = Reader.page;
+  await Reader.ensureLoaded(i);
+  if (!Reader.regions.get(i) && OCR.ready && !State.scanning) {
+    await Reader.scanCurrent(false);
+  }
+  if (RULES.semiManual && State.semi) {
+    if (State.waitingScroll) {
+      // человек прокрутил — читаем то, что видно
+      State.waitingScroll = false; hideArrow();
+      await sleep(RULES.semiManualSettleMs);
+      if (!Reader.scrollBusy) TTS.readVisible();
+    }
+  }
+}
+function turnPage(dir) {
+  const next = clamp(Reader.page + dir, 0, Reader.pages.length - 1);
+  if (Reader.mode === 'vertical') {
+    const wrap = document.querySelector(`.pagewrap[data-page="${next}"]`);
+    wrap?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else {
+    document.querySelectorAll('.pagebox').forEach(b => b.classList.toggle('on', +b.dataset.page === next));
+    Reader.page = next; Reader.syncSub(); Reader.ensureLoaded(next); Reader.afterPageReady(); Reader.saveProgress();
+  }
+}
+
+/* ───────────────────────── 12. Привязка событий ───────────────────────── */
+function bindUI() {
+  // библиотека
+  $('#btnImport').onclick = () => {
+    // Папка — нативный выбор каталога; на Android Chrome каталог не даёт,
+    // поэтому предлагаем ещё CBZ и отдельные страницы через тот же ＋.
+    const dirInput = $('#dirPick');
+    dirInput.onchange = async () => {
+      const files = Array.from(dirInput.files || []);
+      dirInput.value = '';
+      if (files.length) await importDir(files);
+    };
+    const anyInput = $('#filePick');
+    anyInput.accept = '.cbz,.zip,image/*';
+    anyInput.onchange = async () => {
+      const files = Array.from(anyInput.files || []);
+      anyInput.value = '';
+      if (!files.length) return;
+      const zips = files.filter(f => /\.(cbz|zip)$/i.test(f.name));
+      const imgs = files.filter(f => /\.(jpe?g|png|webp|avif|bmp|gif)$/i.test(f.name));
+      for (const z of zips) await importZip(z);
+      if (imgs.length) await importDir(imgs.map(f => ({ name: f.name, webkitRelativePath: f.name, blob: f })));
+    };
+    // Спрашиваем, что именно добавить
+    const what = confirm('Добавить папку с главой?\n\nOK — выбрать папку\nОтмена — выбрать CBZ/файлы');
+    (what ? dirInput : anyInput).click();
+  };
+  $('#btnModels').onclick = () => { openSheet('sheetModels'); renderModels(); };
+  $('#btnRulesLib').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
+  $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4').forEach(b => b.onclick = closeSheets);
+  $('#btnPickModels').onclick = pickModels;
+  $('#btnClearModels').onclick = async () => {
+    for (const k of ['model:det', 'model:rec', 'model:dict']) await DB.del('kv', k);
+    OCR.ready = false; OCR.det = OCR.rec = null;
+    await renderModels(); toast('Модели убраны');
+  };
+
+  // правила
+  $('#btnRulesImport').onclick = () => {
+    const inp = $('#filePick');
+    inp.accept = '.json,application/json';
+    inp.onchange = async () => {
+      const f = inp.files?.[0]; inp.value = '';
+      if (!f) return;
+      try {
+        RULES = sanitizeRules(JSON.parse(await f.text()));
+        await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
+        renderRulesInfo(); toast('Правила применены: ' + RULES.version);
+      } catch (e) { toast('Файл правил не разобрался: ' + e.message); }
+    };
+    inp.click();
+  };
+  $('#btnRulesExport').onclick = () => {
+    const blob = new Blob([JSON.stringify(RULES, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'koma-rules.json'; a.click();
+  };
+  $('#btnRulesReset').onclick = async () => {
+    RULES = sanitizeRules({ ...DEFAULT_RULES });
+    await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
+    renderRulesInfo(); toast('Встроенные правила');
+  };
+  $('#btnWordFixesSave').onclick = async () => {
+    try {
+      const obj = JSON.parse($('#wordFixesBox').value || '{}');
+      RULES.wordFixes = obj;
+      await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
+      toast('Правки слов сохранены: ' + Object.keys(obj).length);
+      // пересчитываем порядок из буфера, без нового OCR
+      const i = Reader.page;
+      const buf = await Buffer.get(i);
+      if (buf) {
+        const data = Reader.regions.get(i);
+        if (data) {
+          data.lines = readingOrder(data.regions, Reader.mode === 'rtl', true, RULES);
+          Reader.paintPage(i);
+          toast('Порядок пересчитан из буфера: ' + data.lines.length + ' реплик');
+        }
+      }
+    } catch (e) { toast('JSON правок не разобрался: ' + e.message); }
+  };
+  $('#btnBufferExport').onclick = async () => {
+    const items = await Buffer.all();
+    const text = items.map(p => `стр. ${p.page + 1} · r${p.rules}\n` +
+      p.lines.map(l => '  ' + l.text).join('\n')).join('\n\n') || 'Буфер пуст';
+    const blob = new Blob([text], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'koma-buffer.txt'; a.click();
+  };
+  $('#btnBufferClear').onclick = async () => { await Buffer.clear(); await renderBufferSheet(); toast('Буфер очищен'); };
+
+  // читалка
+  $('#btnBack').onclick = () => { TTS.stop(); show('library'); Library.load(); };
+  $('#btnScan').onclick = () => { openSheet('sheetText'); renderTextSheet(Reader.page); };
+  $('#btnOcr2').onclick = () => { openSheet('sheetText'); renderTextSheet(Reader.page); };
+  $('#btnSettings').onclick = () => { openSheet('sheetSettings'); syncSettingsUI(); };
+  $('#btnMore').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
+  $('#btnRescan').onclick = () => { closeSheets(); Reader.scanCurrent(true); };
+  $('#btnSpeakPage').onclick = () => { closeSheets(); Reader.scanCurrent(false).then(() => TTS.readVisible()); };
+  $('#btnFrames').onclick = () => {
+    Reader.frames = !Reader.frames;
+    $('#btnFrames').classList.toggle('hot', Reader.frames);
+    Reader.paintAllFrames();
+  };
+  $('#btnRead').onclick = () => {
+    if (TTS.stopped) {
+      Reader.scanCurrent(false).then(() => TTS.readVisible());
+    } else { TTS.stop(); }
+  };
+  $('#btnStop').onclick = () => TTS.stop();
+  $('#btnPause').onclick = () => {
+    if (speechSynthesis.speaking) { speechSynthesis.pause(); $('#btnPause').textContent = '▶'; }
+    else { speechSynthesis.resume(); $('#btnPause').textContent = '⏸'; }
+  };
+  $('#btnSkip').onclick = () => { speechSynthesis.cancel(); if (!TTS.stopped) TTS.step(); };
+  $('#nextArrow').onclick = async () => {
+    hideArrow();
+    const step = Math.round(window.innerHeight * 0.85);
+    $('#strip').scrollBy({ top: step, behavior: 'smooth' });
+    await sleep(300 + RULES.semiManualSettleMs);
+    if (!Reader.scrollBusy) TTS.readVisible();
+  };
+
+  // настройки чтения
+  $('#modeChips').onclick = (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    Reader.mode = chip.dataset.mode;
+    if (Reader.book) { Reader.book.mode = Reader.mode; DB.put('books', Reader.book); }
+    Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
+  };
+  $('#cbAuto').onchange = (e) => {
+    if (e.target.checked) Reader.scanCurrent(false).then(() => TTS.readVisible());
+    else TTS.stop();
+  };
+  $('#cbSemi').onchange = (e) => { State.semi = e.target.checked; RULES.semiManual = e.target.checked; };
+  $('#numSettle').onchange = async (e) => {
+    RULES.semiManualSettleMs = clamp(+e.target.value || 0, 0, 5000);
+    await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
+  };
+  $('#cbFrames').onchange = (e) => {
+    Reader.frames = e.target.checked;
+    $('#btnFrames').classList.toggle('hot', Reader.frames);
+    Reader.paintAllFrames();
+  };
+  $('#cbFollow').onchange = (e) => { Reader.follow = e.target.checked; };
+  $('#reader').addEventListener('click', (e) => {
+    if (e.target.closest('.frame') || e.target.closest('button') || e.target.closest('.bottombar')) return;
+    if (e.target.tagName === 'IMG') {
+      $('#readerBar').classList.toggle('hide');
+      $('#readerHeader').style.transform =
+        $('#readerBar').classList.contains('hide') ? 'translateY(-110%)' : 'translateY(0)';
+    }
+  });
+}
+function syncSettingsUI() {
+  $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
+  $('#cbSemi').checked = !!RULES.semiManual;
+  $('#cbFrames').checked = Reader.frames;
+  $('#cbFollow').checked = Reader.follow;
+  $('#numSettle').value = RULES.semiManualSettleMs;
+  $('#cbAuto').checked = !TTS.stopped;
+}
+
+/* ───────────────────────── 13. Старт ───────────────────────── */
+(async function boot() {
+  bindUI();
+  watchScroll();
+  TTS.init();
+  const saved = await DB.get('kv', 'rules');
+  if (saved) { try { RULES = sanitizeRules(JSON.parse(saved.v)); } catch (e) { console.warn(e); } }
+  await Library.load();
+  await renderModels();
+  const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
+  if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);
+  renderRulesInfo();
+  // предупреждение о среде
+  if (typeof ort === 'undefined') {
+    $('#ortState').textContent = 'onnxruntime-web не загрузился: нет сети или открыто в предпросмотре без интернета.';
+  }
+})();
+</script>
+</body>
+</html>
