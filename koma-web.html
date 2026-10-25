@@ -2191,7 +2191,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.1';
+const VERSION = 'v1.2';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2427,6 +2427,8 @@ const DEFAULT_RULES = {
   cutMargin: 0.06, bandOverlap: 0.15, bandsMax: 8, wholeThreshold: 0.72,
   bubbleGap: 0.45, mergeHeightRatio: 1.8,
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
+  detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
+  decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
   wordFixes: {},
 };
 let RULES = { ...DEFAULT_RULES };
@@ -2442,6 +2444,8 @@ function sanitizeRules(r) {
   num('bandsMax', 1, 32); num('wholeThreshold', .3, 1); num('bubbleGap', .05, 3);
   num('mergeHeightRatio', 1.05, 6); num('speechRate', 0, 3); num('autoScrollStep', .05, .9);
   num('semiManualSettleMs', 0, 5000);
+  R.detRetry = R.detRetry !== false;                       // повтор детектора при 0 боксов
+  num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   if (R.inkMax <= R.inkMin) R.inkMax = Math.min(255, R.inkMin + 1);
   R.inkTileRows = Math.round(R.inkTileRows); R.bandsMax = Math.round(R.bandsMax);
   R.inkLevels = Math.round(R.inkLevels); R.semiManualSettleMs = Math.round(R.semiManualSettleMs);
@@ -2595,7 +2599,7 @@ async function runModel(session, feeds, what) {
 }
 
 /* ── детектор: боксы текстовых блоков (KomaOcrEngine.detectTile) ── */
-async function detectBoxes(imgCanvas, side) {
+async function detectBoxes(imgCanvas, side, R) {
   const { width: w0, height: h0 } = imgCanvas;
   const ratio = Math.min(1, side / Math.max(w0, h0));
   const w = Math.max(32, Math.round((w0 * ratio) / 32) * 32);
@@ -2621,7 +2625,7 @@ async function detectBoxes(imgCanvas, side) {
     return components(tensor.data, h, w);           // карта [1,1,h,w]
   };
   let boxes = await run(false);
-  if (!boxes.length) boxes = await run(true);
+  if (!boxes.length && (!R || R.detRetry !== false)) boxes = await run(true);
   return boxes.slice(0, 400).map(b => ({
     left: clamp(Math.round((b[0] / w) * w0), 0, w0 - 1),
     top: clamp(Math.round((b[1] / h) * h0), 0, h0 - 1),
@@ -2797,7 +2801,10 @@ function binarizeCanvas(src, polarity, R) {
 async function decodeBetter(cropCanvas, R) {
   const first = await decodeCrop(cropCanvas);
   const letters = (s) => (s.match(/\p{L}/gu) || []).length;
-  if (letters(first[0]) >= 3) return first;
+  // Сколько прогонов делаем, решает правило: каждый повтор — ещё один проход
+  // модели, а на телефоне он стоит ~150 мс.
+  const need = Math.max(0, Math.round(R.decodeRetryBelow ?? 1));
+  if (need === 0 || letters(first[0]) >= need) return first;
   let best = first;
   for (const pol of [0, 1]) {
     const att = await decodeCrop(binarizeCanvas(cropCanvas, pol, R));
@@ -2809,7 +2816,10 @@ async function decodeBetter(cropCanvas, R) {
 /* ── страница целиком: детектор → строки → распознавание ── */
 async function recognizePage(imgCanvas, R, onProgress) {
   const t0 = performance.now();
-  const boxes = await detectBoxes(imgCanvas, R.pageSide);
+  const boxes = await detectBoxes(imgCanvas, R.pageSide, R);
+  const detMs = Math.round(performance.now() - t0);
+  const t1 = performance.now();
+  let crops = 0;
   const regions = [];
   let done = 0;
   for (const box of boxes) {
@@ -2818,6 +2828,7 @@ async function recognizePage(imgCanvas, R, onProgress) {
       const c = makeCanvas(ln.right - ln.left, ln.bottom - ln.top);
       c.getContext('2d', { willReadFrequently: true })
         .drawImage(imgCanvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
+      crops++;
       const [text, conf] = await decodeBetter(c, R);
       if (text.trim() && conf > R.minConfidence) {
         regions.push({
@@ -2832,7 +2843,11 @@ async function recognizePage(imgCanvas, R, onProgress) {
     if (onProgress) onProgress(done, boxes.length);
     await sleep(0);      // не блокируем кадр
   }
-  return { regions, boxes: boxes.length, ms: Math.round(performance.now() - t0) };
+  return {
+    regions, boxes: boxes.length,
+    ms: Math.round(performance.now() - t0),
+    detMs, recMs: Math.round(performance.now() - t1), crops,
+  };
 }
 
 /* ───────────────────────── 6. Порядок чтения ───────────────────────── */
@@ -3069,6 +3084,17 @@ const Reader = {
     this.mode = book.mode || 'vertical';
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear(); this.spoken.clear();
+    // Уже распознанные страницы берём из буфера: повторное открытие книги и
+    // повторное чтение не должны снова стоить 10 секунд на страницу.
+    try {
+      const buf = await Buffer.all();
+      for (const row of buf) {
+        if (row && Array.isArray(row.lines) && row.lines.length) {
+          this.regions.set(row.page, { lines: row.lines, regions: null, cached: true, ms: 0, detMs: 0, recMs: 0, crops: row.lines.length, boxes: 0 });
+        }
+      }
+      if (buf.length) toast('Из буфера: ' + buf.length + ' стр. уже распознаны', 3000);
+    } catch (e) { console.warn('буфер не прочитался', e); }
     $('#rTitle').textContent = book.title;
     $('#pageTotal').textContent = String(this.pages.length);
     show('reader');
@@ -3224,8 +3250,13 @@ const Reader = {
     DB.put('books', this.book);
   },
 
-  async scanCurrent(force = true) {
+  async scanCurrent(force = false) {
     const i = this.page;
+    // Кэш: страницу, которую уже распознали, второй раз не гоняем. 10 секунд на
+    // страницу — это дорого, и платить их заново при каждом включении чтения
+    // незачем. Повтор — только по кнопке (force).
+    const cached = this.regions.get(i);
+    if (cached && !force) { this.paintPage(i); return cached; }
     const c = this.canvases[i];
     if (!c) return toast('Страница ещё не загрузилась');
     if (!OCR.ready) { openSheet('sheetModels'); return toast('Сначала добавьте модели OCR (⚙)'); }
@@ -3242,9 +3273,13 @@ const Reader = {
       this.regions.set(i, { ...res, lines });
       Buffer.put(i, lines);
       this.paintPage(i);
-      toast(`Страница ${i + 1}: ${lines.length} реплик · ${res.ms} мс`);
+      // Разбивка по этапам: видно, что именно медленно — детектор или распознавание.
+      toast(`Страница ${i + 1}: ${lines.length} реплик · ${(res.ms / 1000).toFixed(1)} с`
+        + ` (детектор ${(res.detMs / 1000).toFixed(1)} с, распознавание ${(res.recMs / 1000).toFixed(1)} с`
+        + `, ${res.crops} строк)`, 6000);
       const sheet = $('#sheetText');
       if (sheet.classList.contains('on')) renderTextSheet(i);
+      return this.regions.get(i);
     } catch (e) {
       console.error(e);
       // Показываем не только текст ошибки, но и место: иначе «undefined (reading
@@ -3331,8 +3366,34 @@ const TTS = {
     speechSynthesis.speak(u);
   },
   async readVisible() {
+    // Если страница ещё не распознана — сначала распознать, потом читать.
+    // Раньше в этот момент вылезало «На этой полосе нет распознанного текста»
+    // прямо во время сканирования, хотя текст вот он.
+    const i = Reader.page;
+    if (!Reader.regions.get(i)) {
+      if (State.scanning) {
+        toast('Распознаю страницу, начну читать сразу после', 4000);
+        const wait = setInterval(() => {
+          if (!State.scanning) {
+            clearInterval(wait);
+            if (Reader.regions.get(i) && !this.stopped && !State.waitingScroll) this.readVisible();
+          }
+        }, 400);
+        return;
+      }
+      if (OCR.ready) {
+        toast('Сначала распознаю страницу…', 4000);
+        await Reader.scanCurrent(false);
+      }
+    }
     const lines = Reader.visibleLines();
-    if (!lines.length) { toast('На этой полосе нет распознанного текста'); return; }
+    if (!lines.length) {
+      if (Reader.scrollBusy) return toast('Лента едет — дочитаю, когда остановится', 3000);
+      const data = Reader.regions.get(i);
+      if (!data) { toast('Сначала нужно распознать страницу: ✨ Текст страницы', 4000); return; }
+      toast('На этой полосе нет распознанного текста — прокрутите к репликам', 4000);
+      return;
+    }
     this.queue = lines.slice();
     this.stopped = false; this.idx = 0;
     $('#playBar').style.display = 'flex';
@@ -3392,11 +3453,16 @@ function renderTextSheet(i) {
   const data = Reader.regions.get(i);
   $('#textTitle').textContent = `Текст страницы ${i + 1}`;
   if (!data) { $('#textStats').textContent = 'Страница ещё не распознана'; $('#textOrdered').innerHTML = ''; $('#textRaw').textContent = ''; return; }
-  $('#textStats').textContent = `${data.regions.length} строк · ${data.boxes} блоков · ${data.ms} мс`;
+  const raw = data.regions || [];
+  $('#textStats').textContent = data.cached
+    ? `${data.lines.length} реплик · из буфера (без повторного распознавания)`
+    : `${raw.length} строк · ${data.boxes} блоков · ${data.crops} кропов · `
+      + `итого ${(data.ms / 1000).toFixed(1)} с = детектор ${(data.detMs / 1000).toFixed(1)} с `
+      + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с`;
   $('#textOrdered').innerHTML = data.lines.length
     ? data.lines.map((l, n) => `<div class="lineitem"><b>${n + 1}</b>${escapeHtml(l.text)}</div>`).join('')
     : '<div class="hint">Реплик не найдено</div>';
-  $('#textRaw').textContent = data.regions.map(r => r.text).join('\n');
+  $('#textRaw').textContent = raw.map(r => r.text).join('\n') || '—';
 }
 async function renderBufferSheet() {
   const items = await Buffer.all();
