@@ -91,8 +91,10 @@
   .bottombar .grow{flex:1;min-width:0}
   .progressbar{height:5px;background:#3a4436;border-radius:3px;overflow:hidden;flex:1;margin:0 6px}
   .progressbar i{display:block;height:100%;background:var(--orange);width:0}
-  .floatbar{position:absolute;left:50%;transform:translateX(-50%);bottom:86px;display:flex;gap:6px;
-    background:#232822e6;border-radius:26px;padding:6px 8px;z-index:26;align-items:center}
+  .floatbar{position:absolute;left:50%;transform:translateX(-50%);bottom:70px;display:flex;gap:4px;
+    background:#232822d9;border-radius:26px;padding:4px 6px;z-index:26;align-items:center;
+    opacity:.92;box-shadow:0 6px 18px #0006}
+  .floatbar .icon{padding:5px 8px;font-size:15px}
   .nextArrow{position:absolute;z-index:27;background:#232822e6;border-radius:28px;padding:8px 13px;
     display:flex;align-items:center;gap:6px;font-size:12px;box-shadow:0 6px 20px #0008}
   .nextArrow.down{left:50%;transform:translateX(-50%);bottom:150px}
@@ -2237,7 +2239,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.1';
+const VERSION = 'v1.9.2';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3153,6 +3155,21 @@ async function decodeBetter(cropCanvas, R) {
 }
 
 /* ── страница целиком: детектор → строки → распознавание ── */
+/**
+ * Видна ли строка на экране. band.vy0…vy1 — это ровно экран, без запаса,
+ * который нужен был детектору. Строку, видимую хотя бы на 40 %, берём целиком
+ * (не рвём реплику), а облачко ниже экрана не берём вовсе — иначе в шторке
+ * появлялся «лишний» текст, которого на экране нет.
+ */
+function lineInBand(ln, band, y0) {
+  if (!band || band.vy0 == null || band.vy1 == null) return true;
+  const top = y0 + ln.top, bottom = y0 + ln.bottom;
+  const h = bottom - top;
+  if (h <= 0) return false;
+  const over = Math.min(bottom, band.vy1) - Math.max(top, band.vy0);
+  return over >= h * 0.4;
+}
+
 async function recognizePage(imgCanvas, R, onProgress, band) {
   const t0 = performance.now();
   // band = {y0, y1} в пикселях исходного кадра: распознаём ТОЛЬКО видимую
@@ -3168,6 +3185,7 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
       .drawImage(imgCanvas, 0, y0, imgCanvas.width, bandH, 0, 0, imgCanvas.width, bandH);
     src = c;
   }
+  const visible = (ln) => lineInBand(ln, band, y0);
   const boxes = await detectBoxes(src, R.pageSide, R);
   const detMs = Math.round(performance.now() - t0);
   const t1 = performance.now();
@@ -3180,6 +3198,7 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   for (const box of boxes) {
     const lines = textLines(src, box, R);
     for (const ln of lines) {
+      if (!visible(ln)) continue;
       const c = makeCanvas(ln.right - ln.left, ln.bottom - ln.top);
       c.getContext('2d', { willReadFrequently: true })
         .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
@@ -3715,8 +3734,10 @@ const Reader = {
     const viewH = scroller.clientHeight || window.innerHeight;
     const overlap = clamp(Number(RULES.bandOverlap) || 0.15, 0, 0.6);
     // Запас считаем от экрана, а не от страницы: у вебтуна в 20 000 px
-    // «15 % страницы» — это три лишних экрана.
-    const pad = Math.min(r.height * overlap, viewH * 0.3);
+    // «15 % страницы» — это три лишних экрана. И запас этот нужен ТОЛЬКО
+    // детектору (чтобы облачко на границе попало целиком) — в реплики идут
+    // строки, реально видимые на экране (vy0…vy1, без запаса).
+    const pad = Math.min(r.height * overlap, viewH * 0.25);
     // Экран в координатах страницы
     const topPx = (Math.max(sr.top, r.top) - r.top) + 0;      // видимое начало
     const botPx = (Math.min(sr.top + viewH, r.bottom) - r.top);
@@ -3725,7 +3746,12 @@ const Reader = {
     if (y1 - y0 < 32) return null;
     // Если видно (почти) всю страницу — полоса не нужна
     if (y1 - y0 >= c.height * 0.92) return null;
-    return { y0, y1, key: Math.round(y0 / 64) + ':' + Math.round(y1 / 64) };
+    const vy0 = clamp(topPx * scale, 0, c.height);
+    const vy1 = clamp(botPx * scale, 0, c.height);
+    return {
+      y0, y1, vy0, vy1,
+      key: Math.round(vy0 / 96) + ':' + Math.round(vy1 / 96),
+    };
   },
 
   pageAtViewport() {
@@ -3976,6 +4002,28 @@ const TTS = {
     $('#playBar').style.display = 'none';
     $('#btnRead').textContent = '▶';
   },
+  /**
+   * Держать читаемую реплику в «безопасной» полосе экрана: сверху шапка и
+   * бейдж распознавания, снизу панель проигрывания и нижняя панель. Раньше
+   * плеер стоял прямо на облачке — текст реплики был закрыт.
+   * Масштаб не меняем (правило), только прокручиваем ленту.
+   */
+  followLine(line) {
+    if (Reader.mode !== 'vertical' || !line) return;
+    const wrap = document.querySelector(`.pagewrap[data-page="${Reader.page}"]`);
+    const sc = $('#strip');
+    if (!wrap || !sc) return;
+    const r = wrap.getBoundingClientRect();
+    const sr = sc.getBoundingClientRect();
+    if (!r.height || !sr.height) return;
+    const top = r.top + line.top * r.height;
+    const bottom = r.top + line.bottom * r.height;
+    const safeTop = sr.top + 72;                        // шапка + бейдж
+    const safeBottom = sr.top + sr.height - 170;         // панель чтения + нижняя
+    if (top >= safeTop && bottom <= safeBottom) return;
+    const want = sr.top + sr.height * 0.3;               // реплику — в верхнюю треть
+    sc.scrollTo({ top: Math.max(0, sc.scrollTop + top - want), behavior: 'smooth' });
+  },
   speakLine(line, then) {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(line.text);
@@ -3984,6 +4032,7 @@ const TTS = {
     u.rate = this.rate;
     Reader.current = line;
     Reader.paintAllFrames();
+    this.followLine(line);
     u.onend = () => { if (then) then(); };
     speechSynthesis.speak(u);
   },
