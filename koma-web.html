@@ -307,7 +307,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v0.3';
+const VERSION = 'v0.4';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -1482,6 +1482,43 @@ async function renderModels() {
     ? 'onnxruntime-web не загрузился (нет сети?). Откройте файл на устройстве с интернетом.'
     : (OCR.ready ? 'движок готов: ' + (OCR.det.inputNames[0]) : 'движок загружен, моделей нет');
 }
+/**
+ * Принять любое количество выбранных файлов модели. Ключевое: шторку не
+ * закрываем, разбираем по именам, показываем, чего ещё не хватает.
+ */
+async function storeModelFiles(files) {
+  if (!files || !files.length) return;
+  const saved = [];
+  for (const f of files) {
+    const n = f.name.toLowerCase();
+    if (n === 'detection.onnx') { await DB.put('kv', { k: 'model:det', v: await f.arrayBuffer() }); saved.push('detection.onnx'); }
+    else if (n === 'cyrillic.onnx') { await DB.put('kv', { k: 'model:rec', v: await f.arrayBuffer() }); saved.push('cyrillic.onnx'); }
+    else if (n === 'cyrillic.txt') { await DB.put('kv', { k: 'model:dict', v: await f.text() }); saved.push('cyrillic.txt'); }
+  }
+  if (!saved.length) {
+    await renderModels();
+    toast('Нужны файлы detection.onnx, cyrillic.onnx, cyrillic.txt — по именам. Выбрано: '
+      + Array.from(files).map(f => f.name).join(', '), 6000);
+    return;
+  }
+  await renderModels();
+  const det = await DB.get('kv', 'model:det');
+  const rec = await DB.get('kv', 'model:rec');
+  const dict = await DB.get('kv', 'model:dict');
+  const missing = [!det && 'detection.onnx', !rec && 'cyrillic.onnx', !dict && 'cyrillic.txt'].filter(Boolean);
+  toast('Принято: ' + saved.join(', ') + (missing.length ? ' · ещё нужно: ' + missing.join(', ') : ''), 5000);
+  if (!missing.length) {
+    try {
+      const ok = await OCR.loadModels();
+      toast(ok ? 'Все три модели на месте, движок готов' : 'Модели сохранены, но движок не загрузился (нужна сеть для onnxruntime-web)', 5000);
+    } catch (e) {
+      toast('Движок не загрузился: ' + (e.message || e), 6000);
+    }
+    await renderModels();
+    if (typeof selfCheck === 'function') await selfCheck();
+  }
+}
+
 /* Совместимость: старый вход выбора моделей ведёт на общий разбор файлов,
    но НЕ через общий input библиотеки (из-за него выбор модели открывал читалку). */
 async function pickModels() {
