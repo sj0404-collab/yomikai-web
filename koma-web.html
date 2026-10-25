@@ -2191,7 +2191,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.0';
+const VERSION = 'v1.1';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2575,8 +2575,27 @@ function lumaFrom(data, w, h) {
   return out;
 }
 
+/* ── достать тензор из результата run() (объект, Map, или по порядку) ──
+   session.run() возвращает Promise, а внутри — либо простой объект, либо Map,
+   в зависимости от версии. Раньше здесь читался out[name].data сразу, и на
+   телефоне это давало «Cannot read properties of undefined (reading 'data')»:
+   run() в браузере асинхронный, а мои Node-заглушки были синхронными. */
+async function runModel(session, feeds, what) {
+  const res = await session.run(feeds);
+  const names = session.outputNames || [];
+  if (res && typeof res.get === 'function') {
+    if (names.length && res.get(names[0])) return res.get(names[0]);
+    const first = res.values().next();
+    return first.done ? null : first.value;
+  }
+  if (names.length && res[names[0]]) return res[names[0]];
+  const vals = Object.keys(res || {}).map(k => res[k]);
+  if (!vals.length) throw new Error((what || 'модель') + ' не вернула выходов');
+  return vals[0];
+}
+
 /* ── детектор: боксы текстовых блоков (KomaOcrEngine.detectTile) ── */
-function detectBoxes(imgCanvas, side) {
+async function detectBoxes(imgCanvas, side) {
   const { width: w0, height: h0 } = imgCanvas;
   const ratio = Math.min(1, side / Math.max(w0, h0));
   const w = Math.max(32, Math.round((w0 * ratio) / 32) * 32);
@@ -2586,7 +2605,7 @@ function detectBoxes(imgCanvas, side) {
   ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(imgCanvas, 0, 0, w, h);
   const px = ctx.getImageData(0, 0, w, h).data;
-  const run = (normalize) => {
+  const run = async (normalize) => {
     const data = new Float32Array(3 * w * h);
     const mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
     for (let ch = 0; ch < 3; ch++) {
@@ -2598,12 +2617,11 @@ function detectBoxes(imgCanvas, side) {
     }
     const t = new ort.Tensor('float32', data, [1, 3, h, w]);
     const name = OCR.det.inputNames[0];
-    const out = OCR.det.run({ [name]: t });
-    const map = out[OCR.det.outputNames[0]].data;   // [1,1,h,w]
-    return components(map, h, w);
+    const tensor = await runModel(OCR.det, { [name]: t }, 'детектор');
+    return components(tensor.data, h, w);           // карта [1,1,h,w]
   };
-  let boxes = run(false);
-  if (!boxes.length) boxes = run(true);
+  let boxes = await run(false);
+  if (!boxes.length) boxes = await run(true);
   return boxes.slice(0, 400).map(b => ({
     left: clamp(Math.round((b[0] / w) * w0), 0, w0 - 1),
     top: clamp(Math.round((b[1] / h) * h0), 0, h0 - 1),
@@ -2716,7 +2734,7 @@ function textLines(imgCanvas, box, R) {
 }
 
 /* ── распознавание кропа (KomaOcrEngine.decode) ── */
-function decodeCrop(cropCanvas) {
+async function decodeCrop(cropCanvas) {
   let w0 = cropCanvas.width, h0 = cropCanvas.height;
   if (w0 < 2 || h0 < 2) return ['', 0];
   let src = cropCanvas;
@@ -2743,9 +2761,8 @@ function decodeCrop(cropCanvas) {
     }
   }
   const t = new ort.Tensor('float32', data, [1, 3, 48, padded]);
-  const out = OCR.rec.run({ [OCR.rec.inputNames[0]]: t });
-  const logits = out[OCR.rec.outputNames[0]];    // [1,T,519]
-  const T = logits.dims[1], C = logits.dims[2], values = logits.data;
+  const logits = await runModel(OCR.rec, { [OCR.rec.inputNames[0]]: t }, 'распознавание');
+  const T = logits.dims[1], C = logits.dims[2], values = logits.data;   // [1,T,519]
   let text = '', prev = 0, score = 0, count = 0;
   for (let ti = 0; ti < T; ti++) {
     const base = ti * C;
@@ -2777,13 +2794,13 @@ function binarizeCanvas(src, polarity, R) {
   out.getContext('2d').putImageData(img, 0, 0);
   return out;
 }
-function decodeBetter(cropCanvas, R) {
-  const first = decodeCrop(cropCanvas);
+async function decodeBetter(cropCanvas, R) {
+  const first = await decodeCrop(cropCanvas);
   const letters = (s) => (s.match(/\p{L}/gu) || []).length;
   if (letters(first[0]) >= 3) return first;
   let best = first;
   for (const pol of [0, 1]) {
-    const att = decodeCrop(binarizeCanvas(cropCanvas, pol, R));
+    const att = await decodeCrop(binarizeCanvas(cropCanvas, pol, R));
     if (letters(att[0]) > letters(best[0])) best = att;
   }
   return best;
@@ -2792,7 +2809,7 @@ function decodeBetter(cropCanvas, R) {
 /* ── страница целиком: детектор → строки → распознавание ── */
 async function recognizePage(imgCanvas, R, onProgress) {
   const t0 = performance.now();
-  const boxes = detectBoxes(imgCanvas, R.pageSide);
+  const boxes = await detectBoxes(imgCanvas, R.pageSide);
   const regions = [];
   let done = 0;
   for (const box of boxes) {
@@ -2801,7 +2818,7 @@ async function recognizePage(imgCanvas, R, onProgress) {
       const c = makeCanvas(ln.right - ln.left, ln.bottom - ln.top);
       c.getContext('2d', { willReadFrequently: true })
         .drawImage(imgCanvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
-      const [text, conf] = decodeBetter(c, R);
+      const [text, conf] = await decodeBetter(c, R);
       if (text.trim() && conf > R.minConfidence) {
         regions.push({
           text,
@@ -3230,7 +3247,11 @@ const Reader = {
       if (sheet.classList.contains('on')) renderTextSheet(i);
     } catch (e) {
       console.error(e);
-      toast('Ошибка распознавания: ' + (e.message || e));
+      // Показываем не только текст ошибки, но и место: иначе «undefined (reading
+      // 'data')» ничего не объясняет и приходится гадать по скриншоту.
+      const at = String((e && e.stack) || '').split('\n')[1];
+      const where = at ? at.trim().replace(/\s*\(?.*\//, '(').replace(/^at /, '') : '';
+      toast('Ошибка распознавания: ' + (e.message || e) + (where ? ' · ' + where : ''), 8000);
     } finally {
       State.scanning = false;
       $('#scanBadge').classList.remove('on');
