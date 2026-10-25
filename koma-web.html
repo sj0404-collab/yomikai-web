@@ -283,6 +283,7 @@
   <div class="head" id="textTitle">Текст страницы</div>
   <div class="body">
     <div class="kv" id="textStats"></div>
+    <div class="row" id="textNav" style="gap:8px;margin-top:8px;display:flex"></div>
     <div class="lbl">КАК ЧИТАЕТСЯ</div>
     <div id="textOrdered"></div>
     <div class="lbl">КАК РАСПОЗНАНО</div>
@@ -2201,7 +2202,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.5';
+const VERSION = 'v1.6';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3152,9 +3153,19 @@ function splitPanels(regions) {
   return panels;
 }
 function readingOrder(regions, rtl, onlyCyr, R) {
+  // Порядок как в KomaAutoRead: сначала нормализация и починка двойников,
+  // ПОТОМ фильтр языка. Иначе фрагмент с латинскими буквами («He6лuцa»)
+  // отбрасывался целиком, и слово пропадало из озвучки.
   let source = regions
-    .filter(r => r.text && /[\p{L}\p{N}]/u.test(r.text))
-    .map(r => ({ ...r, text: applyWordFixes(r.text, R.wordFixes) }))
+    .map(r => {
+      let text = String(r.text || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
+      text = applyWordFixes(text, R.wordFixes);
+      const fixed = fixLookalikes(text);
+      if (onlyCyr && !isCyr(fixed) && isLookalikeOnly(fixed)) text = fixLookalikesForced(fixed);
+      else text = fixed;
+      return { ...r, text };
+    })
+    .filter(r => /[\p{L}\p{N}]/u.test(r.text))
     .filter(r => !onlyCyr || isCyr(r.text));
   if (!source.length) return [];
   return splitPanels(source).flatMap(p => bubblesOf(p, rtl, R)).filter(l => (l.text.match(/\p{L}/gu) || []).length >= 2);
@@ -3234,6 +3245,10 @@ const Reader = {
 
   async buildStrip() {
     const strip = $('#strip');
+    if (this.ratios && Object.keys(this.ratios).length) {
+      const vals = Object.values(this.ratios);
+      this.bookRatio = vals.reduce((a, b) => a + b, 0) / vals.length;
+    }
     strip.innerHTML = '';
     this.urls.forEach(u => URL.revokeObjectURL(u));
     this.urls = []; this.imgEls = []; this.canvases = [];
@@ -3243,6 +3258,9 @@ const Reader = {
       for (let i = 0; i < this.pages.length; i++) {
         const wrap = document.createElement('div');
         wrap.className = 'pagewrap'; wrap.dataset.page = i;
+        // Место под страницу резервируется сразу: пропорция известна из буфера
+        // (если страницу уже открывали) или берётся средняя по книге.
+        wrap.style.aspectRatio = String((this.ratios && this.ratios[i]) || this.bookRatio || 0.7);
         const img = document.createElement('img');
         img.alt = 'Страница ' + (i + 1);
         img.decoding = 'async';
@@ -3297,6 +3315,15 @@ const Reader = {
   async onPageSized(i) {
     const img = this.imgEls[i];
     if (!img || !img.naturalWidth) return;
+    // Запоминаем пропорции: без этого незагруженные страницы схлопывались в 0
+    // по высоте, лента прыгала, и «текущая страница» определялась неверно.
+    const ratio = img.naturalWidth / img.naturalHeight;
+    this.ratios = this.ratios || {};
+    if (!this.ratios[i]) {
+      this.ratios[i] = ratio;
+      const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+      if (wrap) wrap.style.aspectRatio = String(ratio);
+    }
     if (!this.canvases[i]) {
       // рабочий холст для OCR — один раз на страницу
       this.canvases[i] = canvasFromImage(img);
@@ -3347,6 +3374,51 @@ const Reader = {
     this.syncSub();
     if (RULES.semiManual && State.semi) return;         // ждём остановки и прокрутки
     if (!this.scrollBusy && !this.regions.get(i)) this.scanCurrent(false);
+  },
+
+  /**
+   * Какая страница РЕАЛЬНО на экране — по геометрии, а не по сохранённому
+   * индексу. Раньше считалось только внутри обработчика scroll и только когда
+   * у страницы уже был загружен образ; при ленивой загрузке (высота 0 до
+   * загрузки) и после автолистания индекс «застревал»: на экране первая
+   * страница, а шапка и распознавание — четвёртая.
+   */
+  pageAtViewport() {
+    const scroller = $('#strip');
+    if (!scroller || this.mode !== 'vertical') return this.page;
+    const vh = scroller.clientHeight || window.innerHeight;
+    const mid = vh * 0.45;                     // чуть выше центра — реплики сверху
+    let best = -1, bestArea = -1, bestDist = Infinity, bestNear = -1;
+    for (let i = 0; i < this.pages.length; i++) {
+      const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+      if (!wrap) continue;
+      const r = wrap.getBoundingClientRect();
+      const sr = scroller.getBoundingClientRect();
+      const top = r.top - sr.top, bottom = r.bottom - sr.top;
+      const visible = Math.min(bottom, vh) - Math.max(top, 0);
+      if (visible > bestArea) { bestArea = visible; best = i; }
+      const d = Math.abs(top - mid);
+      if (d < bestDist) { bestDist = d; bestNear = i; }
+    }
+    // Если середина экрана попала в пустоту (страница не загружена и места нет),
+    // берём ту, что занимает больше всего экрана.
+    return best >= 0 ? best : Math.max(0, bestNear);
+  },
+
+  /** Сверить сохранённый индекс с экраном и обновить шапку/подгрузку. */
+  syncPage() {
+    if (!this.pages || !this.pages.length) return this.page;
+    const actual = this.pageAtViewport();
+    if (actual !== this.page) {
+      this.page = actual;
+      this.ensureLoaded(actual);
+      this.ensureLoaded(actual + 1);
+      this.saveProgress();
+      this.syncSub();
+      return actual;
+    }
+    this.syncSub();
+    return this.page;
   },
 
   pageRect(i) {
@@ -3619,14 +3691,23 @@ function showArrow() {
 function hideArrow() { $('#nextArrow').style.display = 'none'; }
 
 function renderTextSheet(i) {
+  // Открывая шторку, сначала сверяем индекс с тем, что реально на экране:
+  // раньше здесь стоял «застрявший» Reader.page, и текст открывался не той
+  // страницы, которую человек видит.
+  if (i == null) i = Reader.syncPage();
+  const onScreen = Reader.pageAtViewport();
   const data = Reader.regions.get(i);
-  $('#textTitle').textContent = `Текст страницы ${i + 1}`;
+  $('#textTitle').innerHTML = `Текст страницы ${i + 1}`
+    + (i === onScreen ? '' : `<span class="hint" style="font-weight:400"> · на экране стр. ${onScreen + 1}</span>`);
+  if ($('#textNav')) {
+    $('#textNav').innerHTML = `<button class="btn" id="textPrev" ${i <= 0 ? 'disabled' : ''}>◀ стр. ${i}</button>`
+      + `<span class="hint" style="align-self:center">из ${Reader.pages.length}</span>`
+      + `<button class="btn" id="textNext" ${i >= Reader.pages.length - 1 ? 'disabled' : ''}>стр. ${i + 2} ▶</button>`;
+    if ($('#textPrev')) $('#textPrev').onclick = () => renderTextSheet(i - 1);
+    if ($('#textNext')) $('#textNext').onclick = () => renderTextSheet(i + 1);
+  }
   if (!data) { $('#textStats').textContent = 'Страница ещё не распознана'; $('#textOrdered').innerHTML = ''; $('#textRaw').textContent = ''; return; }
   Reader.textPage = i;
-  if (Reader.page !== i) {
-    $('#textTitle').innerHTML = `Текст страницы ${i + 1}`
-      + `<span class="hint" style="font-weight:400"> · лента сейчас на стр. ${Reader.page + 1}</span>`;
-  }
   const raw = data.regions || [];
   const stamp = data.at ? ' · обновлено ' + data.at : '';
   $('#textStats').textContent = data.cached
@@ -3754,35 +3835,39 @@ async function pickModels() {
 /* ─── прокрутка: ждём остановки ─── */
 function watchScroll() {
   const strip = $('#strip');
-  let t = null;
+  let t = null, raf = 0;
   const busy = () => {
     Reader.scrollBusy = true;
     clearTimeout(t);
     t = setTimeout(async () => {
       Reader.scrollBusy = false;
+      Reader.syncPage();
       onScrollSettled();
     }, Math.max(120, RULES.semiManualSettleMs));
   };
-  strip.addEventListener('scroll', () => {
+  const onScroll = () => {
     busy();
-    // определяем текущую страницу и полосу
-    const vh = window.innerHeight;
-    let best = 0, bestD = Infinity;
-    for (let i = 0; i < Reader.pages.length; i++) {
-      const r = Reader.pageRect(i);
-      if (!r) continue;
-      const d = Math.abs(r.top - 0);
-      if (r.bottom > 0 && r.top < vh && d < bestD) { bestD = d; best = i; }
-    }
-    if (best !== Reader.page) {
-      Reader.page = best;
-      Reader.ensureLoaded(best); Reader.ensureLoaded(best + 1);
-      Reader.afterPageReady();
-      Reader.saveProgress();
-    }
-  }, { passive: true });
+    // Страницу определяем НА КАЖДОМ кадре прокрутки, а не только когда
+    // «успокоится»: иначе шапка и распознавание живут прошлой страницей.
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const before = Reader.page;
+      Reader.syncPage();
+      if (Reader.page !== before) {
+        Reader.ensureLoaded(Reader.page);
+        Reader.ensureLoaded(Reader.page + 1);
+      }
+    });
+  };
+  strip.addEventListener('scroll', onScroll, { passive: true });
+  // В части браузеров scrollend есть — используем как точку «остановились».
+  if ('onscrollend' in strip) strip.addEventListener('scrollend', () => Reader.syncPage(), { passive: true });
+  window.addEventListener('resize', () => Reader.syncPage());
+  window.addEventListener('orientationchange', () => setTimeout(() => Reader.syncPage(), 300));
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', () => Reader.syncPage());
   $('#paged').addEventListener('scroll', (e) => {
-    if (e.target.classList?.contains('pagebox')) busy();
+    if (e.target.classList && e.target.classList.contains('pagebox')) busy();
   }, true);
   $('#paged').addEventListener('touchmove', () => busy(), { passive: true });
   document.addEventListener('keydown', (e) => {
@@ -4049,7 +4134,7 @@ function bindUI() {
   const openTextSheet = () => {
     if (!TTS.stopped) { TTS.stop(); toast('Авточтение остановлено — вы открыли текст страницы', 3500); }
     openSheet('sheetText');
-    renderTextSheet(Reader.page);
+    renderTextSheet(null);           // страницу берём С ЭКРАНА, а не из сохранённого индекса
   };
   $('#btnScan').onclick = openTextSheet;
   $('#btnOcr2').onclick = openTextSheet;
