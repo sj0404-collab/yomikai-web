@@ -27,7 +27,7 @@ global.ort = { env: { wasm: {} }, Tensor: class {} };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
   .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
-  + '; return {Reader, RULES, DEFAULT_RULES, sanitizeRules, recognizePage, makeCanvas};')();
+  + '; return {Reader, RULES, DEFAULT_RULES, sanitizeRules, recognizePage, makeCanvas, lineInBand};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 const R = api.Reader;
@@ -76,6 +76,15 @@ api2.OCR.det = { inputNames: ['x'], outputNames: ['y'], run: async (f) => {
 } };
 const res = await api2.recognizePage(pageCanvas, api2.RULES, null, { y0: 4000, y1: 4800 });
 ok(res.band && res.band.y0 === 4000, 'в результате видно, что это полоса 4000…4800');
+
+// Видимость строк: экран 4200…4600, полоса детектора с запасом 4000…4800
+const band = { y0: 4000, y1: 4800, vy0: 4200, vy1: 4600 };
+const L = (top, bottom) => ({ top, bottom });
+ok(api.lineInBand(L(300, 400), band, 4000) === true, 'строка внутри экрана (4300…4400) — в реплики');
+ok(api.lineInBand(L(600, 700), band, 4000) === false, 'строка ниже экрана (4600+) отброшена — та самая «лишняя» реплика');
+ok(api.lineInBand(L(300, 500), band, 4000) === true, 'строка на границе снизу взята целиком, а не обрезана');
+ok(api.lineInBand(L(0, 90), band, 4000) === false, 'строка выше экрана отброшена');
+ok(api.lineInBand(L(600, 700), null, 0) === true, 'без полосы (короткая страница) берём всё');
 ok(captured && captured.h <= 1000, 'детектор получил полосу высотой ' + (captured ? captured.h : '?') + ' px, а не 12000');
 console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
