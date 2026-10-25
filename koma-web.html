@@ -2239,7 +2239,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.2';
+const VERSION = 'v1.9.3';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3972,7 +3972,7 @@ const Buffer = {
 
 /* ───────────────────────── 10. Озвучка ───────────────────────── */
 const TTS = {
-  voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0,
+  voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0, primed: false,
   init() {
     const fill = () => {
       this.voices = speechSynthesis.getVoices().filter(v => /ru/i.test(v.lang)).concat(
@@ -4024,7 +4024,47 @@ const TTS = {
     const want = sr.top + sr.height * 0.3;               // реплику — в верхнюю треть
     sc.scrollTo({ top: Math.max(0, sc.scrollTop + top - want), behavior: 'smooth' });
   },
+  /**
+   * Chrome/WebView разрешает озвучку только «из жеста»: если между нажатием и
+   * speak() есть await (распознавание, чтение буфера), speak молча отбивается
+   * с ошибкой not-allowed — панель есть, звука нет. Пустая фраза в самом
+   * обработчике нажатия разблокирует синтезатор.
+   */
+  prime() {
+    try {
+      if (this.primed) { speechSynthesis.resume(); return; }
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      speechSynthesis.speak(u);
+      this.primed = true;
+    } catch (e) { console.warn('голос не разблокировался', e); }
+  },
+  /** Голос из списка, который реально доступен ПРЯМО СЕЙЧАС. */
+  pickVoice() {
+    let avail = [];
+    try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
+    if (!avail.length) return null;
+    const cur = this.voice;
+    if (cur && avail.some(v => v.voiceURI === cur.voiceURI || v.name === cur.name)) {
+      return avail.find(v => v.voiceURI === cur.voiceURI || v.name === cur.name);
+    }
+    // Сохранённый голос исчез (перезапуск WebView, смена TTS-движка) —
+    // берём русский по умолчанию, но НЕ подменяем выбор пользователя молча:
+    // об этом говорим тостом ниже.
+    return avail.find(v => /^ru/i.test(v.lang)) || null;
+  },
   speakLine(line, then) {
+    if (typeof speechSynthesis === 'undefined') { toast('В этой среде нет синтеза речи'); return; }
+    let avail = [];
+    try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
+    if (!avail.length) {
+      toast('Система не дала ни одного голоса: Настройки Android → Синтез речи', 7000);
+    }
+    const chosen = this.pickVoice();
+    if (chosen && this.voice && chosen.voiceURI !== this.voice.voiceURI) {
+      toast('Голос «' + (this.voice.name || '') + '» недоступен, читаю ' + chosen.name, 5000);
+    }
+    if (chosen) this.voice = chosen;
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(line.text);
     if (this.voice) u.voice = this.voice;
@@ -4032,9 +4072,20 @@ const TTS = {
     u.rate = this.rate;
     Reader.current = line;
     Reader.paintAllFrames();
-    this.followLine(line);
     u.onend = () => { if (then) then(); };
+    u.onerror = (e) => {
+      const code = (e && e.error) || 'unknown';
+      this.speaking = false;
+      // Молчать нельзя: раньше «голос не работает» выглядело как поломка
+      // читалки, хотя браузер просто отбил озвучку.
+      if (code === 'not-allowed') toast('Браузер не разрешил озвучку — нажмите ▶ ещё раз', 5000);
+      else if (code === 'interrupted' || code === 'canceled') { /* это наш cancel() */ }
+      else toast('Голос не сказал: ' + code, 5000);
+      if (then) then();
+    };
     speechSynthesis.speak(u);
+    // Прокрутка — ПОСЛЕ speak и в try: ошибка геометрии не должна съедать звук.
+    try { this.followLine(line); } catch (e) { console.warn('не прокрутил к реплике', e); }
   },
   async readVisible() {
     // Если страница ещё не распознана — сначала распознать, потом читать.
@@ -4711,6 +4762,7 @@ function bindUI() {
     }
   };
   $('#btnSpeakPage').onclick = async () => {
+    TTS.prime();                        // «Прочитать» в шторке — тот же жест
     const i = (Reader.textPage ?? Reader.page);
     await Reader.scanPage(i, { keepSheet: false });
     closeSheets();
@@ -4723,6 +4775,7 @@ function bindUI() {
   };
   $('#btnRead').onclick = () => {
     if (TTS.stopped) {
+      TTS.prime();                       // разблокировать голос в жесте
       Reader.scanCurrent(false).then(() => TTS.readVisible());
     } else { TTS.stop(); }
   };
@@ -4734,6 +4787,7 @@ function bindUI() {
   $('#btnSkip').onclick = () => { speechSynthesis.cancel(); if (!TTS.stopped) TTS.step(); };
   $('#nextArrow').onclick = async () => {
     hideArrow();
+    TTS.prime();
     const step = Math.round(window.innerHeight * 0.85);
     $('#strip').scrollBy({ top: step, behavior: 'smooth' });
     await sleep(300 + RULES.semiManualSettleMs);
