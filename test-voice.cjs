@@ -35,7 +35,7 @@ global.SpeechSynthesisUtterance = class {
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
   .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
-  + '; return {TTS, Reader, toast, RULES};')();
+  + '; return {TTS, Reader, toast, RULES, selfTestVoice};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
@@ -85,7 +85,31 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   // 6. prime разблокирует синтезатор в жесте
   T.primed = false; spoken.length = 0;
   T.prime();
-  ok(spoken.length === 1 && spoken[0].volume === 0, 'пустая фраза разблокирует озвучку по нажатию');
+  ok(spoken.length === 1 && spoken[0].volume > 0 && spoken[0].volume < 0.2, 'тихая фраза разблокирует озвучку по нажатию');
+
+  // 7. Синтез молча не отвечает — человек узнаёт об этом (а не слушает тишину)
+  spoken.length = 0;
+  T.stopped = false;
+  T.speakLine({ text: 'шестой', top: 0.1, bottom: 0.2 });
+  const u6 = spoken[0];
+  ok(typeof u6.onstart === 'function', 'у озвучки есть отметка «начал говорить»');
+  els.get('toast').textContent = '';
+  await new Promise(r => setTimeout(r, 1400));
+  ok(/не ответил|Проверить голос/.test(el('toast').textContent), 'молчание синтеза объясняется: «' + el('toast').textContent + '»');
+
+  // 8. cancel() не вызывается зря: очередь не убиваем, если ничего не звучит
+  let cancelled = 0;
+  const realCancel = global.speechSynthesis.cancel;
+  global.speechSynthesis.cancel = () => { cancelled++; };
+  global.speechSynthesis.speaking = false; global.speechSynthesis.pending = false;
+  spoken.length = 0;
+  T.speakLine({ text: 'седьмой', top: 0.1, bottom: 0.2 });
+  ok(cancelled === 0, 'cancel() не дёргается, когда очередь пуста (WebView после него молчит)');
+  global.speechSynthesis.speaking = true;
+  cancelled = 0;
+  T.speakLine({ text: 'восьмой', top: 0.1, bottom: 0.2 });
+  ok(cancelled === 1, 'cancel() вызывается, когда предыдущая фраза ещё звучит');
+  global.speechSynthesis.cancel = realCancel;
 
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
