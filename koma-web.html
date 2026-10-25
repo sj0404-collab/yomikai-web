@@ -2196,7 +2196,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.3';
+const VERSION = 'v1.4';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2220,7 +2220,7 @@ const DB = (() => {
   };
   function open() {
     if (dbp) return dbp;
-    dbp = new Promise((res, rej) => {
+    const raw = new Promise((res, rej) => {
       const r = indexedDB.open('koma-web', 1);
       r.onupgradeneeded = () => {
         const db = r.result;
@@ -2229,8 +2229,14 @@ const DB = (() => {
         if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv', { keyPath: 'k' });
       };
       r.onsuccess = () => res(r.result);
-      r.onerror = () => rej(r.error);
+      r.onerror = () => rej(r.error || new Error('indexedDB открыть не удалось'));
+      r.onblocked = () => rej(new Error('indexedDB заблокирован другой вкладкой'));
     });
+    // Страховка: если браузер не ответил за 3 секунды (песочница, приватный
+    // режим, «зависшая» вкладка), не висим навсегда — уходим в память.
+    // Иначе любая запись (буфер, модели, книги) молча не завершалась.
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('indexedDB не ответил за 3 с')), 3000));
+    dbp = Promise.race([raw, timeout]);
     return dbp;
   }
   async function tx(store, mode, fn) {
@@ -3355,50 +3361,79 @@ const Reader = {
     toast(n ? 'Порядок пересчитан: ' + (rtl ? 'справа налево' : 'слева направо') : 'Откройте страницу заново, чтобы применить направление', 4000);
   },
 
-  async scanCurrent(force = false) {
-    const i = this.page;
-    // Кэш: страницу, которую уже распознали, второй раз не гоняем. 10 секунд на
-    // страницу — это дорого, и платить их заново при каждом включении чтения
-    // незачем. Повтор — только по кнопке (force).
+  /**
+   * Распознать КОНКРЕТНУЮ страницу.
+   *
+   * Раньше единственная точка входа (`scanCurrent`) брала «текущую» страницу в
+   * момент вызова. Из-за этого «Распознать заново» из шторки «Текст страницы N»
+   * сканировало ту страницу, на которой лента оказалась к тому моменту, а не ту,
+   * чей текст открыт: реплики не перезаписывались вообще.
+   */
+  async scanPage(i, opts = {}) {
+    const force = !!opts.force;
+    const keepSheet = !!opts.keepSheet;
+    if (i == null || i < 0 || i >= this.pages.length) return null;
+
     const cached = this.regions.get(i);
     if (cached && !force) { this.paintPage(i); return cached; }
+
+    if (State.scanning) {
+      // Молча выходить нельзя: нажатие «Распознать заново» выглядело как
+      // «кнопка не работает». Ставим в очередь и говорим об этом.
+      State.pendingScan = { i, force, keepSheet };
+      const msg = 'Идёт распознавание — страница ' + (i + 1) + ' встала в очередь';
+      toast(msg, 4000);
+      if (keepSheet) $('#textStats').textContent = msg + '…';
+      return null;
+    }
+
     const c = this.canvases[i];
-    if (!c) return toast('Страница ещё не загрузилась');
-    if (!OCR.ready) { openSheet('sheetModels'); return toast('Сначала добавьте модели OCR (⚙)'); }
-    if (State.scanning) return;
+    if (!c) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
+    if (!OCR.ready) { openSheet('sheetModels'); toast('Сначала добавьте модели OCR (⚙)'); return null; }
+
     State.scanning = true;
     $('#scanBadge').classList.add('on');
-    $('#scanBadge').textContent = 'Распознаём…';
+    $('#scanBadge').textContent = `Распознаём… стр. ${i + 1}`;
+    if (keepSheet) $('#textStats').textContent = `Распознаю страницу ${i + 1} заново…`;
     try {
       const res = await recognizePage(c, RULES, (done, total) => {
-        $('#scanBadge').textContent = `Распознаём… ${done}/${total}`;
+        const t = `Распознаём… ${done}/${total}`;
+        $('#scanBadge').textContent = t;
+        if (keepSheet) $('#textStats').textContent = `Распознаю страницу ${i + 1} заново… ${done}/${total}`;
       });
       // Направление чтения — отдельная настройка (dir), а не раскладка.
-      // Раньше для вертикальной ленты выходило rtl=false, и реплики читались
-      // слева направо: «Я ТОЖЕ ТАК СЧИТАЮ» уезжало после «БОЛЬШЕ ПРИВЛЕКАЮТ».
       const rtl = (this.dir || 'rtl') === 'rtl';
       const lines = readingOrder(res.regions, rtl, true, RULES);
-      this.regions.set(i, { ...res, lines });
-      Buffer.put(i, lines);
+      const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      this.regions.set(i, { ...res, lines, at });
+      await Buffer.put(i, lines);
       this.paintPage(i);
-      // Разбивка по этапам: видно, что именно медленно — детектор или распознавание.
-      toast(`Страница ${i + 1}: ${lines.length} реплик · ${(res.ms / 1000).toFixed(1)} с`
-        + ` (детектор ${(res.detMs / 1000).toFixed(1)} с, распознавание ${(res.recMs / 1000).toFixed(1)} с`
-        + `, ${res.crops} строк)`, 6000);
-      const sheet = $('#sheetText');
-      if (sheet.classList.contains('on')) renderTextSheet(i);
+      toast(`Страница ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${lines.length} реплик · `
+        + `${(res.ms / 1000).toFixed(1)} с (детектор ${(res.detMs / 1000).toFixed(1)} с, `
+        + `распознавание ${(res.recMs / 1000).toFixed(1)} с, ${res.crops} строк)`, 6000);
+      // Шторка остаётся открытой — и обязательно перерисовывается.
+      if ($('#sheetText').classList.contains('on')) renderTextSheet(i);
       return this.regions.get(i);
     } catch (e) {
       console.error(e);
-      // Показываем не только текст ошибки, но и место: иначе «undefined (reading
-      // 'data')» ничего не объясняет и приходится гадать по скриншоту.
-      const at = String((e && e.stack) || '').split('\n')[1];
-      const where = at ? at.trim().replace(/\s*\(?.*\//, '(').replace(/^at /, '') : '';
-      toast('Ошибка распознавания: ' + (e.message || e) + (where ? ' · ' + where : ''), 8000);
+      const ln = String((e && e.stack) || '').split('\n')[1] || '';
+      const where = ln.trim().replace(/\s*\(?.*\//, '(').replace(/^at /, '');
+      const msg = 'Ошибка распознавания: ' + (e.message || e) + (where ? ' · ' + where : '');
+      toast(msg, 8000);
+      if (keepSheet) $('#textStats').textContent = msg;
+      return null;
     } finally {
       State.scanning = false;
       $('#scanBadge').classList.remove('on');
+      const p = State.pendingScan;
+      State.pendingScan = null;
+      if (p) setTimeout(() => this.scanPage(p.i, { force: p.force, keepSheet: p.keepSheet }), 50);
     }
+  },
+
+  /** Совместимость: распознать текущую страницу. */
+  async scanCurrent(force = false) {
+    return this.scanPage(this.page, { force });
   },
 
   /* Реплики текущей полосы — то, что читается */
@@ -3539,7 +3574,7 @@ const TTS = {
 };
 
 /* ───────────────────────── 11. Состояние и интерфейс ───────────────────────── */
-const State = { scanning: false, semi: false, waitingScroll: false, autoScroll: true };
+const State = { scanning: false, semi: false, waitingScroll: false, autoScroll: true, pendingScan: null };
 
 function show(id) {
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === id));
@@ -3561,12 +3596,18 @@ function renderTextSheet(i) {
   const data = Reader.regions.get(i);
   $('#textTitle').textContent = `Текст страницы ${i + 1}`;
   if (!data) { $('#textStats').textContent = 'Страница ещё не распознана'; $('#textOrdered').innerHTML = ''; $('#textRaw').textContent = ''; return; }
+  Reader.textPage = i;
+  if (Reader.page !== i) {
+    $('#textTitle').innerHTML = `Текст страницы ${i + 1}`
+      + `<span class="hint" style="font-weight:400"> · лента сейчас на стр. ${Reader.page + 1}</span>`;
+  }
   const raw = data.regions || [];
+  const stamp = data.at ? ' · обновлено ' + data.at : '';
   $('#textStats').textContent = data.cached
     ? `${data.lines.length} реплик · из буфера (без повторного распознавания)`
     : `${raw.length} строк · ${data.boxes} блоков · ${data.crops} кропов · `
       + `итого ${(data.ms / 1000).toFixed(1)} с = детектор ${(data.detMs / 1000).toFixed(1)} с `
-      + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с`;
+      + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с` + stamp;
   $('#textOrdered').innerHTML = data.lines.length
     ? data.lines.map((l, n) => `<div class="lineitem"><b>${n + 1}</b>${escapeHtml(l.text)}</div>`).join('')
     : '<div class="hint">Реплик не найдено</div>';
@@ -3922,12 +3963,35 @@ function bindUI() {
 
   // читалка
   $('#btnBack').onclick = () => { TTS.stop(); show('library'); Library.load(); };
-  $('#btnScan').onclick = () => { openSheet('sheetText'); renderTextSheet(Reader.page); };
-  $('#btnOcr2').onclick = () => { openSheet('sheetText'); renderTextSheet(Reader.page); };
+  // Открывая текст, ставим авточтение на паузу: иначе лента уезжает на
+  // следующую страницу, пока человек читает текст, и кажется, что «текст не тот».
+  const openTextSheet = () => {
+    if (!TTS.stopped) { TTS.stop(); toast('Авточтение остановлено — вы открыли текст страницы', 3500); }
+    openSheet('sheetText');
+    renderTextSheet(Reader.page);
+  };
+  $('#btnScan').onclick = openTextSheet;
+  $('#btnOcr2').onclick = openTextSheet;
   $('#btnSettings').onclick = () => { openSheet('sheetSettings'); syncSettingsUI(); };
   $('#btnMore').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
-  $('#btnRescan').onclick = () => { closeSheets(); Reader.scanCurrent(true); };
-  $('#btnSpeakPage').onclick = () => { closeSheets(); Reader.scanCurrent(false).then(() => TTS.readVisible()); };
+  // Шторку НЕ закрываем: иначе не видно, что происходит, и результат некуда
+  // показать. Сканируем ту страницу, чей текст открыт (Reader.textPage), а не
+  // «текущую в ленте» — из-за этого раньше реплики не перезаписывались вовсе.
+  $('#btnRescan').onclick = async () => {
+    const i = (Reader.textPage ?? Reader.page);
+    $('#btnRescan').disabled = true;
+    try {
+      await Reader.scanPage(i, { force: true, keepSheet: true });
+    } finally {
+      $('#btnRescan').disabled = false;
+    }
+  };
+  $('#btnSpeakPage').onclick = async () => {
+    const i = (Reader.textPage ?? Reader.page);
+    await Reader.scanPage(i, { keepSheet: false });
+    closeSheets();
+    TTS.readVisible();
+  };
   $('#btnFrames').onclick = () => {
     Reader.frames = !Reader.frames;
     $('#btnFrames').classList.toggle('hot', Reader.frames);
