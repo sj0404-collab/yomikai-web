@@ -25,7 +25,7 @@ global.ort = { env: { wasm: {} }, Tensor: class { constructor(t, d, dims) { this
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
   .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
-  + '; return {Reader, State, OCR, Words, cleanLines, RULES};')();
+  + '; return {Reader, State, OCR, Words, cleanLines, RULES, TTS};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
@@ -58,5 +58,22 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ]);
   ok(lines.length === 1, 'из буфера убрана мусорная строка (осталось ' + lines.length + ')');
   ok(lines[0] && /УЖЕ ПОРА/.test(lines[0].text), 'настоящая реплика из буфера сохранена');
+  // Реплика не должна оставаться под панелью плеера: чтение её досматривает
+  const stripEl = el('strip');
+  stripEl.scrollTop = 0;
+  let scrolledTo = null;
+  stripEl.scrollTo = (o) => { scrolledTo = o.top; };
+  stripEl.getBoundingClientRect = () => ({ top: 0, bottom: 800, height: 800, left: 0, right: 700 });
+  R.page = 0; R.mode = 'vertical';
+  R.pages = [{}, {}];
+  global.document.querySelector = (sel) => String(sel).includes('pagewrap')
+    ? { getBoundingClientRect: () => ({ top: 0, bottom: 800, height: 800, left: 0, right: 700 }) }
+    : el('strip');
+  api.TTS.followLine({ text: 'x', top: 0.78, bottom: 0.86 });     // облачко внизу экрана
+  ok(scrolledTo !== null && scrolledTo > 0, 'реплика под панелью прокручивается в видимую зону');
+  scrolledTo = null;
+  api.TTS.followLine({ text: 'x', top: 0.45, bottom: 0.5 });      // реплика в середине
+  ok(scrolledTo === null, 'реплику в безопасной зоне не дёргаем (масштаб и позиция не меняются)');
+
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
