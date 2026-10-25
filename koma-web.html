@@ -78,6 +78,11 @@
   #strip .frame.done{border-color:#ff8a4c33}
   #strip .frame.cur{background:#ff8a4c33;border-width:2.5px;border-color:var(--orange)}
   #strip .frame.spk::after{content:"🔊";position:absolute;right:-4px;top:-22px;font-size:15px}
+  /* Крупный текст (титул, каллиграфия) — другим цветом, чтобы не путать с репликой */
+  #strip .frame.large{border-color:#6fa8ff;border-style:dashed}
+  #strip .frame.large.cur{background:#6fa8ff26;border-color:#6fa8ff}
+  .lineitem.large{color:#9dc0ff}
+  .lineitem.large b{color:#6fa8ff}
   /* постраничный режим */
   #paged{position:absolute;inset:0;display:none;overflow:hidden}
   #paged.on{display:block}
@@ -2239,7 +2244,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.3';
+const VERSION = 'v1.9.4';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3479,9 +3484,77 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   // Языковая починка — на СОБРАННОЙ реплике (как KomaWords.finish): словарь
   // исправляет «ПОШЕВЕАИТЬСЯ» → «ПОШЕВЕЛИТЬСЯ» и выбрасывает строки, которых
   // в русском нет вовсе.
-  return lines
+  const result = lines
     .map(l => ({ ...l, text: Words.polish(l.text, R.junkRatio) }))
     .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+  rescueLostLines(result, source, R);
+  markLargeText(result, source);
+  return result;
+}
+
+/** Нормализация для сравнения: регистр и пунктуация не важны. */
+function normText(s) {
+  return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+/**
+ * Страховка от потери строк при склейке: на скриншоте 23:20 из реплики
+ * «Как прожить жизнь, будучи старшей сестрой тирана.» пропал конец — строка
+ * распозналась («Сесмой тирана»), прошла чистку, но не попала ни в одну
+ * реплику. Правило «реплику не резать» важнее аккуратности склейки: любой
+ * осмысленный регион, которого нет в готовых репликах, приклеиваем к
+ * ближайшей по вертикали (и только если он рядом, не дальше 18 % страницы).
+ */
+function rescueLostLines(result, source, R) {
+  if (!result.length) return;
+  const covered = result.map(l => normText(l.text));
+  for (const r of source) {
+    const t = String(Words.polish(r.text, R.junkRatio) || '').trim();
+    if (!t) continue;
+    const key = normText(t);
+    if (key.length < 3) continue;
+    const head = key.slice(0, 14);
+    if (covered.some(c => c.includes(head))) continue;   // уже внутри реплики
+    const rc = (r.top + r.bottom) / 2;
+    let best = -1, bestD = Infinity;
+    result.forEach((l, idx) => {
+      const d = rc < l.top ? l.top - rc : (rc > l.bottom ? rc - l.bottom : 0);
+      if (d < bestD) { bestD = d; best = idx; }
+    });
+    if (best < 0 || bestD > 0.18) continue;
+    const l = result[best];
+    const above = rc < (l.top + l.bottom) / 2;
+    result[best] = {
+      ...l,
+      text: above ? (t + ' ' + l.text) : (l.text + ' ' + t),
+      left: Math.min(l.left, r.left), top: Math.min(l.top, r.top),
+      right: Math.max(l.right, r.right), bottom: Math.max(l.bottom, r.bottom),
+      rescued: true,
+    };
+    covered.push(normText(result[best].text));
+  }
+}
+
+/**
+ * Крупный текст (титул, каллиграфия) помечаем: он показывается другим цветом,
+ * чтобы не путать его с репликами. Отличие по кеглю: высота строки заметно
+ * больше типичной для страницы.
+ */
+function markLargeText(result, source) {
+  if (source.length < 3 || !result.length) return;
+  const heights = source.map(r => r.bottom - r.top).sort((a, b) => a - b);
+  const medH = heights[heights.length >> 1];
+  if (!medH) return;
+  for (const l of result) {
+    const inside = source.filter(r => {
+      const cy = (r.top + r.bottom) / 2;
+      return cy >= l.top && cy <= l.bottom;
+    });
+    if (!inside.length) continue;
+    const hs = inside.map(r => r.bottom - r.top).sort((a, b) => a - b);
+    const h = hs[hs.length >> 1];
+    if (h > medH * 1.5) l.large = true;
+  }
 }
 
 /* ───────────────────────── 7. Полосы экрана (KomaBands) ───────────────────────── */
@@ -3673,6 +3746,7 @@ const Reader = {
       d.style.height = ((line.bottom - line.top) * 100) + '%';
       const isCur = this.current && this.current.text === line.text;
       const isDone = this.spoken.has(line.text);
+      if (line.large) d.classList.add('large');     // титул/каллиграфия — другой цвет
       if (isCur) d.classList.add('cur');
       else if (isDone) d.classList.add('done');
       d.onclick = () => TTS.speakLine(line);
@@ -4222,7 +4296,9 @@ function renderTextSheet(i) {
       + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с`
       + (data.bands > 1 ? ` · полос: ${data.bands}` : '') + stamp;
   $('#textOrdered').innerHTML = data.lines.length
-    ? data.lines.map((l, n) => `<div class="lineitem"><b>${n + 1}</b>${escapeHtml(l.text)}</div>`).join('')
+    ? data.lines.map((l, n) => `<div class="lineitem${l.large ? ' large' : ''}">`
+        + `<b>${n + 1}</b>${escapeHtml(l.text)}`
+        + (l.large ? '<span class="hint"> · крупный текст</span>' : '') + '</div>').join('')
     : '<div class="hint">Реплик не найдено</div>';
   $('#textRaw').textContent = raw.map(r => r.text).join('\n') || '—';
 }
