@@ -159,7 +159,9 @@
     <div class="hint" id="importHint">Файлы остаются на устройстве: никуда не загружаются.</div>
     <button class="btn primary" id="btnPickDir" style="width:100%;margin-top:14px;justify-content:center">Выбрать папку</button>
     <button class="btn" id="btnPickFiles" style="width:100%;margin-top:8px;justify-content:center">Выбрать файлы или CBZ</button>
+    <button class="btn" id="btnPickFolderModern" style="width:100%;margin-top:8px;justify-content:center;display:none">Выбрать папку (File System)</button>
     <div class="hint" id="importNote" style="margin-top:12px"></div>
+    <div class="hint" id="importTip" style="margin-top:10px"></div>
     <button class="btn" id="closeImport" style="margin-top:18px;width:100%">Отмена</button>
   </div>
 </div>
@@ -172,9 +174,16 @@
       <b>detection.onnx</b>, <b>cyrillic.onnx</b>, <b>cyrillic.txt</b>.</div>
     <div class="lbl">СОСТОЯНИЕ</div>
     <div id="modelsState" class="kv"></div>
-    <div class="row" style="margin-top:12px;gap:8px">
+    <div class="hint" style="margin-top:8px">
+      Можно выбрать <b>все три файла сразу</b>, можно по одному — шторка не закроется,
+      и ниже будет видно, чего ещё не хватает.
+    </div>
+    <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
       <button class="btn primary" id="btnPickModels">Выбрать файлы</button>
-      <button class="btn" id="btnClearModels">Убрать</button>
+      <button class="btn" id="btnPickModelDir">Папка с моделями</button>
+    </div>
+    <div class="row" style="margin-top:8px;gap:8px">
+      <button class="btn" id="btnClearModels">Убрать модели</button>
     </div>
     <div class="lbl">ДВИЖОК</div>
     <div id="ortState" class="kv hint"></div>
@@ -275,8 +284,13 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<input type="file" id="filePick" multiple accept="image/*,.cbz,.zip,.onnx,.txt,.json" style="display:none">
+<!-- Каждый выбор файлов — СВОЙ input. Раньше они переиспользовались, и выбор
+     модели запускал импорт библиотеки (выбрасывало в читалку). -->
+<input type="file" id="imgPick" multiple accept="image/*,.cbz,.zip" style="display:none">
 <input type="file" id="dirPick" webkitdirectory directory multiple style="display:none">
+<input type="file" id="modelPick" multiple style="display:none">
+<input type="file" id="modelDirPick" webkitdirectory directory multiple style="display:none">
+<input type="file" id="rulesPick" accept=".json,application/json" style="display:none">
 
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
 <script>
@@ -293,7 +307,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v0.2';
+const VERSION = 'v0.3';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -1458,35 +1472,21 @@ async function renderModels() {
   const rec = await DB.get('kv', 'model:rec');
   const dict = await DB.get('kv', 'model:dict');
   const f = (x, n) => x ? `${n}: ${(x.v.byteLength / 1048576).toFixed(1)} МБ` : `${n}: нет`;
-  $('#modelsState').innerHTML = [f(det, 'detection.onnx'), f(rec, 'cyrillic.onnx'),
-    dict ? `cyrillic.txt: ${String(dict.v).split('\n').filter(Boolean).length} символов` : 'cyrillic.txt: нет'].join('<br>');
+  const mark = (ok) => ok ? '✅' : '❌';
+  $('#modelsState').innerHTML = [
+    `${mark(!!det)} ${f(det, 'detection.onnx')}`,
+    `${mark(!!rec)} ${f(rec, 'cyrillic.onnx')}`,
+    `${mark(!!dict)} ${dict ? `cyrillic.txt: ${String(dict.v).split('\n').filter(Boolean).length} символов` : 'cyrillic.txt: нет'}`,
+  ].join('<br>');
   $('#ortState').textContent = (typeof ort === 'undefined')
     ? 'onnxruntime-web не загрузился (нет сети?). Откройте файл на устройстве с интернетом.'
     : (OCR.ready ? 'движок готов: ' + (OCR.det.inputNames[0]) : 'движок загружен, моделей нет');
 }
+/* Совместимость: старый вход выбора моделей ведёт на общий разбор файлов,
+   но НЕ через общий input библиотеки (из-за него выбор модели открывал читалку). */
 async function pickModels() {
-  const inp = $('#filePick');
-  inp.accept = '.onnx,.txt';
-  inp.onchange = async () => {
-    const files = Array.from(inp.files || []);
-    inp.value = '';
-    if (!files.length) return;
-    const has = (n) => files.some(f => f.name.toLowerCase() === n);
-    if (!has('detection.onnx') || !has('cyrillic.onnx') || !has('cyrillic.txt')) {
-      if (files.length < 3) return toast('Выберите три файла: detection.onnx, cyrillic.onnx, cyrillic.txt');
-    }
-    for (const f of files) {
-      const n = f.name.toLowerCase();
-      if (n === 'detection.onnx') await DB.put('kv', { k: 'model:det', v: await f.arrayBuffer() });
-      else if (n === 'cyrillic.onnx') await DB.put('kv', { k: 'model:rec', v: await f.arrayBuffer() });
-      else if (n === 'cyrillic.txt') await DB.put('kv', { k: 'model:dict', v: await f.text() });
-    }
-    toast('Модели сохранены, загружаю движок…', 4000);
-    const ok = await OCR.loadModels().catch(e => { toast('Модели не загрузились: ' + e.message); return false; });
-    await renderModels();
-    if (ok) toast('Готово: можно распознавать');
-  };
-  inp.click();
+  const inp = document.getElementById('modelPick');
+  if (inp) inp.click();
 }
 
 /* ─── прокрутка: ждём остановки ─── */
@@ -1558,73 +1558,114 @@ function turnPage(dir) {
 
 /* ───────────────────────── 12. Привязка событий ───────────────────────── */
 function bindUI() {
-  // библиотека: выбор способа импорта — отдельной шторкой, БЕЗ confirm().
-  // confirm() глушится в предпросмотре и в части мобильных браузеров, а
-  // webkitdirectory на Android Chrome не поддерживается вообще — из-за этого
-  // «＋» молча ничего не делал.
+  // ── Импорт главы ────────────────────────────────────────────────────────
+  // Каждый выбор — свой input: общий переиспользовался, и выбор модели
+  // запускал импорт библиотеки («выбрал onnx — и меня выбросило в читалку»).
+  const imgInput = $('#imgPick');
+  const dirInput = $('#dirPick');
+  const modelInput = $('#modelPick');
+  const modelDirInput = $('#modelDirPick');
+  const rulesInput = $('#rulesPick');
+
   $('#btnImport').onclick = () => {
-    const android = /Android/i.test(navigator.userAgent);
-    $('#importNote').innerHTML = android
-      ? 'В Android Chrome выбор папки браузером не поддерживается: выберите сразу '
-        + 'все страницы главы (или CBZ). Порядок берётся из имён файлов.'
-      : 'Папка удобна на десктопе: страницы берутся все сразу, порядок — по именам файлов.';
-    $('#btnPickDir').style.display = android ? 'none' : 'block';
+    const fsOK = typeof window.showDirectoryPicker === 'function';
+    const dirOK = 'webkitdirectory' in document.createElement('input');
+    $('#btnPickDir').style.display = dirOK ? 'block' : 'none';
+    $('#btnPickFolderModern').style.display = fsOK ? 'block' : 'none';
+    $('#importNote').innerHTML = dirOK || fsOK
+      ? 'Папка: страницы берутся все сразу, порядок — по именам файлов.'
+      : 'Этот браузер не умеет выбирать папку. Нажмите «Выбрать файлы или CBZ» '
+        + 'и отметьте сразу все страницы главы — порядок возьмём из имён.';
+    $('#importTip').innerHTML = 'Подойдёт: папка с главой · CBZ/ZIP · просто набор картинок.<br>'
+      + (ENV.android
+        ? 'На Android папку браузер не отдаёт: в файловом менеджере удерживайте первую '
+          + 'страницу, затем последнюю — выберутся все, порядок возьмём из имён.'
+        : 'На десктопе проще всего выбрать папку целиком.');
     openSheet('sheetImport');
   };
 
-  const dirInput = $('#dirPick');
+  async function addImages(files) {
+    const imgs = Array.from(files).filter(f => /\.(jpe?g|png|webp|avif|bmp|gif)$/i.test(f.name));
+    if (!imgs.length) { toast('Среди выбранных файлов нет картинок'); return; }
+    // Одна книга на главу: имя папки, если оно есть, иначе имя файла/общий заголовок.
+    const rel = (f) => f.webkitRelativePath || f.name;
+    const folders = new Set(imgs.map(f => (f.webkitRelativePath || '').split('/')[0]).filter(Boolean));
+    imgs.sort((a, b) => rel(a).localeCompare(rel(b), undefined, { numeric: true }));
+    const title = folders.size === 1 ? Array.from(folders)[0]
+      : imgs.length === 1 ? imgs[0].name.replace(/\.[^.]+$/, '')
+      : 'Глава из ' + imgs.length + ' страниц';
+    toast('Сохраняю ' + imgs.length + ' страниц…', 5000);
+    await Library.addBook(title, imgs.map(f => ({ name: f.name, blob: f })), 'files');
+    await Library.load();
+    toast('Добавлено: ' + title + ' (' + imgs.length + ' стр.)');
+  }
+
+  $('#btnPickDir').onclick = () => dirInput.click();
+  $('#btnPickFolderModern').onclick = async () => {
+    try {
+      const handle = await window.showDirectoryPicker();
+      const files = [];
+      for await (const entry of handle.values()) {
+        if (entry.kind !== 'file') continue;
+        files.push(await entry.getFile());
+      }
+      closeSheets();
+      await addImages(files);
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      toast('Папка не открылась: ' + (e.message || e) + ' — выбирайте файлами', 5000);
+      imgInput.click();
+    }
+  };
+  $('#btnPickFiles').onclick = () => imgInput.click();
+
   dirInput.addEventListener('change', async () => {
     const files = Array.from(dirInput.files || []);
     dirInput.value = '';
     if (!files.length) return;
     closeSheets();
-    try { await importDir(files); }
+    try { await addImages(files); }
     catch (e) { toast('Не удалось добавить папку: ' + (e.message || e), 5000); }
   });
-  $('#btnPickDir').onclick = () => {
-    // На случай, если webkitdirectory молча не сработал — объясняем, а не молчим.
-    try {
-      dirInput.click();
-      setTimeout(() => {
-        if (!dirInput.files || !dirInput.files.length) {
-          toast('Браузер не открыл выбор папки — выберите файлы или CBZ', 4000);
-        }
-      }, 1200);
-    } catch (e) {
-      toast('Папка недоступна, выбирайте файлы: ' + (e.message || e), 4000);
-    }
-  };
-
-  const fileInput = $('#filePick');
-  fileInput.addEventListener('change', async () => {
-    const files = Array.from(fileInput.files || []);
-    fileInput.value = '';
+  imgInput.addEventListener('change', async () => {
+    const files = Array.from(imgInput.files || []);
+    imgInput.value = '';
     if (!files.length) return;
     closeSheets();
     try {
       const zips = files.filter(f => /\.(cbz|zip)$/i.test(f.name));
-      const imgs = files.filter(f => /\.(jpe?g|png|webp|avif|bmp|gif)$/i.test(f.name));
       for (const z of zips) await importZip(z);
-      if (imgs.length) {
-        const title = imgs.length === 1 ? imgs[0].name.replace(/\.[^.]+$/, '') : 'Глава из ' + imgs.length + ' страниц';
-        imgs.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-        toast('Сохраняю ' + imgs.length + ' страниц…', 4000);
-        await Library.addBook(title, imgs.map(f => ({ name: f.name, blob: f })), 'files');
-        await Library.load();
-        toast('Добавлено: ' + title);
-      }
-      if (!zips.length && !imgs.length) toast('Не нашёл ни картинок, ни CBZ в выборе');
-    } catch (e) {
-      toast('Импорт не удался: ' + (e.message || e), 5000);
-    }
+      const rest = files.filter(f => !/\.(cbz|zip)$/i.test(f.name));
+      if (rest.length) await addImages(rest);
+    } catch (e) { toast('Импорт не удался: ' + (e.message || e), 5000); }
   });
-  $('#btnPickFiles').onclick = () => { fileInput.accept = '.cbz,.zip,image/*'; fileInput.click(); };
   $('#closeImport').onclick = closeSheets;
+
   $('#btnModels').onclick = () => { openSheet('sheetModels'); renderModels(); };
 
   $('#btnRulesLib').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
   $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4').forEach(b => b.onclick = closeSheets);
-  $('#btnPickModels').onclick = pickModels;
+  $('#btnPickModels').onclick = () => modelInput.click();
+  $('#btnPickModelDir').onclick = () => {
+    if (!('webkitdirectory' in document.createElement('input'))) {
+      toast('Папку браузер не выберет — выберите три файла сразу', 4000);
+      modelInput.click();
+      return;
+    }
+    modelDirInput.click();
+  };
+  modelInput.addEventListener('change', async () => {
+    const files = Array.from(modelInput.files || []);
+    modelInput.value = '';
+    try { await storeModelFiles(files); }
+    catch (e) { toast('Модель не принялась: ' + (e.message || e), 5000); }
+  });
+  modelDirInput.addEventListener('change', async () => {
+    const files = Array.from(modelDirInput.files || []);
+    modelDirInput.value = '';
+    try { await storeModelFiles(files); }
+    catch (e) { toast('Модели из папки не принялись: ' + (e.message || e), 5000); }
+  });
   $('#btnClearModels').onclick = async () => {
     for (const k of ['model:det', 'model:rec', 'model:dict']) await DB.del('kv', k);
     OCR.ready = false; OCR.det = OCR.rec = null;
@@ -1633,8 +1674,7 @@ function bindUI() {
 
   // правила
   $('#btnRulesImport').onclick = () => {
-    const inp = document.createElement('input');
-    inp.type = 'file'; inp.accept = '.json,application/json';
+    const inp = rulesInput;
     inp.onchange = async () => {
       const f = inp.files?.[0]; inp.value = '';
       if (!f) return;
