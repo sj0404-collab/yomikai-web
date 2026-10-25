@@ -107,6 +107,8 @@
     <button class="icon" id="btnRulesLib" title="Правила">☰</button>
   </header>
   <div class="scroll pad">
+    <div id="envBanner" style="display:none;background:#7a3030;color:#fff;border-radius:12px;padding:10px 12px;font-size:12px;margin-bottom:12px"></div>
+    <div id="selfCheck" class="hint" style="margin-bottom:10px"></div>
     <div id="libEmpty" class="empty">
       Пока пусто.<br><br>
       Нажмите ＋ и выберите папку с главой (или CBZ).<br>
@@ -149,6 +151,18 @@
     <span style="font-size:11.5px;color:var(--dim);min-width:24px" id="pageTotal">1</span>
   </div>
 </section>
+
+<!-- ═══ Шторка: добавить главу ═══ -->
+<div class="sheet" id="sheetImport">
+  <div class="head">Добавить главу</div>
+  <div class="body">
+    <div class="hint" id="importHint">Файлы остаются на устройстве: никуда не загружаются.</div>
+    <button class="btn primary" id="btnPickDir" style="width:100%;margin-top:14px;justify-content:center">Выбрать папку</button>
+    <button class="btn" id="btnPickFiles" style="width:100%;margin-top:8px;justify-content:center">Выбрать файлы или CBZ</button>
+    <div class="hint" id="importNote" style="margin-top:12px"></div>
+    <button class="btn" id="closeImport" style="margin-top:18px;width:100%">Отмена</button>
+  </div>
+</div>
 
 <!-- ═══ Шторка: модели ═══ -->
 <div class="sheet" id="sheetModels">
@@ -279,11 +293,28 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+const VERSION = 'v0.2';
+
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
    Ничего не уходит в сеть: сервера у этой страницы нет.                        */
 const DB = (() => {
   let dbp = null;
+  // Если IndexedDB недоступен (предпросмотр в песочнице без same-origin),
+  // работаем в памяти: библиотека и чтение живут до перезагрузки страницы,
+  // но кнопки не «молчат».
+  const memory = { books: new Map(), pages: new Map(), kv: new Map() };
+  let useMemory = false;
+  const memApi = {
+    put: async (store, val) => {
+      const key = store === 'books' ? val.id : store === 'pages' ? val.key : val.k;
+      memory[store].set(key, val);
+    },
+    get: async (store, key) => memory[store].get(key),
+    del: async (store, key) => { memory[store].delete(key); },
+    all: async (store) => Array.from(memory[store].values()),
+    clear: async (store) => { memory[store].clear(); },
+  };
   function open() {
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
@@ -311,12 +342,29 @@ const DB = (() => {
       t.onerror = () => rej(t.error);
     });
   }
-  return {
+  const realApi = {
     put: (store, val) => tx(store, 'readwrite', s => s.put(val)),
     get: (store, key) => tx(store, 'readonly', s => s.get(key)),
     del: (store, key) => tx(store, 'readwrite', s => s.delete(key)),
     all: (store) => tx(store, 'readonly', s => s.getAll()),
     clear: (store) => tx(store, 'readwrite', s => s.clear()),
+  };
+  const wrap = (fn) => async (...args) => {
+    if (useMemory) return memApi[fn.name](...args);
+    try { return await realApi[fn.name](...args); }
+    catch (e) {
+      if (useMemory) return memApi[fn.name](...args);
+      // Первый же отказ — переходим в память и говорим об этом один раз.
+      console.warn('IndexedDB недоступен, работаю в памяти:', e);
+      useMemory = true;
+      DB.inMemory = true;
+      return memApi[fn.name](...args);
+    }
+  };
+  return {
+    inMemory: false,
+    put: wrap({ name: 'put' }), get: wrap({ name: 'get' }), del: wrap({ name: 'del' }),
+    all: wrap({ name: 'all' }), clear: wrap({ name: 'clear' }),
   };
 })();
 
@@ -410,17 +458,41 @@ function renderLibrary() {
   for (const b of Library.books) {
     const el = document.createElement('div');
     el.className = 'card';
+    el.dataset.armed = '0';
     const url = b.cover ? URL.createObjectURL(b.cover) : '';
     el.innerHTML = `${url ? `<img src="${url}" alt="">` : '<div class="nofoto">нет обложки</div>'}
       <button class="del">✕</button>
       <div class="cap">${escapeHtml(b.title)}<span>${b.count} стр. · ${b.mode === 'vertical' ? 'лента' : b.mode === 'rtl' ? 'справа налево' : 'слева направо'}</span></div>`;
+    // confirm() в предпросмотре и части мобильных браузеров глушится, поэтому
+    // спрашиваем вторым нажатием, а не модалкой.
     el.querySelector('.del').onclick = async (e) => {
       e.stopPropagation();
-      if (!confirm('Удалить «' + b.title + '» из библиотеки?')) return;
+      if (el.dataset.armed !== '1') {
+        el.dataset.armed = '1';
+        el.querySelector('.del').textContent = '?';
+        toast('Нажмите ✕ ещё раз, чтобы удалить «' + b.title + '»');
+        setTimeout(() => {
+          if (el.dataset.armed === '1') { el.dataset.armed = '0'; el.querySelector('.del').textContent = '✕'; }
+        }, 3000);
+        return;
+      }
       await Library.remove(b.id); await Library.load();
+      toast('Удалено');
     };
     el.onclick = () => openBook(b);
     grid.appendChild(el);
+  }
+}
+/**
+ * Открыть книгу. Раньше карточка звала openBook(), а такой функции не было
+ * вовсе: тап по книге молча ничего не делал. Ошибки теперь видно, а не в консоли.
+ */
+async function openBook(book) {
+  try {
+    await Reader.open(book);
+  } catch (e) {
+    console.error('openBook', e);
+    toast('Не удалось открыть «' + book.title + '»: ' + (e && e.message ? e.message : e), 5000);
   }
 }
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -1486,32 +1558,70 @@ function turnPage(dir) {
 
 /* ───────────────────────── 12. Привязка событий ───────────────────────── */
 function bindUI() {
-  // библиотека
+  // библиотека: выбор способа импорта — отдельной шторкой, БЕЗ confirm().
+  // confirm() глушится в предпросмотре и в части мобильных браузеров, а
+  // webkitdirectory на Android Chrome не поддерживается вообще — из-за этого
+  // «＋» молча ничего не делал.
   $('#btnImport').onclick = () => {
-    // Папка — нативный выбор каталога; на Android Chrome каталог не даёт,
-    // поэтому предлагаем ещё CBZ и отдельные страницы через тот же ＋.
-    const dirInput = $('#dirPick');
-    dirInput.onchange = async () => {
-      const files = Array.from(dirInput.files || []);
-      dirInput.value = '';
-      if (files.length) await importDir(files);
-    };
-    const anyInput = $('#filePick');
-    anyInput.accept = '.cbz,.zip,image/*';
-    anyInput.onchange = async () => {
-      const files = Array.from(anyInput.files || []);
-      anyInput.value = '';
-      if (!files.length) return;
+    const android = /Android/i.test(navigator.userAgent);
+    $('#importNote').innerHTML = android
+      ? 'В Android Chrome выбор папки браузером не поддерживается: выберите сразу '
+        + 'все страницы главы (или CBZ). Порядок берётся из имён файлов.'
+      : 'Папка удобна на десктопе: страницы берутся все сразу, порядок — по именам файлов.';
+    $('#btnPickDir').style.display = android ? 'none' : 'block';
+    openSheet('sheetImport');
+  };
+
+  const dirInput = $('#dirPick');
+  dirInput.addEventListener('change', async () => {
+    const files = Array.from(dirInput.files || []);
+    dirInput.value = '';
+    if (!files.length) return;
+    closeSheets();
+    try { await importDir(files); }
+    catch (e) { toast('Не удалось добавить папку: ' + (e.message || e), 5000); }
+  });
+  $('#btnPickDir').onclick = () => {
+    // На случай, если webkitdirectory молча не сработал — объясняем, а не молчим.
+    try {
+      dirInput.click();
+      setTimeout(() => {
+        if (!dirInput.files || !dirInput.files.length) {
+          toast('Браузер не открыл выбор папки — выберите файлы или CBZ', 4000);
+        }
+      }, 1200);
+    } catch (e) {
+      toast('Папка недоступна, выбирайте файлы: ' + (e.message || e), 4000);
+    }
+  };
+
+  const fileInput = $('#filePick');
+  fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files || []);
+    fileInput.value = '';
+    if (!files.length) return;
+    closeSheets();
+    try {
       const zips = files.filter(f => /\.(cbz|zip)$/i.test(f.name));
       const imgs = files.filter(f => /\.(jpe?g|png|webp|avif|bmp|gif)$/i.test(f.name));
       for (const z of zips) await importZip(z);
-      if (imgs.length) await importDir(imgs.map(f => ({ name: f.name, webkitRelativePath: f.name, blob: f })));
-    };
-    // Спрашиваем, что именно добавить
-    const what = confirm('Добавить папку с главой?\n\nOK — выбрать папку\nОтмена — выбрать CBZ/файлы');
-    (what ? dirInput : anyInput).click();
-  };
+      if (imgs.length) {
+        const title = imgs.length === 1 ? imgs[0].name.replace(/\.[^.]+$/, '') : 'Глава из ' + imgs.length + ' страниц';
+        imgs.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+        toast('Сохраняю ' + imgs.length + ' страниц…', 4000);
+        await Library.addBook(title, imgs.map(f => ({ name: f.name, blob: f })), 'files');
+        await Library.load();
+        toast('Добавлено: ' + title);
+      }
+      if (!zips.length && !imgs.length) toast('Не нашёл ни картинок, ни CBZ в выборе');
+    } catch (e) {
+      toast('Импорт не удался: ' + (e.message || e), 5000);
+    }
+  });
+  $('#btnPickFiles').onclick = () => { fileInput.accept = '.cbz,.zip,image/*'; fileInput.click(); };
+  $('#closeImport').onclick = closeSheets;
   $('#btnModels').onclick = () => { openSheet('sheetModels'); renderModels(); };
+
   $('#btnRulesLib').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
   $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4').forEach(b => b.onclick = closeSheets);
   $('#btnPickModels').onclick = pickModels;
@@ -1523,8 +1633,8 @@ function bindUI() {
 
   // правила
   $('#btnRulesImport').onclick = () => {
-    const inp = $('#filePick');
-    inp.accept = '.json,application/json';
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.json,application/json';
     inp.onchange = async () => {
       const f = inp.files?.[0]; inp.value = '';
       if (!f) return;
@@ -1648,6 +1758,40 @@ function syncSettingsUI() {
 }
 
 /* ───────────────────────── 13. Старт ───────────────────────── */
+// Ошибки не должны прятаться в консоли: иначе кнопка «молчит», и непонятно почему.
+window.addEventListener('error', (e) => {
+  const msg = e.message || (e.error && e.error.message) || 'ошибка';
+  toast('Ошибка: ' + msg, 5000);
+  console.error(e.error || msg);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  toast('Ошибка: ' + ((e.reason && e.reason.message) || e.reason || 'неизвестно'), 5000);
+  console.error(e.reason);
+});
+
+const ENV = {
+  sandboxed: (() => { try { return window.self !== window.top; } catch { return true; } })(),
+  android: /Android/i.test(navigator.userAgent),
+};
+
+function showEnvBanner() {
+  const b = $('#envBanner');
+  const lines = [];
+  if (ENV.sandboxed) lines.push('Открыто в предпросмотре: выбор файлов и IndexedDB могут быть заблокированы. Скачайте файл и откройте в Chrome.');
+  if (DB.inMemory) lines.push('Хранилище недоступно — библиотека живёт только до перезагрузки страницы.');
+  b.style.display = lines.length ? 'block' : 'none';
+  b.innerHTML = lines.join('<br>');
+}
+async function selfCheck() {
+  const det = await DB.get('kv', 'model:det');
+  const parts = [];
+  parts.push(OCR.ready ? 'OCR готов' : (det ? 'модели есть, движок не загружен' : 'моделей нет — ⚙'));
+  parts.push(typeof ort === 'undefined' ? 'onnxruntime-web не загружен (нужна сеть)' : 'onnxruntime-web загружен');
+  parts.push('TTS ' + (speechSynthesis.getVoices().length ? 'есть' : 'нет голосов'));
+  if (ENV.android) parts.push('Android: папки нет, выбирайте файлы/CBZ');
+  $('#selfCheck').textContent = 'KOMA Web ' + VERSION + ' · ' + parts.join(' · ');
+}
+
 (async function boot() {
   bindUI();
   watchScroll();
@@ -1659,6 +1803,9 @@ function syncSettingsUI() {
   const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
   if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);
   renderRulesInfo();
+  showEnvBanner();
+  await selfCheck();
+  setTimeout(selfCheck, 2500);
   // предупреждение о среде
   if (typeof ort === 'undefined') {
     $('#ortState').textContent = 'onnxruntime-web не загрузился: нет сети или открыто в предпросмотре без интернета.';
