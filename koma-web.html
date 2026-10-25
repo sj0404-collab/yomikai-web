@@ -187,6 +187,7 @@
       <button class="btn primary" id="btnPickModels">Выбрать файлы</button>
       <button class="btn" id="btnPickModelDir">Папка с моделями</button>
       <button class="btn" id="btnTestEngine">Проверить движок</button>
+      <button class="btn" id="btnPickDict">Словарь ru_250k</button>
     </div>
     <div class="row" style="margin-top:8px;gap:8px">
       <button class="btn" id="btnClearModels">Убрать модели</button>
@@ -194,6 +195,7 @@
     <div class="lbl">ДВИЖОК</div>
     <div id="ortState" class="kv hint"></div>
     <div id="engineNote" class="hint" style="display:none;color:#ffd2d2;margin-top:6px"></div>
+    <div id="dictState" class="hint" style="margin-top:6px"></div>
     <div class="hint" style="margin-top:10px">
       Распознавание целиком в браузере: ни один кадр никуда не отправляется.
       Модели хранятся в IndexedDB этого сайта.
@@ -2202,7 +2204,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.6';
+const VERSION = 'v1.7';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2467,6 +2469,7 @@ const DEFAULT_RULES = {
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
   detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
+  junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
 };
 let RULES = { ...DEFAULT_RULES };
@@ -2484,6 +2487,7 @@ function sanitizeRules(r) {
   num('semiManualSettleMs', 0, 5000);
   R.detRetry = R.detRetry !== false;                       // повтор детектора при 0 боксов
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
+  num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
   if (R.inkMax <= R.inkMin) R.inkMax = Math.min(255, R.inkMin + 1);
   R.inkTileRows = Math.round(R.inkTileRows); R.bandsMax = Math.round(R.bandsMax);
   R.inkLevels = Math.round(R.inkLevels); R.semiManualSettleMs = Math.round(R.semiManualSettleMs);
@@ -2560,6 +2564,113 @@ function cleanSpeech(raw) {
   }
   return text.trim();
 }
+
+/* ───────────────────────── 4c. Язык: словарь и фильтр мусора ─────────────────────────
+   Порт идеи KomaWords.kt. Модель путает похожие буквы и «видит» слова в
+   каллиграфии и звуковых эффектах: «ол кослл алмчлс», «сттангасоат». Без словаря
+   такие строки попадают в озвучку как реплики. Словарь — `ru_250k.txt` из
+   assets/koma/dict того же APK, 250 000 слов по убыванию частоты.
+   Он НЕ вшит в файл: его выбирают в ⚙ Модели, как и модели.
+*/
+const Words = {
+  ready: false,
+  rank: null,          // слово → номер строки (ранг частоты)
+  size: 0,
+  KNOWN_RANK: 50000,
+  COMMON_RANK: 100000,
+  ALPHABET: 'абвгдежзийклмнопрстуфхцчшщъыьэюяё'.split(''),
+  async load() {
+    const row = await DB.get('kv', 'dict:ru250k');
+    if (!row || !row.v) { this.ready = false; return false; }
+    const lines = String(row.v).split('\n');
+    const rank = new Map();
+    let n = 0;
+    for (const line of lines) {
+      const w = line.split(/\s+/)[0];
+      if (!w) continue;
+      const low = w.toLowerCase();
+      if (!rank.has(low)) rank.set(low, n);
+      n++;
+    }
+    this.rank = rank; this.size = n; this.ready = n > 1000;
+    return this.ready;
+  },
+  /** Слово верное, если оно из частых. */
+  isKnown(w) {
+    if (!this.ready) return true;
+    const r = this.rank.get(w.toLowerCase());
+    return r !== undefined && r <= this.KNOWN_RANK;
+  },
+  /** Одно редактирование: удаление, перестановка, замена, вставка. */
+  edits1(word) {
+    const out = new Set();
+    const chars = Array.from(word);
+    for (let i = 0; i < chars.length; i++) {
+      out.add(chars.slice(0, i).concat(chars.slice(i + 1)).join(''));
+      if (i + 1 < chars.length) {
+        const sw = chars.slice();
+        [sw[i], sw[i + 1]] = [sw[i + 1], sw[i]];
+        out.add(sw.join(''));
+      }
+      for (const c of this.ALPHABET) {
+        out.add(chars.slice(0, i).concat([c], chars.slice(i + 1)).join(''));
+        out.add(chars.slice(0, i).concat([c], chars.slice(i)).join(''));
+      }
+    }
+    return out;
+  },
+  candidate(word) {
+    let best = null, bestRank = Infinity;
+    for (const cand of this.edits1(word)) {
+      const r = this.rank.get(cand);
+      if (r !== undefined && r <= this.COMMON_RANK && r < bestRank) { bestRank = r; best = cand; }
+    }
+    return best;
+  },
+  /** Сохранить регистр исходного слова. */
+  sameCase(src, word) {
+    const letters = Array.from(src);
+    const upper = letters.filter(ch => /[A-ZА-ЯЁ]/.test(ch)).length > letters.filter(ch => /[a-zа-яё]/.test(ch)).length;
+    return upper ? word.toUpperCase() : (letters[0] && /[A-ZА-ЯЁ]/.test(letters[0]) ? word[0].toUpperCase() + word.slice(1) : word);
+  },
+  correctWord(word) {
+    if (!this.ready) return word;
+    const low = word.toLowerCase();
+    if (low.length < 4) return word;
+    if (this.isKnown(low)) return word;
+    const cand = this.candidate(low);
+    return cand ? this.sameCase(word, cand) : word;
+  },
+  /** Починка реплики: слова по словарю + висячий дефис в конце. */
+  finish(text) {
+    let t = String(text || '');
+    if (this.ready) {
+      t = t.replace(/[А-Яа-яЁё]+/g, w => this.correctWord(w));
+    }
+    return t.replace(/(?<=\p{L})-\s*$/u, '').trim();
+  },
+  /**
+   * Доля «несуществующих» слов. По ней строка из каллиграфии и звуковых
+   * эффектов отбрасывается: в настоящей реплике почти все слова есть в словаре.
+   */
+  junkRatio(text) {
+    if (!this.ready) return 0;
+    const words = (String(text).match(/[А-Яа-яЁё]{3,}/g) || []).map(w => w.toLowerCase());
+    if (!words.length) return 1;
+    let junk = 0;
+    for (const w of words) {
+      const r = this.rank.get(w);
+      if (r === undefined || r > this.COMMON_RANK) junk++;
+    }
+    return junk / words.length;
+  },
+  /** Починить и отбросить мусор. */
+  polish(text, junkRatio) {
+    const fixed = this.finish(text);
+    if (!this.ready) return fixed;
+    return this.junkRatio(fixed) > (junkRatio ?? 0.6) ? '' : fixed;
+  },
+};
 
 /* ───────────────────────── 5. OCR: модели в браузере ───────────────────────── */
 const OCR = {
@@ -3056,7 +3167,13 @@ function sameBubble(a, b, bubbleGap, mergeHeightRatio) {
   if (aH > aW * 3 || bH > bW * 3) return false;   // вертикальные колонки — не строки
   // Крупное название и мелкие титры — РАЗНЫЕ реплики: иначе рамка рисуется по
   // объединению двух шрифтов и не совпадает с тем, что читается.
-  if (Math.max(aH, bH) / Math.min(aH, bH) > mergeHeightRatio) return false;
+  //
+  // Сравниваем высоту СТРОКИ (lh), а не всего облачка: у склеенного из двух-трёх
+  // строк облачка высота втрое больше одной строки, и проверка «по габаритам»
+  // отказывалась приклеить третью строку — облачко рвалось на части
+  // («УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ,» / «ТАК ЧТО ЕЁ ВЫСОЧЕСТВО, ДОЛЖНО» / «БЫТЬ, ПРИБЫЛА.»).
+  const aLine = a.lh || aH, bLine = b.lh || bH;
+  if (Math.max(aLine, bLine) / Math.min(aLine, bLine) > mergeHeightRatio) return false;
   return true;
 }
 function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
@@ -3072,12 +3189,16 @@ function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
     }
     if (bestIndex >= 0) {
       const b = result[bestIndex];
+      const lineH = line.bottom - line.top;
       result[bestIndex] = {
         text: joinBubbleText(b.text, line.text),
         left: Math.min(b.left, line.left), top: Math.min(b.top, line.top),
         right: Math.max(b.right, line.right), bottom: Math.max(b.bottom, line.bottom),
+        // Типичная высота строки внутри облачка — по ней и решается, можно ли
+        // приклеить следующую строку.
+        lh: Math.min(b.lh || (b.bottom - b.top), lineH),
       };
-    } else result.push(line);
+    } else result.push({ ...line, lh: line.bottom - line.top });
   }
   return result;
 }
@@ -3137,20 +3258,49 @@ function orderBubbles(bubbles, rtl) {
   return bands.flatMap(band => band.sort((x, y) => rtl ? y.left - x.left : x.left - y.left));
 }
 /* панели: горизонтальные «желоба» между кадрами (упрощённый KomaPanels) */
-function splitPanels(regions) {
-  if (regions.length < 3) return [regions];
-  const sorted = regions.slice().sort((a, b) => a.top - b.top);
-  const panels = [];
-  let cur = [sorted[0]];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = cur[cur.length - 1], rg = sorted[i];
-    const gap = rg.top - prev.bottom;
-    const h = Math.max(prev.bottom - prev.top, 0.01);
-    if (gap > h * 1.2 && cur.length >= 2) { panels.push(cur); cur = [rg]; }
-    else cur.push(rg);
+/**
+ * XY-cut как в KomaAutoRead.splitPanels: горизонтальная пустая полоса делит
+ * страницу на верх/низ, вертикальная — на панели, стоящие рядом. Внутри панели
+ * разрез повторяется.
+ *
+ * Раньше здесь была упрощённая версия («зазор больше 1.2 высоты строки»), и она
+ * резала ОБЛАЧКО по строкам: «УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ,» / «ТАК ЧТО ЕЁ
+ * ВЫСОЧЕСТВО, ДОЛЖНО» / «БЫТЬ, ПРИБЫЛА.» становились тремя репликами.
+ */
+const Y_CUT = 0.022, X_CUT = 0.035;
+
+function mergeByAxis(group, byY, cut) {
+  const sorted = group.slice().sort((a, b) => (byY ? a.top - b.top : a.left - b.left));
+  const bands = [];
+  for (const rg of sorted) {
+    const start = byY ? rg.top : rg.left;
+    const end = byY ? rg.bottom : rg.right;
+    const last = bands[bands.length - 1];
+    if (last && start - last.end <= cut) {
+      last.end = Math.max(last.end, end);
+      last.items.push(rg);
+    } else {
+      bands.push({ start, end, items: [rg] });
+    }
   }
-  panels.push(cur);
-  return panels;
+  return bands.length <= 1 ? [group] : bands.map(b => b.items);
+}
+
+function splitPanels(group, rtl = true, depth = 0) {
+  if (group.length <= 1 || depth > 12) return [group];
+  const heights = group.map(r => r.bottom - r.top).sort((a, b) => a - b);
+  const lineHeight = Math.max(0.008, heights[heights.length >> 1]);
+  // Порог — от реальной высоты строки на ЭТОЙ странице, а не от накопленной.
+  const yCut = Math.max(Y_CUT, lineHeight * 0.9);
+  const xCut = Math.max(X_CUT, lineHeight * 0.9);
+  const rows = mergeByAxis(group, true, yCut);
+  if (rows.length > 1) return rows.flatMap(r => splitPanels(r, rtl, depth + 1));
+  const columns = mergeByAxis(group, false, xCut);
+  if (columns.length > 1) {
+    const ordered = rtl ? columns.slice().reverse() : columns;
+    return ordered.flatMap(c => splitPanels(c, rtl, depth + 1));
+  }
+  return [group];
 }
 function readingOrder(regions, rtl, onlyCyr, R) {
   // Порядок как в KomaAutoRead: сначала нормализация и починка двойников,
@@ -3168,7 +3318,13 @@ function readingOrder(regions, rtl, onlyCyr, R) {
     .filter(r => /[\p{L}\p{N}]/u.test(r.text))
     .filter(r => !onlyCyr || isCyr(r.text));
   if (!source.length) return [];
-  return splitPanels(source).flatMap(p => bubblesOf(p, rtl, R)).filter(l => (l.text.match(/\p{L}/gu) || []).length >= 2);
+  const lines = splitPanels(source, rtl, 0).flatMap(p => bubblesOf(p, rtl, R));
+  // Языковая починка — на СОБРАННОЙ реплике (как KomaWords.finish): словарь
+  // исправляет «ПОШЕВЕАИТЬСЯ» → «ПОШЕВЕЛИТЬСЯ» и выбрасывает строки, которых
+  // в русском нет вовсе.
+  return lines
+    .map(l => ({ ...l, text: Words.polish(l.text, R.junkRatio) }))
+    .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
 }
 
 /* ───────────────────────── 7. Полосы экрана (KomaBands) ───────────────────────── */
@@ -3700,9 +3856,10 @@ function renderTextSheet(i) {
   $('#textTitle').innerHTML = `Текст страницы ${i + 1}`
     + (i === onScreen ? '' : `<span class="hint" style="font-weight:400"> · на экране стр. ${onScreen + 1}</span>`);
   if ($('#textNav')) {
-    $('#textNav').innerHTML = `<button class="btn" id="textPrev" ${i <= 0 ? 'disabled' : ''}>◀ стр. ${i}</button>`
-      + `<span class="hint" style="align-self:center">из ${Reader.pages.length}</span>`
-      + `<button class="btn" id="textNext" ${i >= Reader.pages.length - 1 ? 'disabled' : ''}>стр. ${i + 2} ▶</button>`;
+    const hasPrev = i > 0, hasNext = i < Reader.pages.length - 1;
+    $('#textNav').innerHTML = `<button class="btn" id="textPrev" ${hasPrev ? '' : 'disabled'}>◀${hasPrev ? ' стр. ' + i : ''}</button>`
+      + `<span class="hint" style="align-self:center">${i + 1} из ${Reader.pages.length}</span>`
+      + `<button class="btn" id="textNext" ${hasNext ? '' : 'disabled'}>${hasNext ? 'стр. ' + (i + 2) + ' ' : ''}▶</button>`;
     if ($('#textPrev')) $('#textPrev').onclick = () => renderTextSheet(i - 1);
     if ($('#textNext')) $('#textNext').onclick = () => renderTextSheet(i + 1);
   }
@@ -3753,6 +3910,12 @@ async function renderModels() {
         + 'Модели уже сохранены — открывать заново не нужно. Скачайте файл и откройте в Chrome: '
         + 'там движок поднимется с теми же тремя файлами.'
       : '';
+  }
+  if ($('#dictState')) {
+    const row = Words.ready
+      ? '✅ словарь: ' + Words.size + ' слов (починка слов и фильтр мусора включены)'
+      : '❌ словаря нет — мусорные строки вроде «ол кослл алмчлс» попадут в озвучку';
+    $('#dictState').innerHTML = row;
   }
   $('#ortState').textContent = (typeof ort === 'undefined')
     ? 'onnxruntime-web не загрузился: нужна сеть при первом открытии файла.'
@@ -4048,6 +4211,27 @@ function bindUI() {
   $('#btnRulesLib').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
   $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4').forEach(b => b.onclick = closeSheets);
   $('#btnPickModels').onclick = () => modelInput.click();
+  // Словарь — отдельным выбором: его берут из того же APK (assets/koma/dict).
+  $('#btnPickDict').onclick = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.txt,text/plain';
+    inp.onchange = async () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      if (!/250k|ru_|russian|dict|словар/i.test(f.name) && f.size < 100000) {
+        const ok = true; void ok;
+      }
+      toast('Читаю словарь…', 4000);
+      const text = await f.text();
+      const count = text.split('\n').filter(l => l.trim()).length;
+      if (count < 1000) { toast('Это не словарь: ' + count + ' строк', 6000); return; }
+      await DB.put('kv', { k: 'dict:ru250k', v: text });
+      const ok = await Words.load();
+      await renderModels();
+      toast(ok ? 'Словарь загружен: ' + Words.size + ' слов' : 'Словарь не разобрался', 5000);
+    };
+    inp.click();
+  };
   $('#btnPickModelDir').onclick = () => {
     if (!('webkitdirectory' in document.createElement('input'))) {
       toast('Папку браузер не выберет — выберите три файла сразу', 4000);
@@ -4259,6 +4443,7 @@ async function selfCheck() {
   const det = await DB.get('kv', 'model:det');
   const parts = [];
   parts.push('OCR: ' + OCR.statusText());
+  parts.push('словарь: ' + (Words.ready ? Words.size + ' слов' : 'нет'));
   parts.push(typeof ort === 'undefined' ? 'onnxruntime-web не загружен (нужна сеть)' : 'onnxruntime-web загружен');
   parts.push('TTS ' + (speechSynthesis.getVoices().length ? 'есть' : 'нет голосов'));
   if (ENV.android) parts.push('Android: папки нет, выбирайте файлы/CBZ');
@@ -4267,6 +4452,7 @@ async function selfCheck() {
 
 (async function boot() {
   bindUI();
+  Words.load().catch(e => console.warn('словарь не загрузился', e));
   watchScroll();
   TTS.init();
   const saved = await DB.get('kv', 'rules');
