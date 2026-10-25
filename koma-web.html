@@ -162,6 +162,11 @@
     <button class="btn" id="btnPickFolderModern" style="width:100%;margin-top:8px;justify-content:center;display:none">Выбрать папку (File System)</button>
     <div class="hint" id="importNote" style="margin-top:12px"></div>
     <div class="hint" id="importTip" style="margin-top:10px"></div>
+    <div class="lbl" style="margin-top:14px">КУДА ДОБАВИТЬ</div>
+    <select id="importTarget" style="width:100%;padding:10px;border-radius:10px;background:#22242b;color:#eee;border:1px solid #3a3d47">
+      <option value="">Новая глава</option>
+    </select>
+    <div class="hint" id="importCaps" style="margin-top:10px"></div>
     <button class="btn" id="closeImport" style="margin-top:18px;width:100%">Отмена</button>
   </div>
 </div>
@@ -2196,7 +2201,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.4';
+const VERSION = 'v1.5';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2327,6 +2332,27 @@ const Library = {
   async load() {
     this.books = (await DB.all('books') || []).sort((a, b) => (b.at || 0) - (a.at || 0));
     renderLibrary();
+  },
+  /**
+   * Добавить страницы в СУЩЕСТВУЮЩУЮ главу.
+   *
+   * Зачем: в браузере на Android нельзя выбрать папку (SAF вебу недоступен), а
+   * файловый выбор за один раз редко даёт все 20 страниц. Так можно добавлять
+   * по частям — в ту же книгу, с продолжением нумерации.
+   */
+  async appendTo(bookId, files) {
+    const book = await DB.get('books', bookId);
+    if (!book) throw new Error('глава не найдена');
+    const start = book.count || 0;
+    for (let k = 0; k < files.length; k++) {
+      const f = files[k];
+      const name = String(f.name || ('page-' + (start + k))).split('/').pop();
+      await DB.put('pages', { key: bookId + '/' + (start + k), id: bookId, index: start + k, name, blob: f.blob || f });
+    }
+    book.count = start + files.length;
+    book.at = Date.now();
+    await DB.put('books', book);
+    return book;
   },
   async addBook(title, files, kind) {
     const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -3793,6 +3819,31 @@ function turnPage(dir) {
 }
 
 /* ───────────────────────── 12. Привязка событий ───────────────────────── */
+/**
+ * Что браузер умеет на самом деле. В вебе нет Android SAF — его нельзя
+ * вызвать из страницы. Ближайшее: File System Access API (Chrome Android 132+,
+ * Chrome/Edge на десктопе) и старый input[webkitdirectory] (только десктоп).
+ * Ниже — честный ответ на вопрос «почему нет кнопки "выбрать папку"».
+ */
+const FILES = (() => {
+  const ua = navigator.userAgent || '';
+  const m = ua.match(/Chrome\/(\d+)/);
+  const chromium = m ? +m[1] : 0;
+  const android = /Android/i.test(ua);
+  const fsa = typeof window.showDirectoryPicker === 'function';
+  const dirInput = 'webkitdirectory' in document.createElement('input');
+  const secure = window.isSecureContext !== false;
+  let why = '';
+  if (fsa) why = 'выбор папки доступен (File System Access)';
+  else if (android) {
+    why = 'выбор папки в этом браузере недоступен: Android-браузеры отдают только файлы';
+    if (chromium && chromium < 132) why += ` (у вас Chrome ${chromium}, папка появится с 132)`;
+  } else if (dirInput) why = 'выбор папки доступен (input webkitdirectory)';
+  else why = 'выбор папки недоступен: браузер его не поддерживает';
+  if (!secure) why += ' · страница не в защищённом контексте';
+  return { fsa, dirInput, android, chromium, secure, why };
+})();
+
 function bindUI() {
   // ── Импорт главы ────────────────────────────────────────────────────────
   // Каждый выбор — свой input: общий переиспользовался, и выбор модели
@@ -3804,10 +3855,21 @@ function bindUI() {
   const rulesInput = $('#rulesPick');
 
   $('#btnImport').onclick = () => {
-    const fsOK = typeof window.showDirectoryPicker === 'function';
-    const dirOK = 'webkitdirectory' in document.createElement('input');
-    $('#btnPickDir').style.display = dirOK ? 'block' : 'none';
-    $('#btnPickFolderModern').style.display = fsOK ? 'block' : 'none';
+    const fsOK = FILES.fsa;
+    const dirOK = FILES.dirInput;
+    // Кнопки не прячем: видно, что они есть и почему не работают.
+    $('#btnPickDir').style.display = 'block';
+    $('#btnPickDir').disabled = !dirOK;
+    $('#btnPickDir').style.opacity = dirOK ? '1' : '.45';
+    $('#btnPickFolderModern').style.display = 'block';
+    $('#btnPickFolderModern').disabled = !fsOK;
+    $('#btnPickFolderModern').style.opacity = fsOK ? '1' : '.45';
+    $('#importCaps').textContent = 'Ваш браузер: ' + FILES.why;
+    // Куда добавлять: список существующих глав
+    const sel = $('#importTarget');
+    const books = Library.books || [];
+    sel.innerHTML = '<option value="">Новая глава</option>'
+      + books.map(b => `<option value="${b.id}">Добавить страницы в «${escapeHtml(b.title)}» (${b.count} стр.)</option>`).join('');
     $('#importNote').innerHTML = dirOK || fsOK
       ? 'Папка: страницы берутся все сразу, порядок — по именам файлов.'
       : 'Этот браузер не умеет выбирать папку. Нажмите «Выбрать файлы или CBZ» '
@@ -3821,6 +3883,7 @@ function bindUI() {
   };
 
   async function addImages(files) {
+    const target = ($('#importTarget') && $('#importTarget').value) || '';
     const imgs = Array.from(files).filter(f => /\.(jpe?g|png|webp|avif|bmp|gif)$/i.test(f.name));
     if (!imgs.length) { toast('Среди выбранных файлов нет картинок'); return; }
     // Одна книга на главу: имя папки, если оно есть, иначе имя файла/общий заголовок.
@@ -3831,13 +3894,31 @@ function bindUI() {
       : imgs.length === 1 ? imgs[0].name.replace(/\.[^.]+$/, '')
       : 'Глава из ' + imgs.length + ' страниц';
     toast('Сохраняю ' + imgs.length + ' страниц…', 5000);
-    await Library.addBook(title, imgs.map(f => ({ name: f.name, blob: f })), 'files');
-    await Library.load();
-    toast('Добавлено: ' + title + ' (' + imgs.length + ' стр.)');
+    const items = imgs.map(f => ({ name: f.name, blob: f }));
+    if (target) {
+      const book = await Library.appendTo(target, items);
+      await Library.load();
+      toast('Добавлено ' + imgs.length + ' стр. в «' + book.title + '» — всего ' + book.count);
+    } else {
+      await Library.addBook(title, items, 'files');
+      await Library.load();
+      toast('Добавлено: ' + title + ' (' + imgs.length + ' стр.)');
+    }
   }
 
-  $('#btnPickDir').onclick = () => dirInput.click();
+  $('#btnPickDir').onclick = () => {
+    if (!FILES.dirInput) {
+      toast('Этот браузер не умеет выбирать папку — ' + FILES.why + '. Выберите файлы или CBZ.', 7000);
+      return;
+    }
+    dirInput.click();
+  };
   $('#btnPickFolderModern').onclick = async () => {
+    if (!FILES.fsa) {
+      toast('Выбор папки недоступен: ' + FILES.why
+        + '. Обновите Chrome до 132+ или соберите страницы в CBZ.', 7000);
+      return;
+    }
     try {
       const handle = await window.showDirectoryPicker();
       const files = [];
