@@ -298,6 +298,7 @@
   <div class="body">
     <div class="kv" id="textStats"></div>
     <div class="row" id="textNav" style="gap:8px;margin-top:8px;display:flex"></div>
+    <button class="btn" id="btnFullPage" style="margin-top:8px">Распознать всю страницу целиком</button>
     <div class="lbl">КАК ЧИТАЕТСЯ</div>
     <div id="textOrdered"></div>
     <div class="lbl">КАК РАСПОЗНАНО</div>
@@ -2236,7 +2237,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.8';
+const VERSION = 'v1.9';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2678,19 +2679,65 @@ const Words = {
     const upper = letters.filter(ch => /[A-ZА-ЯЁ]/.test(ch)).length > letters.filter(ch => /[a-zа-яё]/.test(ch)).length;
     return upper ? word.toUpperCase() : (letters[0] && /[A-ZА-ЯЁ]/.test(letters[0]) ? word[0].toUpperCase() + word.slice(1) : word);
   },
+  ENDINGS: ['ами', 'ями', 'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ах', 'ях', 'ов', 'ев',
+    'ой', 'ей', 'ий', 'ый', 'ая', 'ое', 'ые', 'ие', 'ом', 'ем', 'ам', 'ям', 'мь', 'ью',
+    'ы', 'и', 'а', 'е', 'о', 'у', 'ю', 'ь', 'я', 'й', 'м'],
+  /**
+   * Слово выглядит настоящим: есть в словаре ИЛИ это его словоформа
+   * (ВЫСОЧЕСТВОМ → ВЫСОЧЕСТВ + ОМ). Без этой проверки «правка» превращала
+   * нормальное «ВЫСОЧЕСТВОМ» в «ВЫСОЧЕСТВО».
+   */
+  isPlausible(word) {
+    if (!this.ready) return true;
+    const low = String(word).toLowerCase();
+    if (this.isKnown(low)) return true;
+    if (low.length < 5) return false;
+    for (const end of this.ENDINGS) {
+      if (!low.endsWith(end)) continue;
+      const stem = low.slice(0, low.length - end.length);
+      if (stem.length < 4) continue;
+      if (this.rank.has(stem) && this.rank.get(stem) <= this.COMMON_RANK) return true;
+    }
+    return false;
+  },
   correctWord(word) {
     if (!this.ready) return word;
     const low = word.toLowerCase();
     if (low.length < 4) return word;
-    if (this.isKnown(low)) return word;
+    if (this.isKnown(low) || this.isPlausible(low)) return word;
     const cand = this.candidate(low);
     return cand ? this.sameCase(word, cand) : word;
+  },
+  /**
+   * Длинное слово, которого нет в словаре и которое не правится одним
+   * изменением, — это почти всегда звуковой эффект или каллиграфия внутри
+   * реплики («сттангасоат», «риооооро»). Такие слова убираем из текста, но
+   * только если в реплике есть другие настоящие слова: иначе останется пустота.
+   * Порог 8 букв выбран, чтобы не тронуть имена («БЕРСЕРК», «ДРЕГЕР»).
+   */
+  stripJunkWords(text) {
+    if (!this.ready) return text;
+    const words = String(text).split(' ');
+    const known = words.filter(w => /[А-Яа-яЁё]{2,}/.test(w) && this.isKnown(w));
+    if (known.length < 1) return text;
+    const kept = words.filter(w => {
+      const low = w.toLowerCase().replace(/[^а-яё]/g, '');
+      if (this.isKnown(low) || this.isPlausible(low)) return true;
+      // «сттангасоат» (11 букв), «риооооро» (три «о» подряд) — звуки, а не слова.
+      // Порог подобран так, чтобы имена («БЕРСЕРК», «ДРЕГЕР») остались.
+      if (low.length >= 10) return false;
+      if (/(.)\1\1/.test(low)) return false;
+      if (low.length <= 2) return false;     // «оо», «чв» — не слова
+      return true;
+    });
+    return kept.join(' ').replace(/\s{2,}/g, ' ').trim();
   },
   /** Починка реплики: слова по словарю + висячий дефис в конце. */
   finish(text) {
     let t = String(text || '');
     if (this.ready) {
       t = t.replace(/[А-Яа-яЁё]+/g, w => this.correctWord(w));
+      t = this.stripJunkWords(t);
     }
     return t.replace(/(?<=\p{L})-\s*$/u, '').trim();
   },
@@ -2725,14 +2772,23 @@ const Words = {
     const raw = String(text || '');
     if (!this.ready) return this.finish(raw);
     const thr = junkRatio ?? 0.6;
-    const words = (raw.match(/[А-Яа-яЁё]{3,}/g) || []).map(w => w.toLowerCase());
+    // {2,} а не {3,}: «Тг. чв» — тоже не реплика, а короткие настоящие слова
+    // («не», «да», «ты», «он») в словаре есть и проверку проходят.
+    const words = (raw.match(/[А-Яа-яЁё]{2,}/g) || []).map(w => w.toLowerCase());
     if (!words.length) return this.finish(raw);
-    const knownRaw = words.filter(w => this.isKnown(w)).length / words.length;
-    if (knownRaw >= Math.max(0.34, 1 - thr)) return this.finish(raw);
-    if (words.length === 1) {
-      const cand = this.correctWord(words[0]);
-      return (cand !== words[0] && this.isKnown(cand)) ? this.finish(raw) : '';
-    }
+    const known = words.filter(w => this.isKnown(w));
+    const knownLong = known.filter(w => w.length >= 3);
+    const fixed = this.finish(raw);
+    if (!fixed) return '';
+    if (knownLong.length >= 1) return fixed;                     // есть настоящие слова
+    // Строка из имён: 1-3 слова, все с заглавной — оставляем (БЕРСЕРК, ГРАФЬ).
+    const wordsRaw = raw.match(/[А-ЯЁ][а-яё]{2,}/g) || [];
+    const wordsLong = raw.match(/[А-Яа-яЁё]{3,}/g) || [];
+    if (wordsRaw.length >= 1 && wordsRaw.length === wordsLong.length && wordsRaw.length <= 3) return fixed;
+    // Имя или крик капсом, которого нет в словаре: «БЕРСЕРК», «НЕ СМЕЙ».
+    const caps = raw.match(/[А-ЯЁ]{3,}/g) || [];
+    if (caps.length >= 1 && caps.length === wordsLong.length && caps.length <= 4) return fixed;
+    if (known.length >= 1 && words.length <= 2) return fixed;    // «да, это», «не сейчас»
     return '';
   },
 };
@@ -3097,27 +3153,43 @@ async function decodeBetter(cropCanvas, R) {
 }
 
 /* ── страница целиком: детектор → строки → распознавание ── */
-async function recognizePage(imgCanvas, R, onProgress) {
+async function recognizePage(imgCanvas, R, onProgress, band) {
   const t0 = performance.now();
-  const boxes = await detectBoxes(imgCanvas, R.pageSide, R);
+  // band = {y0, y1} в пикселях исходного кадра: распознаём ТОЛЬКО видимую
+  // полосу. По правилу «длинную страницу читать в пределах видимой области»
+  // иначе на вебтуне в 8000 px находились реплики на два экрана вперёд.
+  let src = imgCanvas;
+  const y0 = band ? Math.max(0, Math.round(band.y0)) : 0;
+  const y1 = band ? Math.min(imgCanvas.height, Math.round(band.y1)) : imgCanvas.height;
+  const bandH = Math.max(1, y1 - y0);
+  if (band && (y0 > 0 || y1 < imgCanvas.height)) {
+    const c = makeCanvas(imgCanvas.width, bandH);
+    c.getContext('2d', { willReadFrequently: true })
+      .drawImage(imgCanvas, 0, y0, imgCanvas.width, bandH, 0, 0, imgCanvas.width, bandH);
+    src = c;
+  }
+  const boxes = await detectBoxes(src, R.pageSide, R);
   const detMs = Math.round(performance.now() - t0);
   const t1 = performance.now();
   let crops = 0;
   const regions = [];
   let done = 0;
+  // Координаты боксов относятся к полосе (src), а рамки нужны на всей странице:
+  // переводим через y0 и высоту полосы.
+  const W = src.width, H = src.height;
   for (const box of boxes) {
-    const lines = textLines(imgCanvas, box, R);
+    const lines = textLines(src, box, R);
     for (const ln of lines) {
       const c = makeCanvas(ln.right - ln.left, ln.bottom - ln.top);
       c.getContext('2d', { willReadFrequently: true })
-        .drawImage(imgCanvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
+        .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
       crops++;
       const [text, conf] = await decodeBetter(c, R);
       if (text.trim() && conf > R.minConfidence) {
         regions.push({
           text,
-          left: ln.left / imgCanvas.width, top: ln.top / imgCanvas.height,
-          right: ln.right / imgCanvas.width, bottom: ln.bottom / imgCanvas.height,
+          left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
+          right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
           confidence: conf,
         });
       }
@@ -3130,6 +3202,7 @@ async function recognizePage(imgCanvas, R, onProgress) {
     regions, boxes: boxes.length,
     ms: Math.round(performance.now() - t0),
     detMs, recMs: Math.round(performance.now() - t1), crops,
+    band: band ? { y0, y1 } : null,
   };
 }
 
@@ -3604,6 +3677,42 @@ const Reader = {
    * загрузки) и после автолистания индекс «застревал»: на экране первая
    * страница, а шапка и распознавание — четвёртая.
    */
+  /**
+   * Видимая сейчас полоса страницы — в пикселях её кадра.
+   *
+   * Возвращает null, если страница целиком помещается на экран (обычная
+   * страница манги) — тогда распознаём всю. Для длинного вебтуна полоса
+   * ограничена экраном плюс небольшим запасом, иначе в реплики попадает текст
+   * на два экрана вперёд («нашёл 5 реплик, хотя видно одну»).
+   */
+  visibleBandPx(i) {
+    try { return this.visibleBandPxInner(i); } catch (e) { return null; }
+  },
+  visibleBandPxInner(i) {
+    const c = this.canvases[i];
+    const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+    const scroller = $('#strip');
+    if (!c || !wrap || !scroller || this.mode !== 'vertical') return null;
+    const r = wrap.getBoundingClientRect();
+    const sr = scroller.getBoundingClientRect();
+    if (!r.height || !c.height) return null;
+    const scale = c.height / r.height;                 // пиксели кадра на экранный px
+    const viewH = scroller.clientHeight || window.innerHeight;
+    const overlap = clamp(Number(RULES.bandOverlap) || 0.15, 0, 0.6);
+    // Запас считаем от экрана, а не от страницы: у вебтуна в 20 000 px
+    // «15 % страницы» — это три лишних экрана.
+    const pad = Math.min(r.height * overlap, viewH * 0.3);
+    // Экран в координатах страницы
+    const topPx = (Math.max(sr.top, r.top) - r.top) + 0;      // видимое начало
+    const botPx = (Math.min(sr.top + viewH, r.bottom) - r.top);
+    const y0 = clamp((topPx - pad) * scale, 0, c.height);
+    const y1 = clamp((botPx + pad) * scale, 0, c.height);
+    if (y1 - y0 < 32) return null;
+    // Если видно (почти) всю страницу — полоса не нужна
+    if (y1 - y0 >= c.height * 0.92) return null;
+    return { y0, y1, key: Math.round(y0 / 64) + ':' + Math.round(y1 / 64) };
+  },
+
   pageAtViewport() {
     const scroller = $('#strip');
     if (!scroller || this.mode !== 'vertical') return this.page;
@@ -3666,6 +3775,11 @@ const Reader = {
     DB.put('books', this.book);
   },
 
+  /** Сохранить в буфер все реплики страницы (собранные из полос). */
+  async savePageBuffer(i) {
+    const data = this.regions.get(i);
+    if (data && data.lines) await Buffer.put(i, data.lines);
+  },
   /** Смена направления чтения: пересортировать уже распознанное, без OCR. */
   rescanInDir() {
     const rtl = (this.dir || 'rtl') === 'rtl';
@@ -3693,13 +3807,25 @@ const Reader = {
     const keepSheet = !!opts.keepSheet;
     if (i == null || i < 0 || i >= this.pages.length) return null;
 
+    // Полоса, которую сейчас видно: ключ нужен, чтобы при прокрутке
+    // распознавать новые куски, а уже распознанные не гонять заново.
+    const band = opts.full ? null : this.visibleBandPx(i);
+    const bandKey = band ? band.key : 'page';
+    this.bands = this.bands || new Map();
+    const bandMap = this.bands.get(i) || new Map();
+
+    // Кэш годится, если: (а) полоса уже распознана; (б) страницу распознали
+    // целиком; (в) данные пришли из буфера прошлой сессии — тогда считаем их
+    // полной страницей, иначе старые книги распознавались бы заново.
     const cached = this.regions.get(i);
-    if (cached && !force) { this.paintPage(i); return cached; }
+    const hasBands = this.bands.has(i);
+    const fresh = cached && (band ? (hasBands && bandMap.has(bandKey)) : !hasBands);
+    if (cached && fresh && !force) { this.paintPage(i); return cached; }
 
     if (State.scanning) {
       // Молча выходить нельзя: нажатие «Распознать заново» выглядело как
       // «кнопка не работает». Ставим в очередь и говорим об этом.
-      State.pendingScan = { i, force, keepSheet };
+      State.pendingScan = { i, force, keepSheet, full: !!opts.full };
       const msg = 'Идёт распознавание — страница ' + (i + 1) + ' встала в очередь';
       toast(msg, 4000);
       if (keepSheet) $('#textStats').textContent = msg + '…';
@@ -3715,20 +3841,39 @@ const Reader = {
     $('#scanBadge').textContent = `Распознаём… стр. ${i + 1}`;
     if (keepSheet) $('#textStats').textContent = `Распознаю страницу ${i + 1} заново…`;
     try {
+      const label = band ? `полосу ${i + 1}` : `страницу ${i + 1}`;
       const res = await recognizePage(c, RULES, (done, total) => {
         const t = `Распознаём… ${done}/${total}`;
         $('#scanBadge').textContent = t;
-        if (keepSheet) $('#textStats').textContent = `Распознаю страницу ${i + 1} заново… ${done}/${total}`;
-      });
+        if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
+      }, band);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
-      const lines = readingOrder(res.regions, rtl, true, RULES);
+      const fresh = readingOrder(res.regions, rtl, true, RULES);
       const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      this.regions.set(i, { ...res, lines, at });
-      await Buffer.put(i, lines);
+
+      // Собираем полосы страницы: новая заменяет старую с тем же ключом,
+      // остальные остаются. Их реплики идут сверху вниз.
+      bandMap.set(bandKey, { lines: fresh, res, at });
+      this.bands.set(i, bandMap);
+      const parts = Array.from(bandMap.entries())
+        .sort((a, b) => (a[1].res.band?.y0 ?? 0) - (b[1].res.band?.y0 ?? 0));
+      const lines = [];
+      for (const [, part] of parts) {
+        for (const ln of part.lines) lines.push(ln);
+      }
+      const total = parts.reduce((acc, [, p]) => acc + (p.res.ms || 0), 0);
+      this.regions.set(i, {
+        ...res, lines, at, bands: parts.length,
+        ms: total, detMs: res.detMs, recMs: res.recMs, crops: res.crops,
+        boxes: res.boxes, regions: res.regions,
+        bandKeys: parts.length,
+      });
+      await this.savePageBuffer(i);
       this.paintPage(i);
-      toast(`Страница ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${lines.length} реплик · `
-        + `${(res.ms / 1000).toFixed(1)} с (детектор ${(res.detMs / 1000).toFixed(1)} с, `
+      toast(`${band ? 'Полоса' : 'Страница'} ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${fresh.length} реплик на полосе`
+        + (parts.length > 1 ? `, всего ${lines.length} на странице` : '')
+        + ` · ${(res.ms / 1000).toFixed(1)} с (детектор ${(res.detMs / 1000).toFixed(1)} с, `
         + `распознавание ${(res.recMs / 1000).toFixed(1)} с, ${res.crops} строк)`, 6000);
       // Шторка остаётся открытой — и обязательно перерисовывается.
       if ($('#sheetText').classList.contains('on')) renderTextSheet(i);
@@ -3945,7 +4090,8 @@ function renderTextSheet(i) {
     ? `${data.lines.length} реплик · из буфера (без повторного распознавания)`
     : `${raw.length} строк · ${data.boxes} блоков · ${data.crops} кропов · `
       + `итого ${(data.ms / 1000).toFixed(1)} с = детектор ${(data.detMs / 1000).toFixed(1)} с `
-      + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с` + stamp;
+      + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с`
+      + (data.bands > 1 ? ` · полос: ${data.bands}` : '') + stamp;
   $('#textOrdered').innerHTML = data.lines.length
     ? data.lines.map((l, n) => `<div class="lineitem"><b>${n + 1}</b>${escapeHtml(l.text)}</div>`).join('')
     : '<div class="hint">Реплик не найдено</div>';
@@ -4007,15 +4153,20 @@ async function selfTestEngine() {
     if (!ok) { await renderModels(); toast(OCR.statusText() + (OCR.reason ? ': ' + OCR.reason : ''), 8000); return; }
   }
   try {
-    // страница 600×800: белый фон и тёмная плашка «текста»
-    const c = makeCanvas(600, 800);
-    for (let i = 0; i < c.data.length; i += 4) { c.data[i] = 255; c.data[i + 1] = 255; c.data[i + 2] = 255; c.data[i + 3] = 255; }
-    for (let y = 120; y < 180; y++) for (let x = 80; x < 520; x++) {
-      const k = (y * 600 + x) * 4;
-      if ((x >> 3) % 2 === 0 || (y >> 3) % 2 === 0) { c.data[k] = 20; c.data[k + 1] = 20; c.data[k + 2] = 20; }
-    }
-    const boxes = await detectBoxes(c, DEFAULT_RULES.pageSide);
-    toast('Движок считает: детектор вернул ' + boxes.length + ' бокс(ов) на тестовой картинке', 6000);
+    // Тестовая «страница» рисуется НАСТОЯЩИМ canvas: у элемента нет свойства
+    // .data (оно было только в Node-заглушке), из-за этого проверка падала с
+    // «Cannot read properties of undefined (reading 'length')».
+    const W = 600, H = 800;
+    const c = makeCanvas(W, H);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#101010';
+    for (let y = 120; y < 180; y += 2) ctx.fillRect(80, y, 440, 1);
+    const boxes = await detectBoxes(c, DEFAULT_RULES.pageSide, RULES);
+    toast(boxes.length
+      ? 'Движок считает: детектор вернул ' + boxes.length + ' бокс(ов) на тестовой картинке'
+      : 'Движок считает, но на тестовой картинке боксов 0 — проверьте модели', 7000);
     await renderModels();
   } catch (e) {
     toast('Движок не считает: ' + (e.message || e), 8000);
@@ -4117,8 +4268,15 @@ async function onScrollSettled() {
   if (!$('#reader').classList.contains('on')) return;
   const i = Reader.page;
   await Reader.ensureLoaded(i);
-  if (!Reader.regions.get(i) && OCR.ready && !State.scanning) {
-    await Reader.scanCurrent(false);
+  // Распознаём видимую полосу, если она ещё не распознана (вебтун: страница
+  // длиннее экрана, полосы идут по мере прокрутки).
+  if (OCR.ready && !State.scanning) {
+    const band = Reader.visibleBandPx(i);
+    const key = band ? band.key : 'page';
+    const bandMap = Reader.bands && Reader.bands.get(i);
+    const done = bandMap && bandMap.has(key);
+    const hasPage = Reader.regions.get(i) && !band;
+    if (!done && !hasPage) await Reader.scanPage(i, {});
   }
   if (RULES.semiManual && State.semi) {
     if (State.waitingScroll) {
@@ -4323,6 +4481,21 @@ function bindUI() {
     finally { b.disabled = false; b.textContent = label; }
   };
   $('#btnPickModels').onclick = () => modelInput.click();
+  // Осознанный выбор в шторке текста: распознать ВСЮ страницу, а не только
+  // видимую полосу (у вебтуна полос много, автопрокрутка идёт по экрану).
+  if ($('#btnFullPage')) {
+    const b = $('#btnFullPage');
+    b.onclick = async () => {
+      const i = Reader.page;
+      b.disabled = true;
+      try {
+        await Reader.scanPage(i, { force: true, keepSheet: true, full: true });
+        renderTextSheet(i);
+      } finally {
+        b.disabled = false;
+      }
+    };
+  }
   // Словарь — отдельным выбором: его берут из того же APK (assets/koma/dict).
   $('#btnPickDict').onclick = () => {
     const inp = document.createElement('input');
