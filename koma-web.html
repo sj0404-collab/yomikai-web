@@ -233,6 +233,11 @@
       <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
       <button class="chip" data-mode="ltr">Страницы слева направо</button>
     </div>
+    <div class="lbl" style="margin-top:14px">НАПРАВЛЕНИЕ ЧТЕНИЯ</div>
+    <div class="chips" id="dirChips">
+      <button class="chip" data-dir="rtl">Справа налево (манга)</button>
+      <button class="chip" data-dir="ltr">Слева направо</button>
+    </div>
     <div class="lbl">АВТОЧТЕНИЕ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">
       <span>Читать вслух</span>
@@ -2191,7 +2196,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.2';
+const VERSION = 'v1.3';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2452,6 +2457,75 @@ function sanitizeRules(r) {
   R.semiManual = !!R.semiManual;
   if (typeof R.wordFixes !== 'object' || !R.wordFixes) R.wordFixes = {};
   return R;
+}
+
+/* ───────────────────────── 4b. Починка текста (порт KomaText.kt) ─────────────────────────
+   Модель регулярно пишет русские буквы латиницей, греческими заглавными и
+   цифрами: «HETΛOXO», «3ВУ4ИТ», «MHE TAK». Без этой починки строка не проходила
+   фильтр языка и пропадала из реплики целиком. */
+const LOOKALIKES = {
+  a: 'а', e: 'е', o: 'о', c: 'с', p: 'р', x: 'х', y: 'у', k: 'к', m: 'м', t: 'т',
+  b: 'в', h: 'н', u: 'и', n: 'п',
+  A: 'А', E: 'Е', O: 'О', C: 'С', P: 'Р', X: 'Х', Y: 'У', K: 'К', M: 'М', T: 'Т',
+  B: 'В', H: 'Н', U: 'И',
+  'Λ': 'Л', 'Δ': 'Д', 'Α': 'А', 'Β': 'В', 'Ε': 'Е', 'Ζ': 'З', 'Η': 'Н', 'Ι': 'И',
+  'Κ': 'К', 'Μ': 'М', 'Ν': 'Н', 'Ο': 'О', 'Ρ': 'Р', 'Τ': 'Т', 'Υ': 'У', 'Χ': 'Х',
+  '3': 'з', '4': 'ч', '0': 'о', '6': 'б', '8': 'в',
+  'α': 'а', 'β': 'в', 'γ': 'г', 'δ': 'д', 'ε': 'е', 'ζ': 'з', 'η': 'н', 'ι': 'и',
+  'κ': 'к', 'μ': 'м', 'ν': 'п', 'ο': 'о', 'π': 'п', 'ρ': 'р', 'σ': 'с', 'τ': 'т',
+  'υ': 'у', 'χ': 'х',
+  l: 'л', d: 'д', g: 'г', f: 'ф', r: 'г', s: 'с', v: 'в', w: 'ш', z: 'з', j: 'й', i: 'и',
+  q: 'я',
+};
+const GREEK = new Set(['Λ', 'Δ', 'Α', 'Β', 'Ε', 'Ζ', 'Η', 'Ι', 'Κ', 'Μ', 'Ν', 'Ο', 'Ρ', 'Τ', 'Υ', 'Χ']);
+const isRusLetter = (ch) => /^[а-яё]$/i.test(ch);
+
+function fixLookalikes(raw) {
+  const lineIsRussian = Array.from(raw).some(ch => isRusLetter(ch) || GREEK.has(ch));
+  if (!lineIsRussian) return raw;
+  return raw.split(' ').map(word => {
+    const letters = Array.from(word).filter(ch => /[\p{L}\p{N}]/u.test(ch));
+    const convertible = letters.length && letters.every(ch => ch in LOOKALIKES);
+    const wordHasRussian = Array.from(word).some(isRusLetter);
+    if (!(wordHasRussian || convertible)) return word;
+    // Если в слове нет строчных букв, то и подстановка должна быть заглавной:
+    // «3ВУ4ИТ» → «ЗВУЧИТ», а не «зВУчИТ».
+    const hasLower = Array.from(word).some(ch => /[a-zа-я]/.test(ch));
+    return Array.from(word).map(ch => {
+      const m = LOOKALIKES[ch];
+      if (m === undefined) return ch;
+      return hasLower ? m : m.toUpperCase();
+    }).join('');
+  }).join(' ');
+}
+
+/** Строка состоит ТОЛЬКО из символов-двойников: «OHO», «4YBC», «MHE TAK». */
+function isLookalikeOnly(text) {
+  const letters = Array.from(text).filter(ch => /[\p{L}\p{N}]/u.test(ch));
+  return letters.length > 0 && letters.every(ch => ch in LOOKALIKES);
+}
+/** Принудительный перевод всей строки, даже если русских букв в ней нет. */
+function fixLookalikesForced(raw) {
+  const chars = Array.from(raw);
+  const upper = chars.filter(ch => /[A-ZА-Я]/.test(ch)).length > chars.filter(ch => /[a-zа-я]/.test(ch)).length;
+  return chars.map(ch => {
+    const m = LOOKALIKES[ch];
+    if (m === undefined) return ch;
+    return upper ? m.toUpperCase() : m;
+  }).join('');
+}
+
+/** Текст для синтезатора: убрать переносы, двойников, склеить «в д а ль». */
+function cleanSpeech(raw) {
+  let text = String(raw || '')
+    .replace(/(?<=\p{L})\s*-\s*(?=\p{L})/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  text = isLookalikeOnly(text) ? fixLookalikesForced(text) : fixLookalikes(text);
+  for (let k = 0; k < 3; k++) {
+    text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => m.replace(/\s+/g, ''));
+  }
+  return text.trim();
 }
 
 /* ───────────────────────── 5. OCR: модели в браузере ───────────────────────── */
@@ -2899,7 +2973,22 @@ function bubblesOf(group, rtl, R) {
   }
   const lines = blocks.map(block => {
     const ordered = block.slice().sort((a, b) => rtl ? b.left - a.left : a.left - b.left);
-    const text = ordered.map(r => r.text.trim()).filter(Boolean).join(' ');
+    // Склейка частей одной строки ровно как в KomaAutoRead:
+    //   «ВЫСО-» + «ЧЕСТВО» → без пробела и без дефиса;
+    //   обрывок в 1-2 буквы после буквы → тоже без пробела.
+    let text = '';
+    ordered.forEach((part, index) => {
+      const t = String(part.text || '').trim();
+      if (!t) return;
+      if (index > 0 && text) {
+        const prev = ordered[index - 1]?.text?.trim() || '';
+        const last = text[text.length - 1];
+        if (last === '-' || last === '\u00AD') text = text.slice(0, -1);
+        else if (!(t.length <= 2 && /\p{L}$/u.test(prev) && /^\p{L}/u.test(t))) text += ' ';
+      }
+      text += t;
+    });
+    text = cleanSpeech(text);
     return {
       text,
       left: Math.min(...block.map(r => r.left)), top: Math.min(...block.map(r => r.top)),
@@ -3071,7 +3160,7 @@ function cutAtBandBottom(line, band, cutMargin) {
 /* ───────────────────────── 8. Читалка ───────────────────────── */
 const Reader = {
   book: null, pages: [], urls: [], canvases: [], imgEls: [],
-  mode: 'vertical', page: 0, frames: false, follow: true,
+  mode: 'vertical', dir: 'rtl', page: 0, frames: false, follow: true,
   regions: new Map(),          // page → {regions, boxes, ms}
   spoken: new Set(),
   current: null,
@@ -3082,6 +3171,7 @@ const Reader = {
     this.pages = await Library.pages(book.id);
     if (!this.pages.length) return toast('В книге нет страниц');
     this.mode = book.mode || 'vertical';
+    this.dir = book.dir || 'rtl';
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear(); this.spoken.clear();
     // Уже распознанные страницы берём из буфера: повторное открытие книги и
@@ -3104,7 +3194,8 @@ const Reader = {
   },
 
   syncSub() {
-    const modeText = this.mode === 'vertical' ? 'Вертикально' : this.mode === 'rtl' ? 'Справа налево' : 'Слева направо';
+    const modeText = (this.mode === 'vertical' ? 'Вертикально' : this.mode === 'rtl' ? 'Страницы' : 'Страницы')
+      + ' · ' + (this.dir === 'rtl' ? '← справа налево' : 'слева направо →');
     $('#rSub').textContent = `KOMA · веб · ${this.page + 1} из ${this.pages.length} · ${modeText}`;
     $('#pageNum').textContent = String(this.page + 1);
   },
@@ -3250,6 +3341,20 @@ const Reader = {
     DB.put('books', this.book);
   },
 
+  /** Смена направления чтения: пересортировать уже распознанное, без OCR. */
+  rescanInDir() {
+    const rtl = (this.dir || 'rtl') === 'rtl';
+    let n = 0;
+    for (const [i, data] of this.regions) {
+      if (!data || !data.regions) continue;       // из буфера — регионов нет
+      data.lines = readingOrder(data.regions, rtl, true, RULES);
+      Buffer.put(i, data.lines);
+      n++;
+    }
+    this.paintAllFrames();
+    toast(n ? 'Порядок пересчитан: ' + (rtl ? 'справа налево' : 'слева направо') : 'Откройте страницу заново, чтобы применить направление', 4000);
+  },
+
   async scanCurrent(force = false) {
     const i = this.page;
     // Кэш: страницу, которую уже распознали, второй раз не гоняем. 10 секунд на
@@ -3268,7 +3373,10 @@ const Reader = {
       const res = await recognizePage(c, RULES, (done, total) => {
         $('#scanBadge').textContent = `Распознаём… ${done}/${total}`;
       });
-      const rtl = this.mode === 'rtl';
+      // Направление чтения — отдельная настройка (dir), а не раскладка.
+      // Раньше для вертикальной ленты выходило rtl=false, и реплики читались
+      // слева направо: «Я ТОЖЕ ТАК СЧИТАЮ» уезжало после «БОЛЬШЕ ПРИВЛЕКАЮТ».
+      const rtl = (this.dir || 'rtl') === 'rtl';
       const lines = readingOrder(res.regions, rtl, true, RULES);
       this.regions.set(i, { ...res, lines });
       Buffer.put(i, lines);
@@ -3851,6 +3959,13 @@ function bindUI() {
     if (Reader.book) { Reader.book.mode = Reader.mode; DB.put('books', Reader.book); }
     Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
   };
+  $('#dirChips').onclick = (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    Reader.dir = chip.dataset.dir;
+    if (Reader.book) { Reader.book.dir = Reader.dir; DB.put('books', Reader.book); }
+    Reader.rescanInDir();
+    syncSettingsUI();
+  };
   $('#cbAuto').onchange = (e) => {
     if (e.target.checked) Reader.scanCurrent(false).then(() => TTS.readVisible());
     else TTS.stop();
@@ -3877,6 +3992,7 @@ function bindUI() {
 }
 function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
+  $$('#dirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === (Reader.dir || 'rtl')));
   $('#cbSemi').checked = !!RULES.semiManual;
   $('#cbFrames').checked = Reader.frames;
   $('#cbFollow').checked = Reader.follow;
