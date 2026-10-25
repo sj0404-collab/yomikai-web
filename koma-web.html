@@ -206,6 +206,7 @@
       <button class="btn primary" id="btnPickModels">Выбрать файлы</button>
       <button class="btn" id="btnPickModelDir">Папка с моделями</button>
       <button class="btn" id="btnTestEngine">Проверить движок</button>
+      <button class="btn" id="btnTestVoice">Проверить голос</button>
       <button class="btn" id="btnPickDict">Словарь ru_250k</button>
     </div>
     <div class="row" style="margin-top:8px;gap:8px">
@@ -2244,7 +2245,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.4';
+const VERSION = 'v1.9.5';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3492,6 +3493,22 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   return result;
 }
 
+/**
+ * Бо́льшая часть слов фрагмента уже есть в собранных репликах? Тогда это не
+ * потеря, а вариант той же строки, и приклеивать его нельзя.
+ */
+function mostlyCovered(key, covered) {
+  // Перенос слова («РАВНО-» + «ДУШНЫМ»): фрагмент целиком входит в слово
+  // реплики — приклеивать нельзя, иначе получается «РАВНОДУШНЫМ. ДУШНЫМ.»
+  const flat = key.replace(/ /g, '');
+  if (flat.length >= 3 && covered.some(c => c.replace(/ /g, '').includes(flat))) return true;
+  const words = key.split(' ').filter(w => w.length >= 3);
+  if (!words.length) return covered.some(c => c.includes(key));
+  const pool = new Set(covered.join(' ').split(' '));
+  const hit = words.filter(w => pool.has(w)).length;
+  return hit / words.length >= 0.5;
+}
+
 /** Нормализация для сравнения: регистр и пунктуация не важны. */
 function normText(s) {
   return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
@@ -3513,8 +3530,11 @@ function rescueLostLines(result, source, R) {
     if (!t) continue;
     const key = normText(t);
     if (key.length < 3) continue;
-    const head = key.slice(0, 14);
-    if (covered.some(c => c.includes(head))) continue;   // уже внутри реплики
+    // Уже внутри реплики? Сравниваем ПО СЛОВАМ, а не по префиксу: OCR на
+    // одной и той же строке даёт варианты («ТАК ЧТО ЕЁ ВАСО ЧИТАТЬ ВСТРЕЧУ»),
+    // и по префиксу страховка приклеивала уже собранное — получались дубли
+    // («УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ…» дважды).
+    if (mostlyCovered(key, covered)) continue;
     const rc = (r.top + r.bottom) / 2;
     let best = -1, bestD = Infinity;
     result.forEach((l, idx) => {
@@ -4108,7 +4128,7 @@ const TTS = {
     try {
       if (this.primed) { speechSynthesis.resume(); return; }
       const u = new SpeechSynthesisUtterance(' ');
-      u.volume = 0;
+      u.volume = 0.05;
       speechSynthesis.speak(u);
       this.primed = true;
     } catch (e) { console.warn('голос не разблокировался', e); }
@@ -4139,13 +4159,19 @@ const TTS = {
       toast('Голос «' + (this.voice.name || '') + '» недоступен, читаю ' + chosen.name, 5000);
     }
     if (chosen) this.voice = chosen;
-    speechSynthesis.cancel();
+    // cancel() «на всякий случай» в WebView убивает очередь: следующий вызов
+    // уже не запускается. Отменяем только если что-то реально звучит.
+    try {
+      if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
+    } catch (e) { /* ignore */ }
     const u = new SpeechSynthesisUtterance(line.text);
     if (this.voice) u.voice = this.voice;
     u.lang = this.voice?.lang || 'ru-RU';
     u.rate = this.rate;
     Reader.current = line;
     Reader.paintAllFrames();
+    let started = false;
+    u.onstart = () => { started = true; };
     u.onend = () => { if (then) then(); };
     u.onerror = (e) => {
       const code = (e && e.error) || 'unknown';
@@ -4157,7 +4183,19 @@ const TTS = {
       else toast('Голос не сказал: ' + code, 5000);
       if (then) then();
     };
-    speechSynthesis.speak(u);
+    try { speechSynthesis.speak(u); } catch (e) {
+      toast('Синтез отказал: ' + (e.message || e), 6000);
+      return;
+    }
+    // Если синтез не начал говорить и не сообщил ошибку — молчать нельзя:
+    // именно это выглядело как «голос по умолчанию молчит».
+    clearTimeout(this._watch);
+    this._watch = setTimeout(() => {
+      if (started || this.stopped) return;
+      if (!speechSynthesis.speaking && !speechSynthesis.pending) {
+        toast('Синтез не ответил. Нажмите ⚙ → «Проверить голос»', 6000);
+      }
+    }, 1200);
     // Прокрутка — ПОСЛЕ speak и в try: ошибка геометрии не должна съедать звук.
     try { this.followLine(line); } catch (e) { console.warn('не прокрутил к реплике', e); }
   },
@@ -4352,6 +4390,40 @@ async function renderModels() {
  * открывая главу. Если WASM запрещён политикой страницы (предпросмотр), здесь
  * это будет сказано прямо, а не «движок загружен, моделей нет».
  */
+/**
+ * Проверка голоса по нажатию: говорит тестовую фразу и возвращает отчёт о том,
+ * что видит браузер. Нужна, потому что «молчит» — это три разные причины
+ * (нет голосов в системе, браузер запретил озвучку, синтез не ответил).
+ */
+async function selfTestVoice() {
+  if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
+    return 'В этой среде вообще нет синтеза речи (speechSynthesis undefined)';
+  }
+  let avail = [];
+  try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
+  const chosen = TTS.pickVoice();
+  const parts = [];
+  parts.push('голосов в системе: ' + avail.length);
+  parts.push('выбран: ' + (chosen ? chosen.name + ' [' + chosen.lang + ']' : 'системный по умолчанию (ru-RU)'));
+  const u = new SpeechSynthesisUtterance('Проверка голоса. Раз, два, три.');
+  if (chosen) u.voice = chosen;
+  u.lang = (chosen && chosen.lang) || 'ru-RU';
+  u.rate = TTS.rate || 1;
+  let started = false, err = '';
+  u.onstart = () => { started = true; };
+  u.onerror = (e) => { err = (e && e.error) || 'unknown'; };
+  try {
+    if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  } catch (e) {
+    parts.push('система не приняла фразу: ' + (e.message || e));
+    return parts.join(' · ');
+  }
+  await sleep(1500);
+  parts.push(started ? 'синтез заговорил' : (err ? 'ошибка синтеза: ' + err : 'синтез не ответил за 1,5 с'));
+  return parts.join(' · ');
+}
+
 async function selfTestEngine() {
   if (!OCR.ready) {
     const ok = await OCR.loadModels().catch(e => { OCR.engine = 'failed'; OCR.reason = String(e.message || e); return false; });
@@ -4676,6 +4748,23 @@ function bindUI() {
   // Кнопка «Проверить движок» была в разметке, но НИ К ЧЕМУ не привязана:
   // нажатие не делало ничего. Теперь она запускает синтетическую страницу и
   // показывает работу: «Проверяю…» → результат.
+  if ($('#btnTestVoice')) {
+    const b = $('#btnTestVoice');
+    b.onclick = async (e) => {
+      const el2 = e.currentTarget;
+      if (el2.disabled) return;
+      const label = el2.textContent || 'Проверить голос';
+      el2.disabled = true; el2.textContent = 'Говорю…';
+      try {
+        // Проговариваем и показываем отчёт: какая из трёх причин молчания.
+        const report = await selfTestVoice();
+        toast(report, 9000);
+      } finally {
+        el2.disabled = false; el2.textContent = label;
+      }
+    };
+  }
+
   const btnTest = $('#btnTestEngine');
   if (btnTest) btnTest.onclick = async (e) => {
     const b = e.currentTarget;
