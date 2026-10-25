@@ -2237,7 +2237,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9';
+const VERSION = 'v1.9.1';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3499,6 +3499,8 @@ const Reader = {
   book: null, pages: [], urls: [], canvases: [], imgEls: [],
   mode: 'vertical', dir: 'rtl', page: 0, frames: false, follow: true,
   regions: new Map(),          // page → {regions, boxes, ms}
+  bandCache: new Map(),        // page → Map(ключ полосы → распознанное)
+                               // (поле bands занято массивом полос из bandsOf)
   spoken: new Set(),
   current: null,
   scrollBusy: false,
@@ -3513,11 +3515,19 @@ const Reader = {
     this.regions.clear(); this.spoken.clear();
     // Уже распознанные страницы берём из буфера: повторное открытие книги и
     // повторное чтение не должны снова стоить 10 секунд на страницу.
+    let cleaned = 0;
     try {
       const buf = await Buffer.all();
       for (const row of buf) {
         if (row && Array.isArray(row.lines) && row.lines.length) {
-          this.regions.set(row.page, { lines: row.lines, regions: null, cached: true, ms: 0, detMs: 0, recMs: 0, crops: row.lines.length, boxes: 0 });
+          // Текст в буфере распознан прежней версией — прогоняем его через
+          // нынешние правила чистки, иначе старый мусор («Тг. чв») живёт вечно.
+          const lines = await cleanLines(row.lines);
+          this.regions.set(row.page, { lines, regions: null, cached: true, ms: 0, detMs: 0, recMs: 0, crops: lines.length, boxes: 0 });
+          if (lines.length !== row.lines.length) {
+            await Buffer.put(row.page, lines);
+            cleaned++;
+          }
         }
       }
       if (buf.length) toast('Из буфера: ' + buf.length + ' стр. уже распознаны', 3000);
@@ -3667,7 +3677,12 @@ const Reader = {
     this.band = this.bands[clamp(this.bandIndex || 0, 0, this.bands.length - 1)];
     this.syncSub();
     if (RULES.semiManual && State.semi) return;         // ждём остановки и прокрутки
-    if (!this.scrollBusy && !this.regions.get(i)) this.scanCurrent(false);
+    // Буфер прошлой версии хранит страницу, распознанную ЦЕЛИКОМ. Для длинной
+    // страницы это лишние реплики за пределами экрана — такую пересчитываем
+    // видимой полосой один раз (полоса запомнится в bandCache).
+    const data = this.regions.get(i);
+    const staleFull = data && data.cached && this.visibleBandPx(i);
+    if (!this.scrollBusy && (!data || staleFull)) this.scanCurrent(false);
   },
 
   /**
@@ -3811,14 +3826,14 @@ const Reader = {
     // распознавать новые куски, а уже распознанные не гонять заново.
     const band = opts.full ? null : this.visibleBandPx(i);
     const bandKey = band ? band.key : 'page';
-    this.bands = this.bands || new Map();
-    const bandMap = this.bands.get(i) || new Map();
+    if (!(this.bandCache instanceof Map)) this.bandCache = new Map();
+    const bandMap = this.bandCache.get(i) || new Map();
 
     // Кэш годится, если: (а) полоса уже распознана; (б) страницу распознали
     // целиком; (в) данные пришли из буфера прошлой сессии — тогда считаем их
     // полной страницей, иначе старые книги распознавались бы заново.
     const cached = this.regions.get(i);
-    const hasBands = this.bands.has(i);
+    const hasBands = this.bandCache.has(i);
     const fresh = cached && (band ? (hasBands && bandMap.has(bandKey)) : !hasBands);
     if (cached && fresh && !force) { this.paintPage(i); return cached; }
 
@@ -3855,7 +3870,7 @@ const Reader = {
       // Собираем полосы страницы: новая заменяет старую с тем же ключом,
       // остальные остаются. Их реплики идут сверху вниз.
       bandMap.set(bandKey, { lines: fresh, res, at });
-      this.bands.set(i, bandMap);
+      this.bandCache.set(i, bandMap);
       const parts = Array.from(bandMap.entries())
         .sort((a, b) => (a[1].res.band?.y0 ?? 0) - (b[1].res.band?.y0 ?? 0));
       const lines = [];
@@ -4065,6 +4080,20 @@ function showArrow() {
 }
 function hideArrow() { $('#nextArrow').style.display = 'none'; }
 
+/**
+ * Повторная чистка готовых строк: правила мусора менялись, а в буфере лежит
+ * текст, распознанный раньше. Пустые строки выпадают вместе со своими рамками.
+ */
+async function cleanLines(lines) {
+  const out = [];
+  for (const ln of lines) {
+    const text = Words.ready ? Words.polish(ln.text) : ln.text;
+    if (!text) continue;
+    out.push(text === ln.text ? ln : { ...ln, text });
+  }
+  return out;
+}
+
 function renderTextSheet(i) {
   // Открывая шторку, сначала сверяем индекс с тем, что реально на экране:
   // раньше здесь стоял «застрявший» Reader.page, и текст открывался не той
@@ -4273,7 +4302,7 @@ async function onScrollSettled() {
   if (OCR.ready && !State.scanning) {
     const band = Reader.visibleBandPx(i);
     const key = band ? band.key : 'page';
-    const bandMap = Reader.bands && Reader.bands.get(i);
+    const bandMap = Reader.bandCache.get(i);
     const done = bandMap && bandMap.has(key);
     const hasPage = Reader.regions.get(i) && !band;
     if (!done && !hasPage) await Reader.scanPage(i, {});
