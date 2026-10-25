@@ -181,12 +181,14 @@
     <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
       <button class="btn primary" id="btnPickModels">Выбрать файлы</button>
       <button class="btn" id="btnPickModelDir">Папка с моделями</button>
+      <button class="btn" id="btnTestEngine">Проверить движок</button>
     </div>
     <div class="row" style="margin-top:8px;gap:8px">
       <button class="btn" id="btnClearModels">Убрать модели</button>
     </div>
     <div class="lbl">ДВИЖОК</div>
     <div id="ortState" class="kv hint"></div>
+    <div id="engineNote" class="hint" style="display:none;color:#ffd2d2;margin-top:6px"></div>
     <div class="hint" style="margin-top:10px">
       Распознавание целиком в браузере: ни один кадр никуда не отправляется.
       Модели хранятся в IndexedDB этого сайта.
@@ -307,7 +309,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v0.4';
+const VERSION = 'v0.5';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -569,23 +571,61 @@ function sanitizeRules(r) {
 /* ───────────────────────── 5. OCR: модели в браузере ───────────────────────── */
 const OCR = {
   det: null, rec: null, dict: null, ready: false,
+  // Честное состояние движка. Раньше интерфейс писал «движок загружен,
+  // моделей нет» даже когда все три модели лежали на месте, — потому что
+  // флага было всего два. Теперь видно, на каком шаге и почему всё встало.
+  engine: 'idle',        // idle | loading | ready | blocked | failed
+  reason: '',
+  hasFiles() { return !!(this.pendingDet && this.pendingRec && this.pendingDict); },
   async loadModels() {
     const det = await DB.get('kv', 'model:det');
     const rec = await DB.get('kv', 'model:rec');
     const dict = await DB.get('kv', 'model:dict');
-    if (!det || !rec || !dict) { this.ready = false; return false; }
-    if (typeof ort === 'undefined') return false;
+    this.pendingDet = !!det; this.pendingRec = !!rec; this.pendingDict = !!dict;
+    if (!det || !rec || !dict) {
+      this.ready = false; this.engine = 'idle';
+      this.reason = 'моделей нет';
+      return false;
+    }
+    if (typeof ort === 'undefined') {
+      this.ready = false; this.engine = 'failed';
+      this.reason = 'onnxruntime-web не загрузился: нужна сеть при первом открытии';
+      return false;
+    }
+    this.engine = 'loading'; this.reason = '';
     ort.env.wasm.numThreads = 1;                 // без COOP/COEP потоки не нужны
     ort.env.wasm.simd = true;
     ort.env.logLevel = 'error';
-    this.det = await ort.InferenceSession.create(det.v, { executionProviders: ['wasm'] });
-    this.rec = await ort.InferenceSession.create(rec.v, { executionProviders: ['wasm'] });
+    try {
+      this.det = await ort.InferenceSession.create(det.v, { executionProviders: ['wasm'] });
+      this.rec = await ort.InferenceSession.create(rec.v, { executionProviders: ['wasm'] });
+    } catch (e) {
+      this.ready = false;
+      const msg = String((e && e.message) || e);
+      // Песочница/строгий CSP запрещают WebAssembly.instantiate — это среда,
+      // а не файл: на устройстве в Chrome тот же файл работает.
+      const csp = /unsafe-eval|WebAssembly|CompileError|no available backend/i.test(msg);
+      this.engine = csp ? 'blocked' : 'failed';
+      this.reason = csp
+        ? 'WebAssembly запрещён политикой безопасности этой страницы (предпросмотр). '
+          + 'Скачайте файл и откройте в Chrome — там WASM разрешён.'
+        : msg.slice(0, 300);
+      return false;
+    }
     const lines = String(dict.v).split('\n');
     while (lines.length && lines[lines.length - 1] === '') lines.pop();
     // Ровно как в KomaOcrEngine: blank(0) + символы словаря + пробел.
     this.dict = [''].concat(lines).concat([' ']);
-    this.ready = true;
+    this.ready = true; this.engine = 'ready'; this.reason = '';
     return true;
+  },
+  /** Короткая строка для интерфейса. */
+  statusText() {
+    if (this.engine === 'ready') return 'движок готов (' + (this.det ? this.det.inputNames[0] : '') + ')';
+    if (this.engine === 'loading') return 'движок загружается…';
+    if (this.engine === 'blocked') return 'модели есть, но WASM заблокирован этой страницей';
+    if (this.engine === 'failed') return 'модели есть, движок не поднялся';
+    return this.hasFiles() ? 'модели есть, движок не запускался' : 'моделей нет';
   },
 };
 
@@ -1478,10 +1518,47 @@ async function renderModels() {
     `${mark(!!rec)} ${f(rec, 'cyrillic.onnx')}`,
     `${mark(!!dict)} ${dict ? `cyrillic.txt: ${String(dict.v).split('\n').filter(Boolean).length} символов` : 'cyrillic.txt: нет'}`,
   ].join('<br>');
+  const note = $('#engineNote');
+  if (note) {
+    note.style.display = OCR.engine === 'blocked' || OCR.engine === 'failed' ? 'block' : 'none';
+    note.innerHTML = OCR.engine === 'blocked'
+      ? 'Так выглядит запрет WebAssembly на этой странице (предпросмотр в приложении). '
+        + 'Модели уже сохранены — открывать заново не нужно. Скачайте файл и откройте в Chrome: '
+        + 'там движок поднимется с теми же тремя файлами.'
+      : '';
+  }
   $('#ortState').textContent = (typeof ort === 'undefined')
-    ? 'onnxruntime-web не загрузился (нет сети?). Откройте файл на устройстве с интернетом.'
-    : (OCR.ready ? 'движок готов: ' + (OCR.det.inputNames[0]) : 'движок загружен, моделей нет');
+    ? 'onnxruntime-web не загрузился: нужна сеть при первом открытии файла.'
+    : OCR.statusText() + (OCR.reason ? ' — ' + OCR.reason : '');
 }
+/**
+ * Проверка движка на синтетической странице: гоняем ровно тот же путь, что и на
+ * кадре, но на картинке, нарисованной кодом. Так видно, работает ли WASM, не
+ * открывая главу. Если WASM запрещён политикой страницы (предпросмотр), здесь
+ * это будет сказано прямо, а не «движок загружен, моделей нет».
+ */
+async function selfTestEngine() {
+  if (!OCR.ready) {
+    const ok = await OCR.loadModels().catch(e => { OCR.engine = 'failed'; OCR.reason = String(e.message || e); return false; });
+    if (!ok) { await renderModels(); toast(OCR.statusText() + (OCR.reason ? ': ' + OCR.reason : ''), 8000); return; }
+  }
+  try {
+    // страница 600×800: белый фон и тёмная плашка «текста»
+    const c = makeCanvas(600, 800);
+    for (let i = 0; i < c.data.length; i += 4) { c.data[i] = 255; c.data[i + 1] = 255; c.data[i + 2] = 255; c.data[i + 3] = 255; }
+    for (let y = 120; y < 180; y++) for (let x = 80; x < 520; x++) {
+      const k = (y * 600 + x) * 4;
+      if ((x >> 3) % 2 === 0 || (y >> 3) % 2 === 0) { c.data[k] = 20; c.data[k + 1] = 20; c.data[k + 2] = 20; }
+    }
+    const boxes = await detectBoxes(c, DEFAULT_RULES.pageSide);
+    toast('Движок считает: детектор вернул ' + boxes.length + ' бокс(ов) на тестовой картинке', 6000);
+    await renderModels();
+  } catch (e) {
+    toast('Движок не считает: ' + (e.message || e), 8000);
+    OCR.engine = 'failed'; OCR.reason = String(e.message || e); await renderModels();
+  }
+}
+
 /**
  * Принять любое количество выбранных файлов модели. Ключевое: шторку не
  * закрываем, разбираем по именам, показываем, чего ещё не хватает.
@@ -1510,9 +1587,11 @@ async function storeModelFiles(files) {
   if (!missing.length) {
     try {
       const ok = await OCR.loadModels();
-      toast(ok ? 'Все три модели на месте, движок готов' : 'Модели сохранены, но движок не загрузился (нужна сеть для onnxruntime-web)', 5000);
+      toast(ok ? 'Все три модели на месте, движок готов'
+               : 'Модели сохранены. ' + OCR.statusText() + (OCR.reason ? ': ' + OCR.reason : ''), 9000);
     } catch (e) {
-      toast('Движок не загрузился: ' + (e.message || e), 6000);
+      OCR.engine = 'failed'; OCR.reason = String(e.message || e);
+      toast('Движок не поднялся: ' + OCR.reason, 8000);
     }
     await renderModels();
     if (typeof selfCheck === 'function') await selfCheck();
@@ -1862,7 +1941,7 @@ function showEnvBanner() {
 async function selfCheck() {
   const det = await DB.get('kv', 'model:det');
   const parts = [];
-  parts.push(OCR.ready ? 'OCR готов' : (det ? 'модели есть, движок не загружен' : 'моделей нет — ⚙'));
+  parts.push('OCR: ' + OCR.statusText());
   parts.push(typeof ort === 'undefined' ? 'onnxruntime-web не загружен (нужна сеть)' : 'onnxruntime-web загружен');
   parts.push('TTS ' + (speechSynthesis.getVoices().length ? 'есть' : 'нет голосов'));
   if (ENV.android) parts.push('Android: папки нет, выбирайте файлы/CBZ');
