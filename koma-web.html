@@ -3254,17 +3254,22 @@ function allWordsKnown(text) {
   });
 }
 
-/** Оценка текста: сколько слов настоящее и сколько мусорных + уверенность. */
+/** Оценка текста: сколько слов настоящее и сколько мусорных + уверенность.
+ *  Слово из словаря ценим выше, чем просто «похоже на словоформу»: иначе
+ *  «будучию» (форма проходит isPlausible) набирает столько же, сколько
+ *  «будучи», и при равном счёте выигрывает вариант с чуть большей
+ *  уверенностью модели. */
 function textScore(text, conf) {
   const words = String(text).match(/[\p{L}]{2,}/gu) || [];
   if (!words.length) return -50;
-  let known = 0, junk = 0;
+  let known = 0, weak = 0, junk = 0;
   for (const w of words) {
     const low = w.toLowerCase();
-    if (!Words.ready || Words.isKnown(low) || Words.isPlausible(low)) known++;
+    if (!Words.ready || Words.isKnown(low)) known++;
+    else if (Words.isPlausible(low)) weak++;
     else junk++;
   }
-  return known * 10 - junk * 12 + (conf || 0) * 3;
+  return known * 10 + weak * 4 - junk * 12 + (conf || 0) * 3;
 }
 
 /**
