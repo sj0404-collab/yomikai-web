@@ -2,7 +2,7 @@
 // «…старшей сестрой тирана»), хотя строка распозналась. Плюс титул крупным
 // текстом помечается, а не теряется.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 global.window.addEventListener = () => {};
 global.document.getElementById = () => ({ textContent: '', innerHTML: '', style: {}, classList: { contains: () => false, add() {}, remove() {}, toggle() {} }, addEventListener() {} });
 global.document.querySelector = () => null;
