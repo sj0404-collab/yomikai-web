@@ -1,6 +1,6 @@
 // Кэш распознанных страниц и правило «сколько раз повторять распознавание».
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
 global.document.addEventListener = () => {};
@@ -57,4 +57,4 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   await api.decodeBetter(crop, { ...api.DEFAULT_RULES, decodeRetryBelow: 5 });
   ok(runs === 3, 'порог 5 → первый прогон + два бинаризованных');
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
-})().catch(e => { console.log('FATAL', e.message); process.exit(1); });
+})().catch(e => { console.log('FATAL', e.stack); process.exit(1); });
