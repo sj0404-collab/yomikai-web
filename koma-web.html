@@ -2245,7 +2245,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.10';
+const VERSION = 'v1.9.11';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2830,12 +2830,18 @@ const Words = {
    *   • нет ни одного, слово 1  → возможно, опечатка: оставляем, только если
    *     после правки получается слово из словаря.
    */
-  polish(text, junkRatio) {
+  polish(text, junkRatio, conf) {
     const raw = String(text || '');
     if (!this.ready) return this.finish(raw);
     const thr = junkRatio ?? 0.6;
     // {2,} а не {3,}: «Тг. чв» — тоже не реплика, а короткие настоящие слова
     // («не», «да», «ты», «он») в словаре есть и проверку проходят.
+    // Латинская мелочь — это не реплика, а номер страницы или логотип:
+    // «Tr. 48», «HD», «Tl.48». В репликах кириллица.
+    const cyrCount = (raw.match(/[А-Яа-яЁё]/g) || []).length;
+    const latCount = (raw.match(/[A-Za-z]/g) || []).length;
+    if (cyrCount === 0 && latCount > 0 && latCount <= 5) return '';
+
     const words = (raw.match(/[А-Яа-яЁё]{2,}/g) || []).map(w => w.toLowerCase());
     if (!words.length) return this.finish(raw);
     const known = words.filter(w => this.isKnown(w));
@@ -2843,6 +2849,16 @@ const Words = {
     const fixed = this.finish(raw);
     if (!fixed) return '';
     if (knownLong.length >= 1) return fixed;                     // есть настоящие слова
+
+    // Одна-две буквы — это реплика только если это настоящее короткое слово:
+    // «НЕ», «ДА», «ТЫ», «Я». «АН», «АО», «ОИ» — шум от декора, а не реплика.
+    const letters = cyrCount + latCount;
+    if (letters <= 2) {
+      const only = (raw.match(/[А-Яа-яЁёA-Za-z]+/g) || []).join('').toLowerCase();
+      const shortOk = ['я', 'не', 'да', 'ты', 'он', 'мы', 'вы', 'но', 'ну', 'же',
+        'ли', 'ах', 'ох', 'эх', 'эй', 'уй', 'ой', 'ай', 'ей', 'их', 'им', 'её', 'его'];
+      if (!shortOk.includes(only)) return '';
+    }
     // Строка из имён: 1-3 слова, все с заглавной — оставляем (БЕРСЕРК, ГРАФЬ).
     const wordsRaw = raw.match(/[А-ЯЁ][а-яё]{2,}/g) || [];
     const wordsLong = raw.match(/[А-Яа-яЁё]{3,}/g) || [];
@@ -3359,17 +3375,37 @@ function wordColumns(crop, R) {
  * настоящих слов и меньше мусорных. Как только все слова верные — выходим,
  * чтобы не тратить время на телефоне.
  */
-async function decodeAllVariants(crop, R) {
+/** Кроп с белыми полями: модель видит целые буквы, а не обрезанные края. */
+function padCanvas(src, frac) {
+  const pad = Math.max(1, Math.round(src.height * frac));
+  const out = makeCanvas(src.width + pad * 2, src.height + pad * 2);
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(src, pad, pad);
+  return out;
+}
+
+async function decodeAllVariants(crop, R, first) {
   // Порядок по замеренной пользе на реальной странице: увеличение и контраст
   // дают верные слова чаще, бинаризация — редко и дорого.
-  const tries = [['orig', crop]];
+  // Поля важнее увеличения: на рукописном титуле «сестрой тирана.» читается
+  // только с отступом 20 %, а без него выходит «естра тирана». Поэтому поля
+  // идут сразу после исходного кропа.
+  const pointed = padCanvas(crop, 0.2);
+  const tries = [['orig', crop], ['pad20', pointed]];
   if (crop.height >= 12) tries.push(['up2', upscaleCanvas(crop, 2)]);
   tries.push(['contrast', contrastCanvas(crop)]);
+  tries.push(['pad20up2', upscaleCanvas(pointed, 2)]);
   tries.push(['bin0', binarizeCanvas(crop, 0, R)]);
   let best = null;
   for (const [name, cv] of tries) {
     let text = '', conf = 0;
-    try { [text, conf] = await decodeCrop(cv); } catch (e) { continue; }
+    // Исходный кроп уже распознан в decodeBetter — не гоняем модель дважды.
+    if (name === 'orig' && first) { text = first[0]; conf = first[1]; }
+    else {
+      try { [text, conf] = await decodeCrop(cv); } catch (e) { continue; }
+    }
     DECODE_STATS.variantRuns++;
     const score = textScore(text, conf);
     if (!best || score > best.score) {
@@ -3390,7 +3426,7 @@ async function decodeBetter(cropCanvas, R, opts = {}) {
   // подготовки кропа. Узкие (звуковые эффекты) не перебираем: там всё равно
   // не слова, и на телефоне это лишние секунды.
   if (R.decodeVariants !== false && (opts.wide || letters(first[0]) >= 3)) {
-    const best = await decodeAllVariants(cropCanvas, R);
+    const best = await decodeAllVariants(cropCanvas, R, first);
     return [best.text, best.conf];
   }
   const need = Math.max(0, Math.round(R.decodeRetryBelow ?? 1));
@@ -4069,7 +4105,7 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   // исправляет «ПОШЕВЕАИТЬСЯ» → «ПОШЕВЕЛИТЬСЯ» и выбрасывает строки, которых
   // в русском нет вовсе.
   const result = lines
-    .map(l => ({ ...l, text: Words.polish(l.text, R.junkRatio) }))
+    .map(l => ({ ...l, text: Words.polish(l.text, R.junkRatio, l.confidence) }))
     .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
   rescueLostLines(result, source, R);
   markLargeText(result, source);
@@ -4109,7 +4145,7 @@ function rescueLostLines(result, source, R) {
   if (!result.length) return;
   const covered = result.map(l => normText(l.text));
   for (const r of source) {
-    const t = String(Words.polish(r.text, R.junkRatio) || '').trim();
+    const t = String(Words.polish(r.text, R.junkRatio, r.confidence) || '').trim();
     if (!t) continue;
     const key = normText(t);
     if (key.length < 3) continue;
@@ -4888,7 +4924,7 @@ async function cleanLines(lines) {
   const keyOf = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   const out = [];
   for (const ln of lines) {
-    const text = Words.ready ? Words.polish(ln.text) : ln.text;
+    const text = Words.ready ? Words.polish(ln.text, RULES.junkRatio, ln.confidence) : ln.text;
     if (!text) continue;
     // Один и тот же текст в том же месте — дубль от полос прежней версии.
     const k = keyOf(text);
