@@ -1,6 +1,6 @@
 // Все кнопки из разметки должны иметь обработчик, и он должен работать.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 delete global.indexedDB;
 const handlers = new Map();
 const els = new Map();
