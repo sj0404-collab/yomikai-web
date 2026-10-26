@@ -9,7 +9,7 @@ global.document.querySelector = () => null;
 global.ort = { env: { wasm: {} }, Tensor: class {} };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js'].map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
-  + '; return {Words, readingOrder, sanitizeRules, DEFAULT_RULES, normText};')();
+  + '; return {Words, readingOrder, sanitizeRules, DEFAULT_RULES, normText, joinBubbleText};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
@@ -60,6 +60,14 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   // Пустая строка не превращается в реплику
   const empty = api.readingOrder([reg('Тл. 48', 0.4, 0.5, 0.6, 0.52)], true, true, R);
   ok(empty.length === 0, 'номер страницы сам по себе — не реплика');
+
+  // Перенос слова точкой вместо дефиса: «БУДЕ.» + «ТЕ ГОВОРИТЬ» → «БУДЕТЕ ГОВОРИТЬ»
+  ok(api.joinBubbleText('В БУДУЩЕМ, КОГДА ВЫ БУДЕ.', 'ТЕ ГОВОРИТЬ С ЕЁ ВЫСОЧЕСТВОМ')
+    === 'В БУДУЩЕМ, КОГДА ВЫ БУДЕТЕ ГОВОРИТЬ С ЕЁ ВЫСОЧЕСТВОМ',
+    'перенос с точкой склеен в слово: ' + api.joinBubbleText('Вы буде.', 'те говорить'));
+  ok(api.joinBubbleText('НО.', 'ОН ПРИШЁЛ') === 'НО. ОН ПРИШЁЛ',
+    'если слова не получается, точка остаётся и пробел на месте');
+  ok(api.joinBubbleText('ВЫСО-', 'ЧЕСТВО') === 'ВЫСОЧЕСТВО', 'дефис в конце склеивает без пробела');
 
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
