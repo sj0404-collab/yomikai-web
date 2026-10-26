@@ -3504,11 +3504,53 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   let largePasses = 0;
 
   const decodeLine = async (canvas, ln, wide) => {
-    const c = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
+    const w = Math.max(1, ln.right - ln.left), h = Math.max(1, ln.bottom - ln.top);
+    const c = makeCanvas(w, h);
     c.getContext('2d', { willReadFrequently: true })
-      .drawImage(canvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
+      .drawImage(canvas, ln.left, ln.top, w, h, 0, 0, w, h);
     crops++;
-    const [text, conf] = await decodeBetter(c, R, { wide });
+    let [text, conf] = await decodeBetter(c, R, { wide });
+    let bestScore = textScore(text, conf);
+    // Титульная строка «жизнь, будучи старшей» на кропе по боксу строки читается
+    // как «оддучив»: детектор обрезает низ строки, и CTC теряет «б» и «у». Точный
+    // перебор обрезки со всех сторон (см. brute-official-box.json) дал: кроп,
+    // расширяемый вверх на 30 % высоты строки, с полями 15 % — та же модель без
+    // подмены слов читает «жизнь, будучи старшей» (conf 0.74). Перебираем такие
+    // кропы только когда в строке есть незнакомые слова, и берём лучший по
+    // textScore (словарные слова против мусора).
+    if (text && !allWordsKnown(text) && (wide || (text.match(/\p{L}/gu) || []).length >= 5)) {
+      const ext = (topFrac, botFrac) => {
+        const dt = Math.round(h * topFrac), db = Math.round(h * botFrac);
+        const t = clamp(ln.top - dt, 0, canvas.height - 1);
+        const b = clamp(ln.bottom + db, t + 1, canvas.height);
+        if (t >= ln.top && b <= ln.bottom) return null;         // нечего расширять
+        const e = makeCanvas(w, Math.max(1, b - t));
+        e.getContext('2d', { willReadFrequently: true })
+          .drawImage(canvas, ln.left, t, w, b - t, 0, 0, w, b - t);
+        return e;
+      };
+      // Подготовки из перебора: без них расширенный кроп даёт «будучь», а не «будучи».
+      const preps = (e) => [
+        ['orig', e], ['pad10', padCanvas(e, 0.10)], ['pad15', padCanvas(e, 0.15)],
+        ['up15', upscaleCanvas(e, 1.5)], ['contrast', contrastCanvas(e)],
+        ['gamma13', (() => { const src = e; const w2 = src.width, h2 = src.height;
+          const ctx = src.getContext('2d', { willReadFrequently: true });
+          const img = ctx.getImageData(0, 0, w2, h2), d = img.data;
+          for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++)
+            d[i + k] = clamp(Math.round(255 * Math.pow(d[i + k] / 255, 1.3)), 0, 255);
+          const out = makeCanvas(w2, h2); out.getContext('2d').putImageData(img, 0, 0); return out; })()],
+      ];
+      for (const maker of [ext(0.30, 0), ext(0.15, 0), ext(0, 0.15)]) {
+        if (!maker) continue;
+        for (const [name, pc] of preps(maker)) {
+          crops++;
+          let t2, c2;
+          try { [t2, c2] = await decodeCrop(pc); } catch (e) { continue; }
+          const s = textScore(t2, c2);
+          if (s > bestScore) { bestScore = s; text = t2; conf = c2; }
+        }
+      }
+    }
     return { text, conf };
   };
 
