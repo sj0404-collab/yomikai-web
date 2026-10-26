@@ -21,8 +21,7 @@ global.navigator = { userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel) Chrome/1
 global.ort = { env: { wasm: {} }, Tensor: class {} };
 global.toastLog = [];
 
-const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+const body = require('./koma-src.cjs').app;
 const api = new Function('toast',
   body.slice(0, body.indexOf('(async function boot()'))
   + '; return {Library, DB, FILES, bindUI, escapeHtml};')((m) => global.toastLog.push(String(m)));

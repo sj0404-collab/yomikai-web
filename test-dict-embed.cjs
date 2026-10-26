@@ -5,12 +5,10 @@ require('./shim.js');
 delete global.indexedDB;
 global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
-const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
-// part0-dict.js содержит вшитый словарь и b64ToBytes — грузим вместе
-const dictSrc = fs.readFileSync('/home/user/koma-web/part0-dict.js', 'utf8');
-// Собираем как в реальной странице: сначала часть со словарём, потом приложение.
-const combined = dictSrc + '\n' + body.slice(0, body.indexOf('(async function boot()'));
+// dictSrc содержит вшитый словарь и b64ToBytes — грузим вместе с приложением,
+// как в реальной странице: сначала часть со словарём, потом приложение.
+const { dictSrc, app } = require('./koma-src.cjs');
+const combined = dictSrc + '\n' + app.slice(0, app.indexOf('(async function boot()'));
 const api = new Function(combined + '; return {Words, DB, embeddedDictText, DICT_GZ_B64};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
@@ -22,7 +20,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(lines.length === 250000, 'слов в словаре: ' + lines.length);
   ok(lines[0].startsWith('я ') && lines[0].split(' ')[1] === '5081568', 'первое слово по частоте: «' + lines[0] + '»');
   const md5 = crypto.createHash('md5').update(text, 'utf8').digest('hex');
-  const src = crypto.createHash('md5').update(fs.readFileSync('/home/user/lab/ru_250k.txt', 'utf8'), 'utf8').digest('hex');
+  const src = '777568de00e5b7c5ea963ba9e919f63e'; // эталон ru_250k.txt из APK
   ok(md5 === src, 'разжатый словарь побайтово равен исходному ru_250k.txt');
 
   const ready = await api.Words.load();
