@@ -2245,7 +2245,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.6';
+const VERSION = 'v1.9.7';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2972,13 +2972,17 @@ async function detectBoxes(imgCanvas, side, R) {
     return components(tensor.data, h, w);           // карта [1,1,h,w]
   };
   let boxes = await run(false);
-  if (!boxes.length && (!R || R.detRetry !== false)) boxes = await run(true);
-  return boxes.slice(0, 400).map(b => ({
+  let pass = 'normal';
+  if (!boxes.length && (!R || R.detRetry !== false)) { boxes = await run(true); pass = 'imagenet'; }
+  const out = boxes.slice(0, 400).map(b => ({
     left: clamp(Math.round((b[0] / w) * w0), 0, w0 - 1),
     top: clamp(Math.round((b[1] / h) * h0), 0, h0 - 1),
     right: clamp(Math.round((b[2] / w) * w0), 1, w0),
     bottom: clamp(Math.round((b[3] / h) * h0), 1, h0),
   })).filter(b => b.right > b.left && b.bottom > b.top);
+  // Какая подготовка кадра дала боксы — видно в отчёте шторки.
+  out.pass = pass;
+  return out;
 }
 /* ── компоненты карты вероятностей (тот же BFS, порог 0.3) ── */
 function components(map, h, w) {
@@ -3192,26 +3196,38 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     src = c;
   }
   const visible = (ln) => lineInBand(ln, band, y0);
-  const boxes = await detectBoxes(src, R.pageSide, R);
+
+  // ── Проход 1: детектор. Если он не нашёл ничего, пробуем другие подготовки
+  // кадра: бледная каллиграфия и светлый текст на белом фоне не ловятся на
+  // исходном кадре, а на контрастном/бинаризованном находятся.
+  const det = await detectWithRetry(src, R);
   const detMs = Math.round(performance.now() - t0);
   const t1 = performance.now();
+  const W = src.width, H = src.height;
   let crops = 0;
   const regions = [];
+  let largePasses = 0;
+
+  const decodeLine = async (canvas, ln) => {
+    const c = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
+    c.getContext('2d', { willReadFrequently: true })
+      .drawImage(canvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
+    crops++;
+    const [text, conf] = await decodeBetter(c, R);
+    return { text, conf };
+  };
+
+  // ── Проход 1: строки внутри боксов. Сначала собираем всё, потом (зная
+  // типичную высоту строки) решаем, какие боксы — крупный текст.
+  const byBox = [];
   let done = 0;
-  // Координаты боксов относятся к полосе (src), а рамки нужны на всей странице:
-  // переводим через y0 и высоту полосы.
-  const W = src.width, H = src.height;
-  for (const box of boxes) {
-    const lines = textLines(src, box, R);
+  for (const box of det.boxes) {
+    const lines = textLines(src, box, R).filter(visible);
+    const items = [];
     for (const ln of lines) {
-      if (!visible(ln)) continue;
-      const c = makeCanvas(ln.right - ln.left, ln.bottom - ln.top);
-      c.getContext('2d', { willReadFrequently: true })
-        .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
-      crops++;
-      const [text, conf] = await decodeBetter(c, R);
+      const { text, conf } = await decodeLine(src, ln);
       if (text.trim() && conf > R.minConfidence) {
-        regions.push({
+        items.push({
           text,
           left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
           right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
@@ -3219,16 +3235,169 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
         });
       }
     }
+    byBox.push({ box, items });
     done++;
-    if (onProgress) onProgress(done, boxes.length);
+    if (onProgress) onProgress(done, det.boxes.length + 0);
     await sleep(0);      // не блокируем кадр
   }
+
+  // ── Проход 2: крупный текст (титул, каллиграфия, большие буквы). На обычном
+  // масштабе такой блок слипается в одну «строку» и читается плохо. Кроп
+  // увеличиваем и ищем заново — тогда блок делится на строки, и каждая
+  // распознаётся отдельно. Берём результат, только если он лучше первого.
+  const pageMedian = medianLineHeight(byBox);
+  for (const entry of byBox) {
+    const own = entry.items.map(i => i.bottom - i.top).sort((a, b) => a - b);
+    const h = own.length ? own[own.length >> 1] * imgCanvas.height : 0;
+    const big = pageMedian > 0 && h > pageMedian * 1.8;
+    if (!big) continue;
+    largePasses++;
+    const alt = await recognizeLargeBox(src, entry.box, R, { visible, y0, pageH: imgCanvas.height, W });
+    crops += alt.crops;
+    const qa = qualityOf(entry.items.map(i => i.text));
+    const qb = qualityOf(alt.items.map(i => i.text));
+    if (qb > qa) entry.items = alt.items;
+  }
+  for (const entry of byBox) for (const item of entry.items) regions.push(item);
+
   return {
-    regions, boxes: boxes.length,
+    regions, boxes: det.boxes.length,
     ms: Math.round(performance.now() - t0),
     detMs, recMs: Math.round(performance.now() - t1), crops,
     band: band ? { y0, y1 } : null,
+    detPass: det.pass,
+    largePasses,
   };
+}
+
+/** Медиана высоты реплик на странице — по ней отличаем крупный текст. */
+function medianLineHeight(byBox) {
+  const hs = [];
+  for (const e of byBox) for (const i of e.items) hs.push(i.bottom - i.top);
+  hs.sort((a, b) => a - b);
+  return hs.length ? hs[hs.length >> 1] : 0;
+}
+
+/**
+ * Насколько текст похож на настоящий: сколько слов знает словарь. По этой
+ * оценке выбираем между первым и вторым проходом («будучи» лучше «будучиг»).
+ */
+function qualityOf(texts) {
+  if (!texts || !texts.length) return 0;
+  let known = 0, letters = 0;
+  for (const t of texts) {
+    const words = String(t).match(/[\p{L}\p{N}]{2,}/gu) || [];
+    for (const w of words) {
+      letters += w.length;
+      if (!Words.ready || Words.isKnown(w.toLowerCase()) || Words.isPlausible(w.toLowerCase())) known++;
+    }
+  }
+  return known * 100 + Math.min(letters, 99) * 0.1;
+}
+
+/**
+ * Детектор с повторами: если на исходном кадре боксов 0, пробуем контраст и
+ * две полярности бинаризации. Возвращает, какая подготовка сработала, чтобы
+ * это было видно в отчёте шторки, а не оставалось тайной.
+ */
+async function detectWithRetry(src, R) {
+  const boxes = await detectBoxes(src, R.pageSide, R);
+  if (boxes.length) return { boxes, pass: boxes.pass || 'normal' };
+  if (R.detRetry === false) return { boxes: [], pass: 'none' };
+  const variants = [
+    ['contrast', () => contrastCanvas(src)],
+    ['binary', () => binarizeCanvas(src, 0, R)],
+    ['binary-inv', () => binarizeCanvas(src, 1, R)],
+  ];
+  for (const variant of variants) {
+    try {
+      const found = await detectBoxes(variant[1](), R.pageSide, R);
+      if (found.length) return { boxes: found, pass: variant[0] };
+    } catch (e) { console.warn('повтор детектора (' + variant[0] + ') не удался', e); }
+  }
+  return { boxes: [], pass: 'none' };
+}
+
+/** Растянуть диапазон яркости: бледный текст на белом иначе не виден детектору. */
+function contrastCanvas(src) {
+  const w = src.width, h = src.height;
+  const ctx = src.getContext('2d', { willReadFrequently: true });
+  const img = ctx.getImageData(0, 0, w, h);
+  const luma = lumaFrom(img.data, w, h);
+  let lo = 255, hi = 0;
+  for (let i = 0; i < luma.length; i++) { const v = luma[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0; i < luma.length; i++) {
+    const v = clamp(Math.round(((luma[i] - lo) / span) * 255), 0, 255);
+    const p = i * 4;
+    img.data[p] = img.data[p + 1] = img.data[p + 2] = v; img.data[p + 3] = 255;
+  }
+  const out = makeCanvas(w, h);
+  out.getContext('2d').putImageData(img, 0, 0);
+  return out;
+}
+
+/**
+ * Второй проход по крупному блоку: увеличить кроп, найти боксы заново,
+ * разбить на строки и распознать каждую. Координаты возвращаются в системе
+ * всей страницы, чтобы рамки стояли на месте.
+ */
+async function recognizeLargeBox(src, box, R, ctxInfo) {
+  const out = { items: [], crops: 0 };
+  const pad = Math.round((box.bottom - box.top) * 0.10);
+  const left = clamp(box.left - pad, 0, src.width - 1);
+  const right = clamp(box.right + pad, 1, src.width);
+  const top = clamp(box.top - pad, 0, src.height - 1);
+  const bottom = clamp(box.bottom + pad, 1, src.height);
+  const bw = right - left, bh = bottom - top;
+  if (bw < 40 || bh < 20) return out;
+  const k = clamp(Math.round(1200 / Math.max(bw, bh)), 1, 4);
+  if (k < 2) return out;                       // мелкий блок увеличивать незачем
+  const up = makeCanvas(Math.round(bw * k), Math.round(bh * k));
+  const uctx = up.getContext('2d', { willReadFrequently: true });
+  uctx.imageSmoothingEnabled = true; uctx.imageSmoothingQuality = 'high';
+  uctx.drawImage(src, left, top, bw, bh, 0, 0, up.width, up.height);
+  let work = up;
+  let boxes = await detectBoxes(work, R.pageSide, R);
+  if (!boxes.length) {
+    work = binarizeCanvas(up, 0, R);
+    boxes = await detectBoxes(work, R.pageSide, R);
+  }
+  // Детектор иногда возвращает весь блок одним боксом — тогда режем по строкам
+  // напрямую: это и есть «крупный текст делится на строки».
+  const lines = [];
+  for (const b of boxes) {
+    for (const ln of textLines(work, b, R)) lines.push(ln);
+  }
+  if (lines.length < 2) {
+    for (const ln of textLines(work, { left: 0, top: 0, right: work.width, bottom: work.height }, R)) {
+      if (!lines.some(o => Math.abs(o.top - ln.top) < 4)) lines.push(ln);
+    }
+  }
+  for (const ln of lines) {
+    const orig = {
+      left: clamp(Math.round(left + ln.left / k), 0, src.width - 1),
+      top: clamp(Math.round(top + ln.top / k), 0, src.height - 1),
+      right: clamp(Math.round(left + ln.right / k), 1, src.width),
+      bottom: clamp(Math.round(top + ln.bottom / k), 1, src.height),
+    };
+    if (!ctxInfo.visible(orig)) continue;
+    const c = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
+    c.getContext('2d', { willReadFrequently: true })
+      .drawImage(work, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
+    out.crops++;
+    const [text, conf] = await decodeBetter(c, R);
+    if (text.trim() && conf > R.minConfidence) {
+      out.items.push({
+        text,
+        left: orig.left / ctxInfo.W, top: (ctxInfo.y0 + orig.top) / ctxInfo.pageH,
+        right: orig.right / ctxInfo.W, bottom: (ctxInfo.y0 + orig.bottom) / ctxInfo.pageH,
+        confidence: conf,
+        large: true,
+      });
+    }
+  }
+  return out;
 }
 
 /* ───────────────────────── 6. Порядок чтения ───────────────────────── */
@@ -3995,6 +4164,8 @@ const Reader = {
       // Собираем полосы страницы: новая заменяет старую с тем же ключом,
       // остальные остаются. Их реплики идут сверху вниз.
       bandMap.set(bandKey, { lines: fresh, res, at });
+      const detPass = res.detPass || 'normal';
+      const largePasses = res.largePasses || 0;
       this.bandCache.set(i, bandMap);
       const parts = Array.from(bandMap.entries())
         .sort((a, b) => (a[1].res.band?.y0 ?? 0) - (b[1].res.band?.y0 ?? 0));
@@ -4002,6 +4173,7 @@ const Reader = {
       const total = parts.reduce((acc, [, p]) => acc + (p.res.ms || 0), 0);
       this.regions.set(i, {
         ...res, lines, at, bands: parts.length,
+        detPass, largePasses,
         ms: total, detMs: res.detMs, recMs: res.recMs, crops: res.crops,
         boxes: res.boxes, regions: res.regions,
         bandKeys: parts.length,
@@ -4340,7 +4512,14 @@ function renderTextSheet(i) {
     : `${raw.length} строк · ${data.boxes} блоков · ${data.crops} кропов · `
       + `итого ${(data.ms / 1000).toFixed(1)} с = детектор ${(data.detMs / 1000).toFixed(1)} с `
       + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с`
-      + (data.bands > 1 ? ` · полос: ${data.bands}` : '') + stamp;
+      + (data.bands > 1 ? ` · полос: ${data.bands}` : '')
+      + (data.detPass && data.detPass !== 'normal'
+        ? ' · детектор нашёл со 2-й попытки: ' + ({
+          contrast: 'контраст', binary: 'бинаризация',
+          'binary-inv': 'инверсия', imagenet: 'нормализация кадра',
+        }[data.detPass] || data.detPass) : '')
+      + (data.largePasses ? ` · 2-й проход по крупному тексту: ${data.largePasses}` : '')
+      + stamp;
   $('#textOrdered').innerHTML = data.lines.length
     ? data.lines.map((l, n) => `<div class="lineitem${l.large ? ' large' : ''}">`
         + `<b>${n + 1}</b>${escapeHtml(l.text)}`
