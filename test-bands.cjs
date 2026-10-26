@@ -1,6 +1,6 @@
 // Полосы: на длинной странице распознаём только видимое, на короткой — всю.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 delete global.indexedDB;
 global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
@@ -57,6 +57,11 @@ global.document.querySelector = (sel) => {
   return { style: {}, getBoundingClientRect: () => ({ top: 0, bottom: 800, height: 800, width: 700, left: 0, right: 700 }) };
 };
 ok(R.visibleBandPx(0) === null, 'страница по экрану — распознаём целиком, без полос');
+
+// Страница в полтора экрана: оригинальный KOMA читает её ЦЕЛИКОМ (18 областей,
+// 5 реплик, включая текст за нижним краем) — и мы тоже, полос не режем.
+R.canvases = [{ width: 700, height: 1200 }];
+ok(R.visibleBandPx(0) === null, 'страница до 2,2 экрана читается целиком, как в оригинале');
 
 // recognizePage с полосой: боксы и координаты пересчитываются на всю страницу
 (async () => {
