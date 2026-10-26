@@ -2,7 +2,7 @@
 // если лента уже уехала вперёд, и обновлять буфер. Раньше сканировалась
 // текущая страница ленты — реплики не перезаписывались.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 const realCreate = global.document.createElement;
 // IndexedDB в узле нет: пусть хранилище сразу идёт в память, без ожидания.
 delete global.indexedDB;   // мини-canvas из шима
