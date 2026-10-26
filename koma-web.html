@@ -2245,7 +2245,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.7';
+const VERSION = 'v1.9.8';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2509,6 +2509,8 @@ const DEFAULT_RULES = {
   bubbleGap: 0.45, mergeHeightRatio: 1.8,
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
   detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
+  largeText: true,         // второй проход по трудному тексту (каллиграфия, крупный шрифт)
+  largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
@@ -2527,6 +2529,8 @@ function sanitizeRules(r) {
   num('mergeHeightRatio', 1.05, 6); num('speechRate', 0, 3); num('autoScrollStep', .05, .9);
   num('semiManualSettleMs', 0, 5000);
   R.detRetry = R.detRetry !== false;                       // повтор детектора при 0 боксов
+  R.largeText = R.largeText !== false;
+  num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
   if (R.inkMax <= R.inkMin) R.inkMax = Math.min(255, R.inkMin + 1);
@@ -3247,16 +3251,22 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   // распознаётся отдельно. Берём результат, только если он лучше первого.
   const pageMedian = medianLineHeight(byBox);
   for (const entry of byBox) {
+    if (R.largeText === false) break;
     const own = entry.items.map(i => i.bottom - i.top).sort((a, b) => a - b);
     const h = own.length ? own[own.length >> 1] * imgCanvas.height : 0;
+    const boxW = (entry.box.right - entry.box.left) / W;
+    const firstTexts = entry.items.map(i => i.text);
+    const letters = lettersOf(firstTexts);
+    const hard = letters >= 8 && knownShare(firstTexts) < 0.5;
     const big = pageMedian > 0 && h > pageMedian * 1.8;
-    if (!big) continue;
+    if (boxW < (R.largeMinWidth ?? 0.22) || !(hard || big)) continue;
     largePasses++;
     const alt = await recognizeLargeBox(src, entry.box, R, { visible, y0, pageH: imgCanvas.height, W });
     crops += alt.crops;
-    const qa = qualityOf(entry.items.map(i => i.text));
-    const qb = qualityOf(alt.items.map(i => i.text));
-    if (qb > qa) entry.items = alt.items;
+    // Текст не теряем: принимаем второй проход, только если он сохранил хотя
+    // бы 80 % букв (иначе из титула пропадали строки).
+    if (!alt.items.length || lettersOf(alt.items.map(i => i.text)) < letters * 0.8) continue;
+    if (qualityOf(alt.items.map(i => i.text)) > qualityOf(firstTexts)) entry.items = alt.items;
   }
   for (const entry of byBox) for (const item of entry.items) regions.push(item);
 
@@ -3271,6 +3281,25 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
 }
 
 /** Медиана высоты реплик на странице — по ней отличаем крупный текст. */
+/** Сколько букв в наборе строк. */
+function lettersOf(texts) {
+  let n = 0;
+  for (const t of texts || []) n += (String(t).match(/\p{L}/gu) || []).length;
+  return n;
+}
+
+/** Доля слов, известных словарю: по ней видно «трудный» текст. */
+function knownShare(texts) {
+  let all = 0, known = 0;
+  for (const t of texts || []) {
+    for (const w of String(t).match(/[\p{L}\p{N}]{2,}/gu) || []) {
+      all++;
+      if (!Words.ready || Words.isKnown(w.toLowerCase()) || Words.isPlausible(w.toLowerCase())) known++;
+    }
+  }
+  return all ? known / all : 0;
+}
+
 function medianLineHeight(byBox) {
   const hs = [];
   for (const e of byBox) for (const i of e.items) hs.push(i.bottom - i.top);
@@ -3284,15 +3313,18 @@ function medianLineHeight(byBox) {
  */
 function qualityOf(texts) {
   if (!texts || !texts.length) return 0;
-  let known = 0, letters = 0;
+  let known = 0, all = 0;
   for (const t of texts) {
-    const words = String(t).match(/[\p{L}\p{N}]{2,}/gu) || [];
-    for (const w of words) {
-      letters += w.length;
+    for (const w of String(t).match(/[\p{L}\p{N}]{2,}/gu) || []) {
+      all++;
       if (!Words.ready || Words.isKnown(w.toLowerCase()) || Words.isPlausible(w.toLowerCase())) known++;
     }
   }
-  return known * 100 + Math.min(letters, 99) * 0.1;
+  if (!all) return 0;
+  // Главное — доля знакомых слов. Число слов только чуть-чуть поощряется,
+  // иначе вариант с лишними буквами («МОжиМЬ Как прожить») выигрывал у
+  // чистого «Как прожить».
+  return (known / all) * 100 + Math.min(all, 20) * 0.5;
 }
 
 /**
@@ -3357,48 +3389,67 @@ async function recognizeLargeBox(src, box, R, ctxInfo) {
   const uctx = up.getContext('2d', { willReadFrequently: true });
   uctx.imageSmoothingEnabled = true; uctx.imageSmoothingQuality = 'high';
   uctx.drawImage(src, left, top, bw, bh, 0, 0, up.width, up.height);
-  let work = up;
-  let boxes = await detectBoxes(work, R.pageSide, R);
-  if (!boxes.length) {
-    work = binarizeCanvas(up, 0, R);
-    boxes = await detectBoxes(work, R.pageSide, R);
-  }
-  // Детектор иногда возвращает весь блок одним боксом — тогда режем по строкам
-  // напрямую: это и есть «крупный текст делится на строки».
-  const lines = [];
-  for (const b of boxes) {
-    for (const ln of textLines(work, b, R)) lines.push(ln);
-  }
-  if (lines.length < 2) {
-    for (const ln of textLines(work, { left: 0, top: 0, right: work.width, bottom: work.height }, R)) {
-      if (!lines.some(o => Math.abs(o.top - ln.top) < 4)) lines.push(ln);
+  // Бледная каллиграфия на белом не даёт чернильных строк на исходном кропе.
+  // Поэтому пробуем три подготовки кадра и берём ту, где текст получился
+  // осмысленнее: увеличено / с растянутой яркостью / бинаризовано.
+  const full = { left: 0, top: 0, right: up.width, bottom: up.height };
+  const variants = [
+    up,
+    contrastCanvas(up),
+    binarizeCanvas(up, 0, R),
+  ];
+  let best = null;
+  for (const work of variants) {
+    const boxes = await detectBoxes(work, R.pageSide, R);
+    const lines = [];
+    for (const b of boxes) for (const ln of textLines(work, b, R)) lines.push(ln);
+    if (lines.length < 2) {
+      for (const ln of textLines(work, full, R)) {
+        if (!lines.some(o => Math.abs(o.top - ln.top) < 4)) lines.push(ln);
+      }
     }
+    if (!lines.length) continue;
+    const got = await decodeLargeLines(work, lines, R, { k, left, top, src, ctxInfo });
+    out.crops += got.crops;
+    if (!got.items.length) continue;
+    const score = qualityOf(got.items.map(i => i.text)) + Math.min(got.items.length, 6) * 3;
+    if (!best || score > best.score) best = { score, items: got.items };
   }
+  out.items = best ? best.items : [];
+  return out;
+}
+
+/** Распознать найденные строки увеличенного кропа и вернуть их на страницу. */
+async function decodeLargeLines(work, lines, R, info) {
+  const items = [];
+  let crops = 0;
   for (const ln of lines) {
     const orig = {
-      left: clamp(Math.round(left + ln.left / k), 0, src.width - 1),
-      top: clamp(Math.round(top + ln.top / k), 0, src.height - 1),
-      right: clamp(Math.round(left + ln.right / k), 1, src.width),
-      bottom: clamp(Math.round(top + ln.bottom / k), 1, src.height),
+      left: clamp(Math.round(info.left + ln.left / info.k), 0, info.src.width - 1),
+      top: clamp(Math.round(info.top + ln.top / info.k), 0, info.src.height - 1),
+      right: clamp(Math.round(info.left + ln.right / info.k), 1, info.src.width),
+      bottom: clamp(Math.round(info.top + ln.bottom / info.k), 1, info.src.height),
     };
-    if (!ctxInfo.visible(orig)) continue;
+    if (!info.ctxInfo.visible(orig)) continue;
     const c = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
     c.getContext('2d', { willReadFrequently: true })
       .drawImage(work, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
-    out.crops++;
+    crops++;
     const [text, conf] = await decodeBetter(c, R);
     if (text.trim() && conf > R.minConfidence) {
-      out.items.push({
+      items.push({
         text,
-        left: orig.left / ctxInfo.W, top: (ctxInfo.y0 + orig.top) / ctxInfo.pageH,
-        right: orig.right / ctxInfo.W, bottom: (ctxInfo.y0 + orig.bottom) / ctxInfo.pageH,
-        confidence: conf,
-        large: true,
+        left: orig.left / info.ctxInfo.W,
+        top: (info.ctxInfo.y0 + orig.top) / info.ctxInfo.pageH,
+        right: orig.right / info.ctxInfo.W,
+        bottom: (info.ctxInfo.y0 + orig.bottom) / info.ctxInfo.pageH,
+        confidence: conf, large: true,
       });
     }
   }
-  return out;
+  return { items, crops };
 }
+
 
 /* ───────────────────────── 6. Порядок чтения ───────────────────────── */
 const isCyr = (t) => {
@@ -3421,6 +3472,21 @@ function applyWordFixes(text, fixes) {
   });
 }
 /* облачка: склейка строк одной высоты (bubbleGap + mergeHeightRatio) */
+/**
+ * Перенос слова с точкой вместо дефиса: OCR читает «БУДЕ-» как «БУДЕ.».
+ * Склеиваем без пробела, только если вместе получается слово из словаря —
+ * иначе «НО.» + «ОН» превратилось бы в «НООН».
+ */
+function joinBrokenWord(text, next) {
+  const m = String(text).match(/([\p{L}]{2,})[.\-]$/u);
+  if (!m) return false;
+  const head = String(next).trim().split(/\s+/)[0] || '';
+  if (!/^[\p{L}]/u.test(head)) return false;
+  const cand = (m[1] + head).toLowerCase();
+  if (!Words.ready) return false;
+  return Words.isKnown(cand) || Words.isPlausible(cand);
+}
+
 function bubblesOf(group, rtl, R) {
   const bubbleGap = R.bubbleGap;
   if (!group.length) return [];
@@ -3460,6 +3526,7 @@ function bubblesOf(group, rtl, R) {
         const prev = ordered[index - 1]?.text?.trim() || '';
         const last = text[text.length - 1];
         if (last === '-' || last === '\u00AD') text = text.slice(0, -1);
+        else if (joinBrokenWord(text, t)) text = text.replace(/[.\-]$/, '');   // «БУДЕ.» + «ТЕ» → «БУДЕТЕ»
         else if (!(t.length <= 2 && /\p{L}$/u.test(prev) && /^\p{L}/u.test(t))) text += ' ';
       }
       text += t;
@@ -3482,7 +3549,11 @@ function joinBubbleText(a, b) {
   if (!left) return right;
   if (!right) return left;
   const last = left[left.length - 1];
-  return ('-\u2010\u2011\u2013\u2014\u2015'.includes(last)) ? left.slice(0, -1) + right : left + ' ' + right;
+  if ('-\u2010\u2011\u2013\u2014\u2015'.includes(last)) return left.slice(0, -1) + right;
+  // «БУДЕ.» + «ТЕ ГОВОРИТЬ» → «БУДЕТЕ ГОВОРИТЬ»: перенос слова OCR читает
+  // точкой вместо дефиса. Склеиваем, только если получается слово из словаря.
+  if (joinBrokenWord(left, right)) return left.replace(/[.\-]$/, '') + right;
+  return left + ' ' + right;
 }
 /* Строки внутри одного облачка: перекрытие по ширине, центры рядом, зазор мал. */
 function sameBubble(a, b, bubbleGap, mergeHeightRatio) {
@@ -4741,21 +4812,27 @@ function mergeBandLines(parts, canvas) {
   const H = (canvas && canvas.height) || 1;
   const out = [];
   const keyOf = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const overlapV = (a, b) => Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
   for (const part of parts) {
-    const b = part.res && part.res.band;
-    const y0 = b && b.y0 != null ? b.y0 / H : 0;
-    const y1 = b && b.y1 != null ? b.y1 / H : 1;
-    // вытесняем старое из диапазона новой полосы
-    for (let i = out.length - 1; i >= 0; i--) {
-      const ln = out[i];
-      const cy = (ln.top + ln.bottom) / 2;
-      if (cy >= y0 && cy <= y1) out.splice(i, 1);
-    }
     for (const ln of part.lines) {
       const k = keyOf(ln.text);
-      const dup = k && out.some(o => keyOf(o.text) === k
-        && Math.min(o.bottom, ln.bottom) > Math.max(o.top, ln.top));
-      if (!dup) out.push(ln);
+      const h = Math.max(1e-6, ln.bottom - ln.top);
+      // Тот же текст в том же месте — дубль от перекрытия полос.
+      if (k && out.some(o => keyOf(o.text) === k && overlapV(o, ln) > h * 0.2)) continue;
+      // Разный текст на одном месте: оставляем тот, что осмысленнее. Ничего не
+      // выбрасываем «по диапазону полосы» — так терялись реплики, которые
+      // соседняя полоса просто не распознала.
+      const same = out.findIndex(o => {
+        const oh = Math.max(1e-6, o.bottom - o.top);
+        return overlapV(o, ln) > Math.min(h, oh) * 0.6;
+      });
+      if (same >= 0) {
+        const q1 = qualityOf([out[same].text]) + Math.min(ln.text.length, 60) * 0.3;
+        const q2 = qualityOf([ln.text]) + Math.min(ln.text.length, 60) * 0.3;
+        if (q2 > q1) out[same] = ln;
+        continue;
+      }
+      out.push(ln);
     }
   }
   return out.sort((a, b) => a.top - b.top);
