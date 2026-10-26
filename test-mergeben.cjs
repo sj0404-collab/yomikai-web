@@ -14,7 +14,7 @@ global.ort = { env: { wasm: {} }, Tensor: class {} };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
   .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
-  + '; return {mergeBandLines};')();
+  + '; return {mergeBandLines, qualityOf, Words};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 const canvas = { height: 1000 };
@@ -36,4 +36,19 @@ ok(merged.every((l, i) => i === 0 || merged[i - 1].top <= l.top), 'реплик�
 // Одна полоса — поведение как раньше
 const one = api.mergeBandLines([{ res: { band: { y0: 0, y1: 1000 } }, lines: [L('А', 0.1, 0.2), L('Б', 0.3, 0.4)] }], canvas);
 ok(one.length === 2, 'одна полоса не теряет реплики');
+
+// Главный регресс 11:26/12:54: соседняя полоса не распознала реплику — старое
+// правило «вытеснить всё в диапазоне» её выбрасывало. Теперь не выбрасываем.
+const gap = api.mergeBandLines([
+  { res: { band: { y0: 0, y1: 600 } }, lines: [L('УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ', 0.30, 0.35)] },
+  { res: { band: { y0: 400, y1: 1000 } }, lines: [L('НЕ УВЕРЕН, КАК СТОИТ СКАЗАТЬ', 0.60, 0.65)] },
+], canvas);
+ok(gap.length === 2, 'реплика из первой полосы не потеряна второй (' + gap.length + ')');
+
+// А вот настоящий дубль одной и той же реплики — убираем
+const dup = api.mergeBandLines([
+  { res: { band: { y0: 0, y1: 600 } }, lines: [L('УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ', 0.30, 0.35)] },
+  { res: { band: { y0: 200, y1: 800 } }, lines: [L('уже пора начинать встречу', 0.305, 0.352)] },
+], canvas);
+ok(dup.length === 1, 'дубль той же реплики из перекрытия полос убран (' + dup.length + ')');
 console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
