@@ -1,6 +1,5 @@
-require('/tmp/shim.js');
-const fs=require('fs');
-const src = fs.readFileSync('/tmp/all.js','utf8');
+require('./shim.js');
+const src = require('./koma-src.cjs').app;
 // вырезаем только части 2-3 (без UI/boot)
 const cut = src.indexOf('/* ───────────────────────── 8. Читалка');
 const code = src.slice(0, cut);

@@ -1,7 +1,10 @@
 // Полноценная DOM-заглушка для тестов обработчиков (bindUI и т.п.).
 // Раньше лежала в /tmp и терялась вместе с песочницей.
 const fs = require('fs');
-const html = fs.readFileSync(__dirname + '/part1.html', 'utf8');
+const htmlPath = fs.existsSync(__dirname + '/part1.html')
+  ? __dirname + '/part1.html'
+  : __dirname + '/koma-web.html';
+const html = fs.readFileSync(htmlPath, 'utf8');
 
 const ids = [...html.matchAll(/id="([^"]+)"/g)].map(m => m[1]);
 const els = new Map();

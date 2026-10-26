@@ -16,8 +16,7 @@ global.ort = {
   Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } },
 };
 
-const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+const body = require('./koma-src.cjs').app;
 const trimmed = body.slice(0, body.indexOf('(async function boot()'));
 const api = new Function(trimmed + '; return {detectBoxes, decodeCrop, decodeBetter, makeCanvas, OCR, DEFAULT_RULES};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };

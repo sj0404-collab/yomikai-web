@@ -1,7 +1,7 @@
 // Вшитые WASM-бинари: разжимаются, отдаются движку как blob-URL, размеры сходятся.
 const fs = require('fs');
 const crypto = require('crypto');
-const src = fs.readFileSync('/home/user/koma-web/part0-wasm.js', 'utf8');
+const src = require('./koma-src.cjs').wasmSrc;
 
 const blobs = [];
 global.URL = { createObjectURL: (b) => { blobs.push(b); return 'blob:test/' + blobs.length; }, revokeObjectURL() {} };

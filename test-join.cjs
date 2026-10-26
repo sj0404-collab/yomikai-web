@@ -7,13 +7,13 @@ global.window.addEventListener = () => {};
 global.document.getElementById = () => ({ textContent: '', innerHTML: '', style: {}, classList: { contains: () => false, add() {}, remove() {}, toggle() {} }, addEventListener() {} });
 global.document.querySelector = () => null;
 global.ort = { env: { wasm: {} }, Tensor: class {} };
-const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js'].map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+const body = require('./koma-src.cjs').appCore;
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
   + '; return {Words, readingOrder, sanitizeRules, DEFAULT_RULES, normText};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
-  const txt = fs.readFileSync('/home/user/lab/ru_250k.txt', 'utf8');
+  const txt = require('./koma-src.cjs').dictText();
   const rank = new Map(); let n = 0;
   for (const line of txt.split('\n')) { const w = (line.split(/\s+/)[0] || '').toLowerCase(); if (!w) continue; if (!rank.has(w)) rank.set(w, n); n++; }
   const W = api.Words; W.rank = rank; W.size = n; W.ready = true;

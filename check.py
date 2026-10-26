@@ -5,12 +5,38 @@
 вызывается, но не объявлена (storeModelFiles is not defined), или обработчик
 ссылается на id, которого нет в разметке.
 """
+import os
 import re
 import sys
 
 CALL_PARTS = ['part2.js', 'part3.js', 'part4.js', 'part5.js']
-DECL_PARTS = ['part0-wasm.js', 'part0-dict.js'] + CALL_PARTS
-html = open('part1.html', encoding='utf-8').read()
+PART_FILES = ['part1.html', 'part0-wasm.js', 'part0-dict.js'] + CALL_PARTS
+
+
+def load_sources():
+    """Исходники рядом (part-файлы) или вырезаем их из собранного монолита."""
+    if all(os.path.exists(p) for p in PART_FILES):
+        html = open('part1.html', encoding='utf-8').read()
+        wasm_src = open('part0-wasm.js', encoding='utf-8').read()
+        dict_src = open('part0-dict.js', encoding='utf-8').read()
+        app_src = '\n'.join(open(p, encoding='utf-8').read() for p in CALL_PARTS)
+        return html, wasm_src, dict_src, app_src
+
+    html = open('koma-web.html', encoding='utf-8').read()
+    script = html[html.index('<script>') + 8:html.rindex('</script>')]
+    wasm_start = script.index('const ORT_WASM_GZ')
+    dict_start = script.index('const DICT_GZ_B64')
+    app_start = script.index("'use strict';", dict_start)
+    wasm_src = script[wasm_start:dict_start]
+    # part0-dict.js тоже должен уметь base64 → байты, как отдельный файл.
+    b64_start = wasm_src.index('function b64ToBytes')
+    b64_end = wasm_src.index('/** gzip', b64_start)
+    dict_src = wasm_src[b64_start:b64_end] + '\n' + script[dict_start:app_start]
+    app_src = script[app_start:]
+    return html, wasm_src, dict_src, app_src
+
+
+html, wasm_src_decl, dict_src_decl, app_src = load_sources()
 
 
 def strip_block_comments(text):
@@ -43,13 +69,11 @@ def strip_block_comments(text):
     return '\n'.join(out)
 
 
-decl_src = '\n'.join(open(p, encoding='utf-8').read() for p in DECL_PARTS)
-# part0-dict.js не входит в поиск вызовов: там 2 МБ base64, лексер на нём спотыкается.
-decl_extra = '\n'.join(open(p, encoding='utf-8').read() for p in ['part0-dict.js'])
-call_src = strip_block_comments('\n'.join(open(p, encoding='utf-8').read() for p in CALL_PARTS))
-declared_extra = set(re.findall(r'function\s+([A-Za-z_$][\w$]*)', decl_extra))
+# base64 в wasm/dict-частях не участвует в поиске вызовов: лексер на нём спотыкается.
+decl_src = wasm_src_decl + '\n' + dict_src_decl + '\n' + app_src
+call_src = strip_block_comments(app_src)
 
-declared = set(re.findall(r'function\s+([A-Za-z_$][\w$]*)', decl_src)) | declared_extra
+declared = set(re.findall(r'function\s+([A-Za-z_$][\w$]*)', decl_src))
 declared |= set(re.findall(r'(?:const|let|var)\s+([A-Za-z_$][\w$]*)', decl_src))
 declared |= set(re.findall(r'class\s+([A-Za-z_$][\w$]*)', decl_src))
 declared |= set(re.findall(r'^\s{2,}([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{', decl_src, re.M))
