@@ -79,7 +79,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   // слова из заглушки не настоящие, поэтому перебор включится — но не больше
   // числа вариантов
   await api.decodeBetter(crop, R, { wide: true });
-  ok(calls <= 5, 'перебор ограничен: 1 основной + 4 варианта (вызовов: ' + calls + ')');
+  ok(calls <= 6, 'перебор ограничен: 1 основной + 5 вариантов (вызовов: ' + calls + ')');
 
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.error('FAIL', e.stack); process.exit(1); });
