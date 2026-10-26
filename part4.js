@@ -43,6 +43,8 @@ const Reader = {
     this.syncSub();
     await this.buildStrip();
     this.scrollToPage(this.page, false);
+    // Ничего не запускаем сами: сначала человек видит, что происходит.
+    if (!this.regions.get(this.page)) this.showStart(); else this.hideStart();
   },
 
   syncSub() {
@@ -188,7 +190,14 @@ const Reader = {
     // видимой полосой один раз (полоса запомнится в bandCache).
     const data = this.regions.get(i);
     const staleFull = data && data.cached && this.visibleBandPx(i);
-    if (!this.scrollBusy && (!data || staleFull)) this.scanCurrent(false);
+    // Само ничего не запускаем: человек сам сказал «Распознать» (или включил
+    // автозапуск в настройках). Иначе при открытии страницы начиналось
+    // распознавание, и было непонятно, что вообще происходит.
+    if (!this.scrollBusy && (!data || staleFull)) {
+      if (RULES.autoScan) { this.hideStart(); this.scanCurrent(false); }
+      else this.showStart();
+    }
+    if (data && !staleFull) this.hideStart();     // страница уже распознана
   },
 
   /**
@@ -336,6 +345,7 @@ const Reader = {
    * чей текст открыт: реплики не перезаписывались вообще.
    */
   async scanPage(i, opts = {}) {
+    this.hideStart();
     const force = !!opts.force;
     const keepSheet = !!opts.keepSheet;
     if (i == null || i < 0 || i >= this.pages.length) return null;
@@ -434,6 +444,23 @@ const Reader = {
   /** Совместимость: распознать текущую страницу. */
   async scanCurrent(force = false) {
     return this.scanPage(this.page, { force });
+  },
+
+  /** Карточка «ничего не запущено»: показывается, пока страница не распознана. */
+  showStart() {
+    const el = $('#startCard');
+    if (!el) return;
+    const data = this.regions.get(this.page);
+    if (data) { el.style.display = 'none'; return; }
+    $('#startTitle').textContent = 'Страница ' + (this.page + 1) + ' открыта';
+    $('#startHint').textContent = 'Ничего не запущено. Скорость: '
+      + (SPEED_NAMES[RULES.speed] || RULES.speed) + ' ' + (SPEED_APPROX[RULES.speed] || '');
+    $('#cbAutoScan').checked = !!RULES.autoScan;
+    el.style.display = 'block';
+  },
+  hideStart() {
+    const el = $('#startCard');
+    if (el) el.style.display = 'none';
   },
 
   /* Реплики текущей полосы — то, что читается */
@@ -1003,7 +1030,7 @@ async function onScrollSettled() {
   await Reader.ensureLoaded(i);
   // Распознаём видимую полосу, если она ещё не распознана (вебтун: страница
   // длиннее экрана, полосы идут по мере прокрутки).
-  if (OCR.ready && !State.scanning) {
+  if (OCR.ready && !State.scanning && RULES.autoScan) {
     const band = Reader.visibleBandPx(i);
     const key = band ? band.key : 'page';
     const bandMap = Reader.bandCache.get(i);

@@ -16,12 +16,39 @@ const DEFAULT_RULES = {
   uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
+  speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
+  autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
 };
+/**
+ * Профили скорости. Замерено на настоящей странице (720×2960, полосы 412×800,
+ * headless Chromium): Молния ≈ 20 с, Быстро ≈ 25 с, Обычно ≈ 82 с,
+ * Тщательно ≈ 69 с. Текст на этой странице у всех четырёх одинаковый,
+ * включая «жизнь, будучи старшей». Медленные профили нужны для трудных
+ * страниц (мелкий шрифт, бледная печать, размытый скан), а не «на всякий случай».
+ * Прежнее поведение = «Обычно».
+ */
+const SPEED_PRESETS = {
+  lightning: { pageSide: 960, detRetry: false, largeText: false,
+               decodeVariants: false, uncoveredPass: false, decodeRetryBelow: 0 },
+  fast:      { pageSide: 1280, detRetry: true, largeText: false,
+               decodeVariants: false, uncoveredPass: false, decodeRetryBelow: 1 },
+  normal:    { pageSide: 1600, detRetry: true, largeText: true,
+               decodeVariants: true, uncoveredPass: true, decodeRetryBelow: 1 },
+  thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
+               uncoveredPass: true, decodeRetryBelow: 3, bandOverlap: 0.25 },
+};
+const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', normal: 'Обычно', thorough: 'Тщательно' };
+const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', normal: '≈80 с', thorough: '≈70 с' };
+
 let RULES = { ...DEFAULT_RULES };
 function sanitizeRules(r) {
   const R = { ...DEFAULT_RULES, ...(r || {}) };
+  // Профиль скорости главнее сохранённых чисел: иначе старые значения
+  // (pageSide 1600 и т. п.) молча отменяли бы выбранный профиль.
+  if (!SPEED_PRESETS[R.speed]) R.speed = DEFAULT_RULES.speed;
+  Object.assign(R, SPEED_PRESETS[R.speed]);
   const num = (k, a, b) => { R[k] = clamp(Number(R[k]) || 0, a, b); };
   num('inkLowPercentile', 0, .5); num('inkHighPercentile', .5, 1); num('inkFlatSpread', 0, 128);
   num('inkCoefficient', 0, .95); num('inkMin', 0, 254); num('inkMax', 1, 255);
@@ -36,6 +63,7 @@ function sanitizeRules(r) {
   R.largeText = R.largeText !== false;
   R.decodeVariants = R.decodeVariants !== false;
   R.uncoveredPass = R.uncoveredPass !== false;
+  R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен

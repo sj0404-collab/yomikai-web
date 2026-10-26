@@ -368,6 +368,37 @@ function bindUI() {
       Reader.scanCurrent(false).then(() => TTS.readVisible());
     } else { TTS.stop(); }
   };
+  // Стартовая карточка: страница сама ничего не запускает.
+  $('#btnStartScan').onclick = async () => {
+    Reader.hideStart();
+    await Reader.scanCurrent(false);
+    await renderTextSheet(null).catch(() => {});
+  };
+  $('#btnStartRead').onclick = async () => {
+    TTS.prime();                        // голос разрешён только из жеста
+    Reader.hideStart();
+    if (!Reader.regions.get(Reader.page)) await Reader.scanCurrent(false);
+    TTS.readVisible();
+  };
+  $('#btnStartClose').onclick = () => Reader.hideStart();
+  $('#cbAutoScan').onchange = async (e) => {
+    RULES.autoScan = !!e.target.checked;
+    await saveRules();
+    toast(RULES.autoScan
+      ? 'Страницы будут распознаваться сами при открытии и прокрутке'
+      : 'Само распознаваться больше не будет — только по кнопке', 3500);
+    if (RULES.autoScan) { Reader.hideStart(); Reader.scanCurrent(false); }
+  };
+
+  // Профиль скорости: одно нажатие меняет весь конвейер.
+  $('#speedChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    RULES = sanitizeRules({ ...RULES, speed: chip.dataset.speed });
+    await saveRules();
+    syncSettingsUI();
+    toast('Скорость: ' + SPEED_NAMES[RULES.speed] + ' ' + SPEED_APPROX[RULES.speed]
+      + '. Уже распознанные страницы не пересчитываются — нажмите «Распознать заново».', 4500);
+  };
   $('#btnStop').onclick = () => TTS.stop();
   $('#btnPause').onclick = () => {
     if (speechSynthesis.speaking) { speechSynthesis.pause(); $('#btnPause').textContent = '▶'; }
@@ -421,8 +452,18 @@ function bindUI() {
     }
   });
 }
+async function saveRules() {
+  RULES = sanitizeRules(RULES);
+  await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
+}
+
 function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
+  $$('#speedChips .chip').forEach(c => c.classList.toggle('on', c.dataset.speed === RULES.speed));
+  const hint = $('#speedHint');
+  if (hint) hint.textContent = (SPEED_NAMES[RULES.speed] || '')
+    + ' ' + (SPEED_APPROX[RULES.speed] || '')
+    + ' на страницу (замер на 720×2960). Медленнее — только для трудных страниц.';
   $$('#dirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === (Reader.dir || 'rtl')));
   $('#cbSemi').checked = !!RULES.semiManual;
   $('#cbFrames').checked = Reader.frames;
