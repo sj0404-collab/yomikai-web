@@ -93,6 +93,12 @@
     padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:#232822ee;backdrop-filter:blur(6px);
     z-index:25;transition:transform .2s}
   .bottombar.hide{transform:translateY(110%)}
+  .startCard{position:absolute;left:12px;right:12px;bottom:74px;z-index:45;
+    background:#14181ce8;border:1px solid var(--line);border-radius:16px;padding:14px 14px 10px;
+    backdrop-filter:blur(8px)}
+  .startCard .t{font-weight:700;font-size:15px;margin-bottom:2px}
+  .startCard .acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .startCard .acts .btn{flex:1;min-width:110px;justify-content:center}
   .bottombar .grow{flex:1;min-width:0}
   .progressbar{height:5px;background:#3a4436;border-radius:3px;overflow:hidden;flex:1;margin:0 6px}
   .progressbar i{display:block;height:100%;background:var(--orange);width:0}
@@ -155,6 +161,23 @@
     <button class="icon" id="btnSkip">⏭</button>
     <button class="icon" id="btnStop" style="color:var(--red)">⏹</button>
     <span id="playStatus" style="font-size:11px;color:var(--dim);padding-right:6px"></span>
+  </div>
+
+  <!-- Стартовая карточка: при открытии страница НИЧЕГО не запускает сама.
+       Раньше распознавание и прокрутка начинались сразу, и было непонятно,
+       что происходит. Теперь человек сам говорит, что делать. -->
+  <div class="startCard" id="startCard" style="display:none">
+    <div class="t" id="startTitle">Страница открыта</div>
+    <div class="hint" id="startHint">Ничего не запущено. Выберите действие.</div>
+    <div class="acts">
+      <button class="btn" id="btnStartScan">Распознать текст</button>
+      <button class="btn" id="btnStartRead">▶ Читать вслух</button>
+      <button class="btn" id="btnStartClose">✕</button>
+    </div>
+    <label class="row" style="justify-content:flex-start;gap:8px;margin-top:8px">
+      <input type="checkbox" id="cbAutoScan">
+      <span class="hint">Распознавать автоматически при открытии и прокрутке</span>
+    </label>
   </div>
 
   <div class="nextArrow down" id="nextArrow" style="display:none">▼ Прокрутить</div>
@@ -265,6 +288,14 @@
       <button class="chip" data-dir="rtl">Справа налево (манга)</button>
       <button class="chip" data-dir="ltr">Слева направо</button>
     </div>
+    <div class="lbl">СКОРОСТЬ РАСПОЗНАВАНИЯ</div>
+    <div class="chips" id="speedChips">
+      <button class="chip" data-speed="lightning">Молния</button>
+      <button class="chip" data-speed="fast">Быстро</button>
+      <button class="chip" data-speed="normal">Обычно</button>
+      <button class="chip" data-speed="thorough">Тщательно</button>
+    </div>
+    <div class="hint" id="speedHint"></div>
     <div class="lbl">АВТОЧТЕНИЕ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">
       <span>Читать вслух</span>
@@ -2291,7 +2322,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.13';
+const VERSION = 'v1.9.14';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2560,12 +2591,39 @@ const DEFAULT_RULES = {
   uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
+  speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
+  autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
 };
+/**
+ * Профили скорости. Замерено на настоящей странице (720×2960, полосы 412×800,
+ * headless Chromium): Молния ≈ 20 с, Быстро ≈ 25 с, Обычно ≈ 82 с,
+ * Тщательно ≈ 69 с. Текст на этой странице у всех четырёх одинаковый,
+ * включая «жизнь, будучи старшей». Медленные профили нужны для трудных
+ * страниц (мелкий шрифт, бледная печать, размытый скан), а не «на всякий случай».
+ * Прежнее поведение = «Обычно».
+ */
+const SPEED_PRESETS = {
+  lightning: { pageSide: 960, detRetry: false, largeText: false,
+               decodeVariants: false, uncoveredPass: false, decodeRetryBelow: 0 },
+  fast:      { pageSide: 1280, detRetry: true, largeText: false,
+               decodeVariants: false, uncoveredPass: false, decodeRetryBelow: 1 },
+  normal:    { pageSide: 1600, detRetry: true, largeText: true,
+               decodeVariants: true, uncoveredPass: true, decodeRetryBelow: 1 },
+  thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
+               uncoveredPass: true, decodeRetryBelow: 3, bandOverlap: 0.25 },
+};
+const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', normal: 'Обычно', thorough: 'Тщательно' };
+const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', normal: '≈80 с', thorough: '≈70 с' };
+
 let RULES = { ...DEFAULT_RULES };
 function sanitizeRules(r) {
   const R = { ...DEFAULT_RULES, ...(r || {}) };
+  // Профиль скорости главнее сохранённых чисел: иначе старые значения
+  // (pageSide 1600 и т. п.) молча отменяли бы выбранный профиль.
+  if (!SPEED_PRESETS[R.speed]) R.speed = DEFAULT_RULES.speed;
+  Object.assign(R, SPEED_PRESETS[R.speed]);
   const num = (k, a, b) => { R[k] = clamp(Number(R[k]) || 0, a, b); };
   num('inkLowPercentile', 0, .5); num('inkHighPercentile', .5, 1); num('inkFlatSpread', 0, 128);
   num('inkCoefficient', 0, .95); num('inkMin', 0, 254); num('inkMax', 1, 255);
@@ -2580,6 +2638,7 @@ function sanitizeRules(r) {
   R.largeText = R.largeText !== false;
   R.decodeVariants = R.decodeVariants !== false;
   R.uncoveredPass = R.uncoveredPass !== false;
+  R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -4380,6 +4439,8 @@ const Reader = {
     this.syncSub();
     await this.buildStrip();
     this.scrollToPage(this.page, false);
+    // Ничего не запускаем сами: сначала человек видит, что происходит.
+    if (!this.regions.get(this.page)) this.showStart(); else this.hideStart();
   },
 
   syncSub() {
@@ -4525,7 +4586,14 @@ const Reader = {
     // видимой полосой один раз (полоса запомнится в bandCache).
     const data = this.regions.get(i);
     const staleFull = data && data.cached && this.visibleBandPx(i);
-    if (!this.scrollBusy && (!data || staleFull)) this.scanCurrent(false);
+    // Само ничего не запускаем: человек сам сказал «Распознать» (или включил
+    // автозапуск в настройках). Иначе при открытии страницы начиналось
+    // распознавание, и было непонятно, что вообще происходит.
+    if (!this.scrollBusy && (!data || staleFull)) {
+      if (RULES.autoScan) { this.hideStart(); this.scanCurrent(false); }
+      else this.showStart();
+    }
+    if (data && !staleFull) this.hideStart();     // страница уже распознана
   },
 
   /**
@@ -4673,6 +4741,7 @@ const Reader = {
    * чей текст открыт: реплики не перезаписывались вообще.
    */
   async scanPage(i, opts = {}) {
+    this.hideStart();
     const force = !!opts.force;
     const keepSheet = !!opts.keepSheet;
     if (i == null || i < 0 || i >= this.pages.length) return null;
@@ -4771,6 +4840,23 @@ const Reader = {
   /** Совместимость: распознать текущую страницу. */
   async scanCurrent(force = false) {
     return this.scanPage(this.page, { force });
+  },
+
+  /** Карточка «ничего не запущено»: показывается, пока страница не распознана. */
+  showStart() {
+    const el = $('#startCard');
+    if (!el) return;
+    const data = this.regions.get(this.page);
+    if (data) { el.style.display = 'none'; return; }
+    $('#startTitle').textContent = 'Страница ' + (this.page + 1) + ' открыта';
+    $('#startHint').textContent = 'Ничего не запущено. Скорость: '
+      + (SPEED_NAMES[RULES.speed] || RULES.speed) + ' ' + (SPEED_APPROX[RULES.speed] || '');
+    $('#cbAutoScan').checked = !!RULES.autoScan;
+    el.style.display = 'block';
+  },
+  hideStart() {
+    const el = $('#startCard');
+    if (el) el.style.display = 'none';
   },
 
   /* Реплики текущей полосы — то, что читается */
@@ -5340,7 +5426,7 @@ async function onScrollSettled() {
   await Reader.ensureLoaded(i);
   // Распознаём видимую полосу, если она ещё не распознана (вебтун: страница
   // длиннее экрана, полосы идут по мере прокрутки).
-  if (OCR.ready && !State.scanning) {
+  if (OCR.ready && !State.scanning && RULES.autoScan) {
     const band = Reader.visibleBandPx(i);
     const key = band ? band.key : 'page';
     const bandMap = Reader.bandCache.get(i);
@@ -5737,6 +5823,37 @@ function bindUI() {
       Reader.scanCurrent(false).then(() => TTS.readVisible());
     } else { TTS.stop(); }
   };
+  // Стартовая карточка: страница сама ничего не запускает.
+  $('#btnStartScan').onclick = async () => {
+    Reader.hideStart();
+    await Reader.scanCurrent(false);
+    await renderTextSheet(null).catch(() => {});
+  };
+  $('#btnStartRead').onclick = async () => {
+    TTS.prime();                        // голос разрешён только из жеста
+    Reader.hideStart();
+    if (!Reader.regions.get(Reader.page)) await Reader.scanCurrent(false);
+    TTS.readVisible();
+  };
+  $('#btnStartClose').onclick = () => Reader.hideStart();
+  $('#cbAutoScan').onchange = async (e) => {
+    RULES.autoScan = !!e.target.checked;
+    await saveRules();
+    toast(RULES.autoScan
+      ? 'Страницы будут распознаваться сами при открытии и прокрутке'
+      : 'Само распознаваться больше не будет — только по кнопке', 3500);
+    if (RULES.autoScan) { Reader.hideStart(); Reader.scanCurrent(false); }
+  };
+
+  // Профиль скорости: одно нажатие меняет весь конвейер.
+  $('#speedChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    RULES = sanitizeRules({ ...RULES, speed: chip.dataset.speed });
+    await saveRules();
+    syncSettingsUI();
+    toast('Скорость: ' + SPEED_NAMES[RULES.speed] + ' ' + SPEED_APPROX[RULES.speed]
+      + '. Уже распознанные страницы не пересчитываются — нажмите «Распознать заново».', 4500);
+  };
   $('#btnStop').onclick = () => TTS.stop();
   $('#btnPause').onclick = () => {
     if (speechSynthesis.speaking) { speechSynthesis.pause(); $('#btnPause').textContent = '▶'; }
@@ -5790,8 +5907,18 @@ function bindUI() {
     }
   });
 }
+async function saveRules() {
+  RULES = sanitizeRules(RULES);
+  await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
+}
+
 function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
+  $$('#speedChips .chip').forEach(c => c.classList.toggle('on', c.dataset.speed === RULES.speed));
+  const hint = $('#speedHint');
+  if (hint) hint.textContent = (SPEED_NAMES[RULES.speed] || '')
+    + ' ' + (SPEED_APPROX[RULES.speed] || '')
+    + ' на страницу (замер на 720×2960). Медленнее — только для трудных страниц.';
   $$('#dirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === (Reader.dir || 'rtl')));
   $('#cbSemi').checked = !!RULES.semiManual;
   $('#cbFrames').checked = Reader.frames;
