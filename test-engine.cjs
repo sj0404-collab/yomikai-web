@@ -1,9 +1,10 @@
 // Что покажет интерфейс, когда WASM запрещён политикой страницы (предпросмотр).
-require('/tmp/dom_shim.js');
+require('./dom_shim.js');
 const fs = require('fs');
-const html = fs.readFileSync('/home/user/koma-web.html', 'utf8');
-const js = html.slice(html.indexOf('<script>', html.indexOf('ort.min.js')) + 8);
-const body = js.slice(0, js.lastIndexOf('</script>'));
+// Собираем приложение из частей: в самом HTML теперь вшит движок на 7 МБ,
+// и вырезать оттуда код регулярками — плохая идея.
+const body = ['part2.js', 'part3.js', 'part4.js', 'part5.js']
+  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
 const trimmed = body.slice(0, body.indexOf('(async function boot()'));
 global.ort = {
   env: { wasm: {} }, logLevel: 'error',
@@ -12,7 +13,10 @@ global.ort = {
     "no available backend found. ERR: [wasm] RuntimeError: Aborted(CompileError: " +
     "WebAssembly.instantiate(): Refused to compile because 'unsafe-eval' is not an allowed source of script"); } },
 };
-new Function(trimmed + '; global.__api={OCR,renderModels,DB};')();
+// Вшитые бинари здесь не нужны: проверяем поведение при запрете WASM,
+// а сам разбор base64 покрыт test-ort-wasm.cjs.
+new Function('async function installOrtWasm(){return true;}' + trimmed
+  + '; global.__api={OCR,renderModels,DB};')();
 const { OCR, renderModels, DB } = global.__api;
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 (async () => {
