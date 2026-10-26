@@ -1,6 +1,6 @@
 // Мусорные «слова» от OCR не должны попадать в реплики, настоящие — остаются.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 global.window.addEventListener = () => {};
 global.document.getElementById = (id) => ({
   id, textContent: '', innerHTML: '', style: {}, dataset: {}, disabled: false,
