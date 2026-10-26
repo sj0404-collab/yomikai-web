@@ -8,7 +8,9 @@
 Запуск: python3 e2e.py [путь-к-jpg]
 """
 import base64
+import gzip
 import json
+import os
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -16,6 +18,16 @@ from playwright.sync_api import sync_playwright
 HTML = '/home/user/koma-web.html'
 MODELS = '/home/user/koma_models'
 IMG = sys.argv[1] if len(sys.argv) > 1 else '/home/user/uploads/cover.jpg'
+
+
+def read_dict():
+    """Словарь 250k: сначала рабочая копия, потом версия внутри репозитория."""
+    plain = '/home/user/lab/ru_250k.txt'
+    if os.path.exists(plain):
+        return open(plain, encoding='utf-8').read()
+    packed = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'e2e', 'ru_250k.txt.gz')
+    with gzip.open(packed, 'rt', encoding='utf-8') as f:
+        return f.read()
 
 
 def b64(path):
@@ -62,7 +74,7 @@ def main():
             }
             Words.rank = rank; Words.size = n; Words.ready = true;
             return n;
-        }""", open('/home/user/lab/ru_250k.txt', encoding='utf-8').read())
+        }""", read_dict())
 
         # 3. Страница целиком: детектор + распознавание + правила чтения
         print('· распознаю страницу целиком…')

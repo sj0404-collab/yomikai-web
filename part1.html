@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>KOMA Web · локальная библиотека и читалка</title>
+<style>
+  :root{
+    --bg:#171a17; --panel:#232822; --panel2:#2e342c; --text:#f2f4ef; --dim:#b2b8ad;
+    --orange:#ff8a4c; --line:#39412f; --red:#e57373; --accent:#b9a7ff;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+  .screen{position:fixed;inset:0;display:none;flex-direction:column}
+  .screen.on{display:flex}
+  header{display:flex;align-items:center;gap:8px;padding:calc(env(safe-area-inset-top) + 8px) 10px 8px;
+    background:#101310;border-bottom:1px solid var(--line);z-index:30}
+  header .title{flex:1;min-width:0}
+  header .title b{display:block;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  header .title span{display:block;font-size:10.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .icon{width:38px;height:38px;display:grid;place-items:center;border-radius:12px;font-size:17px}
+  .icon:active{background:var(--panel2)}
+  .icon.hot{color:var(--orange)}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:9px 14px;border-radius:12px;
+    background:var(--panel2);font-size:13px}
+  .btn.primary{background:#6c5ce7}
+  .btn.warn{background:#7a3030}
+  .btn:disabled{opacity:.45}
+  .scroll{flex:1;overflow:auto;-webkit-overflow-scrolling:touch}
+  .pad{padding:14px}
+  .row{display:flex;align-items:center;gap:10px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:12px}
+  .card{background:var(--panel);border-radius:12px;overflow:hidden;position:relative}
+  .card img,.card .nofoto{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:#0c0f0c}
+  .card .nofoto{display:grid;place-items:center;color:#4a5449;font-size:11px}
+  .card .cap{padding:6px 8px;font-size:11.5px;line-height:1.25}
+  .card .cap span{display:block;color:var(--dim);font-size:10px}
+  .card .del{position:absolute;top:4px;right:4px;background:#000a;border-radius:50%;width:24px;height:24px;
+    display:grid;place-items:center;font-size:13px}
+  .sheet{position:fixed;left:0;right:0;bottom:0;max-height:88%;background:var(--panel);
+    border-radius:20px 20px 0 0;transform:translateY(102%);transition:transform .22s;z-index:60;
+    display:flex;flex-direction:column}
+  .sheet.on{transform:translateY(0)}
+  .sheet .head{padding:12px 18px 4px;font-size:19px;font-weight:700;
+    display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .sheet .head .x{flex:0 0 auto;width:40px;height:40px;border-radius:20px;border:0;
+    background:#33363f;color:#ddd;font-size:20px;line-height:1}
+  .sheet .body{overflow:auto;-webkit-overflow-scrolling:touch;
+    padding:0 18px calc(28px + env(safe-area-inset-bottom))}
+  /* Кнопки должны легко нажиматься пальцем: не меньше 44 px и без «двойного»
+     срабатывания по краям. */
+  .btn{min-height:44px}
+  .sheet .body .btn{width:100%;margin-top:8px;justify-content:center}
+  .sheet .body .row .btn{width:auto;margin-top:0}
+  .sheetBg{position:fixed;inset:0;background:#0008;z-index:55;display:none}
+  .sheetBg.on{display:block}
+  .lbl{font-size:10px;letter-spacing:1.2px;font-weight:700;color:var(--dim);margin:20px 0 8px}
+  .hint{font-size:11px;color:var(--dim)}
+  .kv{font-size:12.5px;margin:2px 0}
+  textarea,input[type=text],input[type=number]{width:100%;background:#12160f;color:var(--text);
+    border:1px solid var(--line);border-radius:12px;padding:10px;font:12.5px/1.5 ui-monospace,monospace}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{padding:7px 11px;border-radius:10px;background:var(--panel2);font-size:12px}
+  .chip.on{background:#4b3f7a}
+  .lineitem{padding:6px 0;border-bottom:1px solid #ffffff10;font-size:12px}
+  .lineitem b{color:var(--orange);font-size:10px;margin-right:6px}
+  .empty{padding:40px 20px;text-align:center;color:var(--dim);font-size:13px}
+  .badge{font-size:9.5px;padding:2px 6px;border-radius:6px;background:#00000055;color:var(--dim)}
+  /* читалка */
+  #reader{background:#000}
+  #strip{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:0;scroll-behavior:auto}
+  #strip .pagewrap{position:relative;margin:0 auto}
+  #strip canvas,#strip img{display:block;width:100%;height:auto}
+  #strip .frames{position:absolute;inset:0;pointer-events:none}
+  #strip .frame{position:absolute;border:1.5px solid var(--orange);border-radius:8px;pointer-events:auto}
+  #strip .frame.done{border-color:#ff8a4c33}
+  #strip .frame.cur{background:#ff8a4c33;border-width:2.5px;border-color:var(--orange)}
+  #strip .frame.spk::after{content:"🔊";position:absolute;right:-4px;top:-22px;font-size:15px}
+  /* Крупный текст (титул, каллиграфия) — другим цветом, чтобы не путать с репликой */
+  #strip .frame.large{border-color:#6fa8ff;border-style:dashed}
+  #strip .frame.large.cur{background:#6fa8ff26;border-color:#6fa8ff}
+  .lineitem.large{color:#9dc0ff}
+  .lineitem.large b{color:#6fa8ff}
+  /* постраничный режим */
+  #paged{position:absolute;inset:0;display:none;overflow:hidden}
+  #paged.on{display:block}
+  #paged .pagebox{position:absolute;inset:0;overflow:auto;display:none}
+  #paged .pagebox.on{display:block}
+  #paged .pagebox .inner{position:relative;transform-origin:0 0}
+  .bottombar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;
+    padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:#232822ee;backdrop-filter:blur(6px);
+    z-index:25;transition:transform .2s}
+  .bottombar.hide{transform:translateY(110%)}
+  .bottombar .grow{flex:1;min-width:0}
+  .progressbar{height:5px;background:#3a4436;border-radius:3px;overflow:hidden;flex:1;margin:0 6px}
+  .progressbar i{display:block;height:100%;background:var(--orange);width:0}
+  .floatbar{position:absolute;left:50%;transform:translateX(-50%);bottom:70px;display:flex;gap:4px;
+    background:#232822d9;border-radius:26px;padding:4px 6px;z-index:26;align-items:center;
+    opacity:.92;box-shadow:0 6px 18px #0006}
+  .floatbar .icon{padding:5px 8px;font-size:15px}
+  .nextArrow{position:absolute;z-index:27;background:#232822e6;border-radius:28px;padding:8px 13px;
+    display:flex;align-items:center;gap:6px;font-size:12px;box-shadow:0 6px 20px #0008}
+  .nextArrow.down{left:50%;transform:translateX(-50%);bottom:150px}
+  .nextArrow.left{left:10px;top:50%;transform:translateY(-50%)}
+  .nextArrow.right{right:10px;top:50%;transform:translateY(-50%)}
+  .toast{position:fixed;left:50%;bottom:120px;transform:translate(-50%,20px);background:#000d;color:#fff;
+    padding:9px 14px;border-radius:12px;font-size:12.5px;z-index:99;opacity:0;transition:.25s;max-width:86%;
+    text-align:center;pointer-events:none}
+  .toast.on{opacity:1;transform:translate(-50%,0)}
+  .scanbadge{position:absolute;top:calc(env(safe-area-inset-top) + 60px);left:50%;transform:translateX(-50%);
+    background:#000c;padding:6px 12px;border-radius:20px;font-size:11.5px;z-index:28;display:none}
+  .scanbadge.on{display:block}
+</style>
+</head>
+<body>
+
+<!-- ═══ Библиотека ═══ -->
+<section id="library" class="screen on">
+  <header>
+    <div class="title"><b>Локальная библиотека</b><span id="libSub">папки, CBZ и отдельные страницы</span></div>
+    <button class="icon" id="btnImport" title="Добавить">＋</button>
+    <button class="icon" id="btnModels" title="Модели OCR">⚙</button>
+    <button class="icon" id="btnRulesLib" title="Правила">☰</button>
+  </header>
+  <div class="scroll pad">
+    <div id="envBanner" style="display:none;background:#7a3030;color:#fff;border-radius:12px;padding:10px 12px;font-size:12px;margin-bottom:12px"></div>
+    <div id="selfCheck" class="hint" style="margin-bottom:10px">Скрипты страницы не выполнились — поэтому кнопки не реагируют. Откройте файл в Chrome (или разрешите inline-скрипты на этом сервере).</div>
+    <div id="libEmpty" class="empty">
+      Пока пусто.<br><br>
+      Нажмите ＋ и выберите папку с главой (или CBZ).<br>
+      Файлы остаются на устройстве — в браузере, без сервера.
+    </div>
+    <div id="libGrid" class="grid"></div>
+  </div>
+</section>
+
+<!-- ═══ Читалка ═══ -->
+<section id="reader" class="screen">
+  <header id="readerHeader" style="position:absolute;left:0;right:0;top:0;background:#101310e8;backdrop-filter:blur(6px);transition:transform .2s">
+    <button class="icon" id="btnBack">←</button>
+    <div class="title"><b id="rTitle">…</b><span id="rSub">KOMA · лента</span></div>
+    <button class="icon" id="btnScan" title="Распознать">▣</button>
+    <button class="icon" id="btnSettings" title="Голос и чтение">🎙</button>
+    <button class="icon" id="btnMore" title="Ещё">⋮</button>
+  </header>
+
+  <div id="strip"></div>
+  <div id="paged"></div>
+  <div class="scanbadge" id="scanBadge">Распознаём…</div>
+
+  <div class="floatbar" id="playBar" style="display:none">
+    <button class="icon" id="btnPause">⏸</button>
+    <button class="icon" id="btnSkip">⏭</button>
+    <button class="icon" id="btnStop" style="color:var(--red)">⏹</button>
+    <span id="playStatus" style="font-size:11px;color:var(--dim);padding-right:6px"></span>
+  </div>
+
+  <div class="nextArrow down" id="nextArrow" style="display:none">▼ Прокрутить</div>
+
+  <div class="bottombar" id="readerBar">
+    <button class="btn" id="btnOcr2">✨ Текст страницы</button>
+    <span class="grow"></span>
+    <button class="icon" id="btnRead" title="Читать">▶</button>
+    <button class="icon" id="btnFrames" title="Рамки">⛶</button>
+    <span style="font-size:11.5px;color:var(--dim);min-width:44px;text-align:right" id="pageNum">1</span>
+    <span style="font-size:11px;color:var(--dim)">/</span>
+    <span style="font-size:11.5px;color:var(--dim);min-width:24px" id="pageTotal">1</span>
+  </div>
+</section>
+
+<!-- ═══ Шторка: добавить главу ═══ -->
+<div class="sheetBg" id="sheetBg"></div>
+<div class="sheet" id="sheetImport">
+  <div class="head">Добавить главу</div>
+  <div class="body">
+    <div class="hint" id="importHint">Файлы остаются на устройстве: никуда не загружаются.</div>
+    <button class="btn primary" id="btnPickDir" style="width:100%;margin-top:14px;justify-content:center">Выбрать папку</button>
+    <button class="btn" id="btnPickFiles" style="width:100%;margin-top:8px;justify-content:center">Выбрать файлы или CBZ</button>
+    <button class="btn" id="btnPickFolderModern" style="width:100%;margin-top:8px;justify-content:center;display:none">Выбрать папку (File System)</button>
+    <div class="hint" id="importNote" style="margin-top:12px"></div>
+    <div class="hint" id="importTip" style="margin-top:10px"></div>
+    <div class="lbl" style="margin-top:14px">КУДА ДОБАВИТЬ</div>
+    <select id="importTarget" style="width:100%;padding:10px;border-radius:10px;background:#22242b;color:#eee;border:1px solid #3a3d47">
+      <option value="">Новая глава</option>
+    </select>
+    <div class="hint" id="importCaps" style="margin-top:10px"></div>
+    <button class="btn" id="closeImport" style="margin-top:18px;width:100%">Отмена</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: модели ═══ -->
+<div class="sheet" id="sheetModels">
+  <div class="head">Модели OCR</div>
+  <div class="body">
+    <div class="hint">Нужны три файла из папки <code>assets/koma/models</code> АПК:<br>
+      <b>detection.onnx</b>, <b>cyrillic.onnx</b>, <b>cyrillic.txt</b>.</div>
+    <div class="lbl">СОСТОЯНИЕ</div>
+    <div id="modelsState" class="kv"></div>
+    <div class="hint" style="margin-top:8px">
+      Можно выбрать <b>все три файла сразу</b>, можно по одному — шторка не закроется,
+      и ниже будет видно, чего ещё не хватает.
+    </div>
+    <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
+      <button class="btn primary" id="btnPickModels">Выбрать файлы</button>
+      <button class="btn" id="btnPickModelDir">Папка с моделями</button>
+      <button class="btn" id="btnTestEngine">Проверить движок</button>
+      <button class="btn" id="btnTestVoice">Проверить голос</button>
+      <button class="btn" id="btnPickDict">Словарь ru_250k</button>
+    </div>
+    <div class="row" style="margin-top:8px;gap:8px">
+      <button class="btn" id="btnClearModels">Убрать модели</button>
+    </div>
+    <div class="lbl">ДВИЖОК</div>
+    <div id="ortState" class="kv hint"></div>
+    <div id="engineNote" class="hint" style="display:none;color:#ffd2d2;margin-top:6px"></div>
+    <div id="dictState" class="hint" style="margin-top:6px"></div>
+    <div class="hint" style="margin-top:10px">
+      Распознавание целиком в браузере: ни один кадр никуда не отправляется.
+      Модели хранятся в IndexedDB этого сайта.
+    </div>
+    <button class="btn" id="closeSheets" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: правила и буфер ═══ -->
+<div class="sheet" id="sheetRules">
+  <div class="head">Правила и буфер строк</div>
+  <div class="body">
+    <div class="lbl">ДЕЙСТВУЮЩИЕ ПРАВИЛА</div>
+    <div class="kv" id="rulesVer"></div>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <button class="btn primary" id="btnRulesImport">Загрузить файл</button>
+      <button class="btn" id="btnRulesExport">Скачать</button>
+      <button class="btn" id="btnRulesReset">Сброс</button>
+    </div>
+    <div class="lbl">БУФЕР СТРОК</div>
+    <div class="kv" id="bufferInfo"></div>
+    <div id="bufferList" style="max-height:190px;overflow:auto;margin-top:8px"></div>
+    <div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn" id="btnBufferExport">Выгрузить</button>
+      <button class="btn" id="btnBufferClear">Очистить</button>
+    </div>
+    <div class="lbl">ПРАВКИ СЛОВ (wordFixes)</div>
+    <div class="hint">Ключ — что вернул OCR, значение — как надо. Сравнение без регистра.</div>
+    <textarea id="wordFixesBox" rows="4" placeholder='{"Пвтор":"Автор","Форирование":"Формирование"}'></textarea>
+    <button class="btn" id="btnWordFixesSave" style="margin-top:8px">Сохранить правки</button>
+    <button class="btn" id="closeSheets2" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: настройки чтения ═══ -->
+<div class="sheet" id="sheetSettings">
+  <div class="head">Как читать</div>
+  <div class="body">
+    <div class="lbl">ПОРЯДОК ЧТЕНИЯ</div>
+    <div class="chips" id="modeChips">
+      <button class="chip" data-mode="vertical">Вертикальная лента · манхва</button>
+      <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
+      <button class="chip" data-mode="ltr">Страницы слева направо</button>
+    </div>
+    <div class="lbl" style="margin-top:14px">НАПРАВЛЕНИЕ ЧТЕНИЯ</div>
+    <div class="chips" id="dirChips">
+      <button class="chip" data-dir="rtl">Справа налево (манга)</button>
+      <button class="chip" data-dir="ltr">Слева направо</button>
+    </div>
+    <div class="lbl">АВТОЧТЕНИЕ</div>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Читать вслух</span>
+      <input type="checkbox" id="cbAuto">
+    </label>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Полуручной режим <span class="hint">— прочитает видимое и ждёт прокрутки</span></span>
+      <input type="checkbox" id="cbSemi">
+    </label>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Ждать остановки, мс</span>
+      <input type="number" id="numSettle" style="width:90px" min="0" max="5000" step="100">
+    </label>
+    <div class="lbl">ГОЛОС</div>
+    <div class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Голос</span>
+      <select id="selVoice" style="max-width:62%;background:#12160f;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:7px"></select>
+    </div>
+    <div class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Скорость</span>
+      <input type="range" id="rngRate" min="0.6" max="1.6" step="0.05" style="max-width:60%">
+    </div>
+    <div class="lbl">РАМКИ</div>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Показывать рамки реплик</span>
+      <input type="checkbox" id="cbFrames">
+    </label>
+    <label class="row" style="justify-content:space-between;padding:6px 0">
+      <span>Подсвечивать читаемую реплику</span>
+      <input type="checkbox" id="cbFollow">
+    </label>
+    <button class="btn" id="closeSheets3" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: текст страницы ═══ -->
+<div class="sheet" id="sheetText">
+  <div class="head" id="textTitle">Текст страницы</div>
+  <div class="body">
+    <div class="kv" id="textStats"></div>
+    <div class="row" id="textNav" style="gap:8px;margin-top:8px;display:flex"></div>
+    <button class="btn" id="btnFullPage" style="margin-top:8px">Распознать всю страницу целиком</button>
+    <div class="lbl">КАК ЧИТАЕТСЯ</div>
+    <div id="textOrdered"></div>
+    <div class="lbl">КАК РАСПОЗНАНО</div>
+    <div id="textRaw" class="hint" style="max-height:150px;overflow:auto"></div>
+    <div class="row" style="gap:8px;margin-top:12px">
+      <button class="btn primary" id="btnRescan">Распознать заново</button>
+      <button class="btn" id="btnSpeakPage">Прочитать</button>
+    </div>
+    <button class="btn" id="closeSheets4" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<!-- Каждый выбор файлов — СВОЙ input. Раньше они переиспользовались, и выбор
+     модели запускал импорт библиотеки (выбрасывало в читалку). -->
+<input type="file" id="imgPick" multiple accept="image/*,.cbz,.zip" style="display:none">
+<input type="file" id="dirPick" webkitdirectory directory multiple style="display:none">
+<input type="file" id="modelPick" multiple style="display:none">
+<input type="file" id="modelDirPick" webkitdirectory directory multiple style="display:none">
+<input type="file" id="rulesPick" accept=".json,application/json" style="display:none">
+
+<script>
+
