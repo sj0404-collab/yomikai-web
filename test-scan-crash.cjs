@@ -2,7 +2,7 @@
 // Reader.bands — это массив полос из bandsOf(), а кэш распознанных полос
 // лежит в отдельном поле bandCache. Плюс: буфер прошлой версии чистится заново.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 const els = new Map();
 const el = (id) => {
   if (!els.has(id)) els.set(id, {
