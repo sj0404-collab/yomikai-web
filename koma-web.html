@@ -2245,7 +2245,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.5';
+const VERSION = 'v1.9.6';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3840,6 +3840,11 @@ const Reader = {
     if (y1 - y0 < 32) return null;
     // Если видно (почти) всю страницу — полоса не нужна
     if (y1 - y0 >= c.height * 0.92) return null;
+    // Короткая страница (до 2,2 экрана) читается ЦЕЛИКОМ — как оригинальный
+    // KOMA: на скриншоте 11:24 оригинал нашёл 18 областей и 5 реплик на всю
+    // страницу, включая «В БУДУЩЕМ, КОГДА ВЫ БУДЕТЕ…» за нижним краем экрана.
+    // Полоса нужна только вебтуну в десятки тысяч пикселей.
+    if (c.height <= viewH * 2.2) return null;
     const vy0 = clamp(topPx * scale, 0, c.height);
     const vy1 = clamp(botPx * scale, 0, c.height);
     return {
@@ -3993,10 +3998,7 @@ const Reader = {
       this.bandCache.set(i, bandMap);
       const parts = Array.from(bandMap.entries())
         .sort((a, b) => (a[1].res.band?.y0 ?? 0) - (b[1].res.band?.y0 ?? 0));
-      const lines = [];
-      for (const [, part] of parts) {
-        for (const ln of part.lines) lines.push(ln);
-      }
+      const lines = mergeBandLines(parts.map(([, part]) => part), c);
       const total = parts.reduce((acc, [, p]) => acc + (p.res.ms || 0), 0);
       this.regions.set(i, {
         ...res, lines, at, bands: parts.length,
@@ -4297,10 +4299,16 @@ function hideArrow() { $('#nextArrow').style.display = 'none'; }
  * текст, распознанный раньше. Пустые строки выпадают вместе со своими рамками.
  */
 async function cleanLines(lines) {
+  const keyOf = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   const out = [];
   for (const ln of lines) {
     const text = Words.ready ? Words.polish(ln.text) : ln.text;
     if (!text) continue;
+    // Один и тот же текст в том же месте — дубль от полос прежней версии.
+    const k = keyOf(text);
+    const dup = k && out.some(o => keyOf(o.text) === k
+      && Math.min(o.bottom, ln.bottom) > Math.max(o.top, ln.top));
+    if (dup) continue;
     out.push(text === ln.text ? ln : { ...ln, text });
   }
   return out;
@@ -4541,6 +4549,39 @@ function watchScroll() {
     if (e.key === 'ArrowLeft' || e.key === 'PageUp') turnPage(-1);
   });
 }
+/**
+ * Собрать реплики страницы из полос без дублей.
+ *
+ * Полосы перекрываются (запас нужен детектору), поэтому одно и то же облачко
+ * попадало в две-три полосы и реплика повторялась — на скриншоте 11:26 было
+ * 11 реплик там, где в оригинале 5. Правило: полоса, распознанная позже,
+ * вытесняет всё, что раньше попало в её вертикальный диапазон; одинаковый
+ * текст с пересечением по вертикали тоже считается дублем.
+ */
+function mergeBandLines(parts, canvas) {
+  const H = (canvas && canvas.height) || 1;
+  const out = [];
+  const keyOf = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  for (const part of parts) {
+    const b = part.res && part.res.band;
+    const y0 = b && b.y0 != null ? b.y0 / H : 0;
+    const y1 = b && b.y1 != null ? b.y1 / H : 1;
+    // вытесняем старое из диапазона новой полосы
+    for (let i = out.length - 1; i >= 0; i--) {
+      const ln = out[i];
+      const cy = (ln.top + ln.bottom) / 2;
+      if (cy >= y0 && cy <= y1) out.splice(i, 1);
+    }
+    for (const ln of part.lines) {
+      const k = keyOf(ln.text);
+      const dup = k && out.some(o => keyOf(o.text) === k
+        && Math.min(o.bottom, ln.bottom) > Math.max(o.top, ln.top));
+      if (!dup) out.push(ln);
+    }
+  }
+  return out.sort((a, b) => a.top - b.top);
+}
+
 async function onScrollSettled() {
   if (!$('#reader').classList.contains('on')) return;
   const i = Reader.page;
