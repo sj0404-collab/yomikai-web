@@ -2245,7 +2245,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.8';
+const VERSION = 'v1.9.9';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2510,6 +2510,8 @@ const DEFAULT_RULES = {
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
   detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
   largeText: true,         // второй проход по трудному тексту (каллиграфия, крупный шрифт)
+  decodeVariants: true,    // перебор всех подготовок кропа ради верных слов
+  uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
@@ -2530,6 +2532,8 @@ function sanitizeRules(r) {
   num('semiManualSettleMs', 0, 5000);
   R.detRetry = R.detRetry !== false;                       // повтор детектора при 0 боксов
   R.largeText = R.largeText !== false;
+  R.decodeVariants = R.decodeVariants !== false;
+  R.uncoveredPass = R.uncoveredPass !== false;
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -2718,7 +2722,53 @@ const Words = {
     if (low.length < 4) return word;
     if (this.isKnown(low) || this.isPlausible(low)) return word;
     const cand = this.candidate(low);
-    return cand ? this.sameCase(word, cand) : word;
+    if (cand) return this.sameCase(word, cand);
+    // Два редактирования — но только к ОЧЕНЬ частым словам и не для КАПСА:
+    // «оддучив» → «будучи» (OCR на рукописном шрифте), при этом имена вроде
+    // «ДРЕГЕР» остаются как есть.
+    if (this.FIX_DISTANCE >= 2 && low.length >= 5 && !/^[А-ЯЁ]+$/.test(word)) {
+      const deep = this.candidate2(low);
+      if (deep) return this.sameCase(word, deep);
+    }
+    return word;
+  },
+  // 2 включать нельзя: расстояние 2 превращает «Сесмой» в «Самой» — это хуже,
+  // чем оставить слово как есть. Оставляем честное одно редактирование.
+  FIX_DISTANCE: 1,
+  /**
+   * Кандидат на расстоянии 2 среди очень частых слов.
+   *
+   * Перебор «удалений от удалений» не годится: он не умеет менять буквы, а
+   * именно это нужно для «оддучив» → «будучи». Поэтому сверяемся с индексом
+   * 20 000 самых частых слов, сгруппированных по длине.
+   */
+  candidate2(word) {
+    if (!this.rank) return null;
+    const MAXR = 20000, MAXD = 2;
+    const idx = this.topIndex(MAXR);
+    const n = Array.from(word).length;
+    let best = null, bestRank = Infinity;
+    for (let len = n - MAXD; len <= n + MAXD; len++) {
+      const bucket = idx.get(len);
+      if (!bucket) continue;
+      for (const [cand, r] of bucket) {
+        if (r >= bestRank) continue;
+        if (levenshtein(word, cand) <= MAXD) { bestRank = r; best = cand; }
+      }
+    }
+    return best;
+  },
+  /** Индекс частых слов по длине — строится один раз. */
+  topIndex(maxRank) {
+    if (this._topIndex && this._topRank === maxRank) return this._topIndex;
+    const idx = new Map();
+    for (const [w, r] of this.rank) {
+      if (r > maxRank || w.length < 4) continue;
+      if (!idx.has(w.length)) idx.set(w.length, []);
+      idx.get(w.length).push([w, r]);
+    }
+    this._topIndex = idx; this._topRank = maxRank;
+    return idx;
   },
   /**
    * Длинное слово, которого нет в словаре и которое не правится одним
@@ -3153,11 +3203,84 @@ function binarizeCanvas(src, polarity, R) {
   out.getContext('2d').putImageData(img, 0, 0);
   return out;
 }
-async function decodeBetter(cropCanvas, R) {
+/** Счётчики проходов: видны в шторке текста, а не «где-то в консоли». */
+const DECODE_STATS = { variantRuns: 0, variantsPicked: 0, uncoveredLines: 0 };
+
+/** Увеличение кропа: мелкий и рукописный текст CTC читает лучше крупнее. */
+function upscaleCanvas(src, k) {
+  const w = Math.max(1, Math.round(src.width * k));
+  const h = Math.max(1, Math.round(src.height * k));
+  const out = makeCanvas(w, h);
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, w, h);
+  return out;
+}
+
+/** Все ли слова строки настоящие (по словарю и словоформам). */
+function allWordsKnown(text) {
+  if (!Words.ready) return false;
+  const words = String(text).match(/[\p{L}]{2,}/gu) || [];
+  if (!words.length) return false;
+  return words.every(w => {
+    const low = w.toLowerCase();
+    return Words.isKnown(low) || Words.isPlausible(low);
+  });
+}
+
+/** Оценка текста: сколько слов настоящее и сколько мусорных + уверенность. */
+function textScore(text, conf) {
+  const words = String(text).match(/[\p{L}]{2,}/gu) || [];
+  if (!words.length) return -50;
+  let known = 0, junk = 0;
+  for (const w of words) {
+    const low = w.toLowerCase();
+    if (!Words.ready || Words.isKnown(low) || Words.isPlausible(low)) known++;
+    else junk++;
+  }
+  return known * 10 - junk * 12 + (conf || 0) * 3;
+}
+
+/**
+ * Перебор всех подготовок кропа: как есть, увеличенный, с растянутой
+ * яркостью и две полярности бинаризации. Побеждает вариант, где больше
+ * настоящих слов и меньше мусорных. Как только все слова верные — выходим,
+ * чтобы не тратить время на телефоне.
+ */
+async function decodeAllVariants(crop, R) {
+  // Порядок по замеренной пользе на реальной странице: увеличение и контраст
+  // дают верные слова чаще, бинаризация — редко и дорого.
+  const tries = [['orig', crop]];
+  if (crop.height >= 12) tries.push(['up2', upscaleCanvas(crop, 2)]);
+  tries.push(['contrast', contrastCanvas(crop)]);
+  tries.push(['bin0', binarizeCanvas(crop, 0, R)]);
+  let best = null;
+  for (const [name, cv] of tries) {
+    let text = '', conf = 0;
+    try { [text, conf] = await decodeCrop(cv); } catch (e) { continue; }
+    DECODE_STATS.variantRuns++;
+    const score = textScore(text, conf);
+    if (!best || score > best.score) {
+      if (best && best.variant !== 'orig') DECODE_STATS.variantsPicked++;
+      best = { text, conf, score, variant: name };
+    }
+    if (allWordsKnown(best.text)) break;
+  }
+  return best || ['', 0, 'none'];
+}
+
+async function decodeBetter(cropCanvas, R, opts = {}) {
   const first = await decodeCrop(cropCanvas);
+  // Всё уже верно — не тратим батарею на перебор.
+  if (allWordsKnown(first[0])) return first;
   const letters = (s) => (s.match(/\p{L}/gu) || []).length;
-  // Сколько прогонов делаем, решает правило: каждый повтор — ещё один проход
-  // модели, а на телефоне он стоит ~150 мс.
+  // Широкие строки — это реплики и подписи: ради верных слов перебираем все
+  // подготовки кропа. Узкие (звуковые эффекты) не перебираем: там всё равно
+  // не слова, и на телефоне это лишние секунды.
+  if (R.decodeVariants !== false && (opts.wide || letters(first[0]) >= 3)) {
+    const best = await decodeAllVariants(cropCanvas, R);
+    return [best.text, best.conf];
+  }
   const need = Math.max(0, Math.round(R.decodeRetryBelow ?? 1));
   if (need === 0 || letters(first[0]) >= need) return first;
   let best = first;
@@ -3175,6 +3298,25 @@ async function decodeBetter(cropCanvas, R) {
  * (не рвём реплику), а облачко ниже экрана не берём вовсе — иначе в шторке
  * появлялся «лишний» текст, которого на экране нет.
  */
+/** Расстояние Левенштейна: нужно для честной правки в два редактирования. */
+function levenshtein(a, b) {
+  const s = Array.from(a), t = Array.from(b);
+  if (!s.length) return t.length;
+  if (!t.length) return s.length;
+  let prev = new Array(t.length + 1);
+  let cur = new Array(t.length + 1);
+  for (let j = 0; j <= t.length; j++) prev[j] = j;
+  for (let i = 1; i <= s.length; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= t.length; j++) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[t.length];
+}
+
 function lineInBand(ln, band, y0) {
   if (!band || band.vy0 == null || band.vy1 == null) return true;
   const top = y0 + ln.top, bottom = y0 + ln.bottom;
@@ -3186,6 +3328,7 @@ function lineInBand(ln, band, y0) {
 
 async function recognizePage(imgCanvas, R, onProgress, band) {
   const t0 = performance.now();
+  DECODE_STATS.variantRuns = 0; DECODE_STATS.variantsPicked = 0; DECODE_STATS.uncoveredLines = 0;
   // band = {y0, y1} в пикселях исходного кадра: распознаём ТОЛЬКО видимую
   // полосу. По правилу «длинную страницу читать в пределах видимой области»
   // иначе на вебтуне в 8000 px находились реплики на два экрана вперёд.
@@ -3212,12 +3355,12 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   const regions = [];
   let largePasses = 0;
 
-  const decodeLine = async (canvas, ln) => {
+  const decodeLine = async (canvas, ln, wide) => {
     const c = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
     c.getContext('2d', { willReadFrequently: true })
       .drawImage(canvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
     crops++;
-    const [text, conf] = await decodeBetter(c, R);
+    const [text, conf] = await decodeBetter(c, R, { wide });
     return { text, conf };
   };
 
@@ -3229,7 +3372,8 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     const lines = textLines(src, box, R).filter(visible);
     const items = [];
     for (const ln of lines) {
-      const { text, conf } = await decodeLine(src, ln);
+      const wide = (ln.right - ln.left) / W >= 0.25;   // реплика, а не звук
+      const { text, conf } = await decodeLine(src, ln, wide);
       if (text.trim() && conf > R.minConfidence) {
         items.push({
           text,
@@ -3270,6 +3414,32 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   }
   for (const entry of byBox) for (const item of entry.items) regions.push(item);
 
+  // ── Проход 3: то, что детектор не закрыл боксами. Дешёвый поиск полос с
+  // «чернилами» без боксов; если в такой полосе нашлись строки — распознаём.
+  if (R.uncoveredPass !== false) {
+    const extra = uncoveredBands(src, det.boxes, R);
+    for (const band of extra) {
+      for (const ln of textLines(src, band, R)) {
+        if (!visible(ln)) continue;
+        const wide = (ln.right - ln.left) / W >= 0.25;
+        const { text, conf } = await decodeLine(src, ln, wide);
+        if (!text.trim() || conf <= R.minConfidence) continue;
+        DECODE_STATS.uncoveredLines++;
+        const item = {
+          text,
+          left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
+          right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
+          confidence: conf,
+        };
+        // уже есть почти то же самое на этом месте — не дублируем
+        const dup = regions.some(o =>
+          Math.min(o.bottom, item.bottom) - Math.max(o.top, item.top) > (item.bottom - item.top) * 0.5
+          && Math.abs(o.left - item.left) < 0.2);
+        if (!dup) regions.push(item);
+      }
+    }
+  }
+
   return {
     regions, boxes: det.boxes.length,
     ms: Math.round(performance.now() - t0),
@@ -3277,7 +3447,57 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     band: band ? { y0, y1 } : null,
     detPass: det.pass,
     largePasses,
+    variantRuns: DECODE_STATS.variantRuns,
+    variantsPicked: DECODE_STATS.variantsPicked,
+    uncoveredLines: DECODE_STATS.uncoveredLines,
   };
+}
+
+/**
+ * Строки с текстом, которые детектор НЕ закрыл ни одним боксом.
+ *
+ * На скриншоте 12:54 средняя строка титула («жизнь, будучи») не попала ни в
+ * один бокс и пропала из текста. Ищем по кадру полосы, где есть «чернила», но
+ * нет боксов, и отдаём их на распознавание — чтобы не терять слова.
+ */
+function uncoveredBands(src, boxes, R) {
+  const out = [];
+  const SW = 200;                                   // рабочая ширина
+  const k = SW / src.width;
+  const w = SW, h = Math.max(8, Math.round(src.height * k));
+  const small = makeCanvas(w, h);
+  const ctx = small.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0, w, h);
+  const luma = lumaFrom(ctx.getImageData(0, 0, w, h).data, w, h);
+  const thr = inkThreshold(luma, R);
+  if (thr < 0) return out;
+  const covered = new Uint8Array(h);
+  for (const b of boxes) {
+    const y0 = Math.max(0, Math.floor(b.top * k) - 2);
+    const y1 = Math.min(h - 1, Math.ceil(b.bottom * k) + 2);
+    for (let y = y0; y <= y1; y++) covered[y] = 1;
+  }
+  const need = Math.max(2, Math.round(w * 0.02));   // сколько тёмного в строке
+  const hasInk = (y) => {
+    let cnt = 0;
+    for (let x = 0; x < w; x++) if (luma[y * w + x] < thr) { if (++cnt >= need) return true; }
+    return false;
+  };
+  const runs = [];
+  let y = 0;
+  while (y < h) {
+    if (covered[y] || !hasInk(y)) { y++; continue; }
+    let end = y;
+    while (end < h && !covered[end] && hasInk(end)) end++;
+    if (end - y >= 3) runs.push([y, end]);
+    y = Math.max(end, y + 1);
+  }
+  for (const [a, b] of runs) {
+    const top = clamp(Math.floor(a / k) - 3, 0, src.height - 1);
+    const bottom = clamp(Math.ceil(b / k) + 3, top + 1, src.height);
+    out.push({ left: 0, top, right: src.width, bottom });
+  }
+  return out.slice(0, 12);
 }
 
 /** Медиана высоты реплик на странице — по ней отличаем крупный текст. */
@@ -3435,7 +3655,8 @@ async function decodeLargeLines(work, lines, R, info) {
     c.getContext('2d', { willReadFrequently: true })
       .drawImage(work, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
     crops++;
-    const [text, conf] = await decodeBetter(c, R);
+    const wide = (ln.right - ln.left) / work.width >= 0.25;
+    const [text, conf] = await decodeBetter(c, R, { wide });
     if (text.trim() && conf > R.minConfidence) {
       items.push({
         text,
@@ -4590,6 +4811,8 @@ function renderTextSheet(i) {
           'binary-inv': 'инверсия', imagenet: 'нормализация кадра',
         }[data.detPass] || data.detPass) : '')
       + (data.largePasses ? ` · 2-й проход по крупному тексту: ${data.largePasses}` : '')
+      + (data.variantRuns ? ` · перебор вариантов: ${data.variantRuns}` : '')
+      + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
       + stamp;
   $('#textOrdered').innerHTML = data.lines.length
     ? data.lines.map((l, n) => `<div class="lineitem${l.large ? ' large' : ''}">`
