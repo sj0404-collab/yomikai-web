@@ -2245,7 +2245,7 @@ function toast(msg, ms = 2200) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const VERSION = 'v1.9.9';
+const VERSION = 'v1.9.10';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2848,8 +2848,18 @@ const Words = {
     const wordsLong = raw.match(/[А-Яа-яЁё]{3,}/g) || [];
     if (wordsRaw.length >= 1 && wordsRaw.length === wordsLong.length && wordsRaw.length <= 3) return fixed;
     // Имя или крик капсом, которого нет в словаре: «БЕРСЕРК», «НЕ СМЕЙ».
-    const caps = raw.match(/[А-ЯЁ]{3,}/g) || [];
-    if (caps.length >= 1 && caps.length === wordsLong.length && caps.length <= 4) return fixed;
+    // Но не «АААААА» и не «СОООООИТ»: тройной повтор буквы — это звук, а не имя.
+    const caps = (raw.match(/[А-ЯЁ]{3,}/g) || []).filter(w => !/(.)\1\1/.test(w.toLowerCase()));
+    const capsAll = raw.match(/[А-ЯЁ]{3,}/g) || [];
+    if (caps.length >= 1 && caps.length === capsAll.length
+        && caps.length === wordsLong.length && caps.length <= 4) return fixed;
+
+    // Длинная строка, где настоящих слов меньшинство, — это не реплика:
+    // «то н оо о оно», «ол кослл алмчлс».
+    if (words.length >= 3) {
+      const knownRatio = known.length / words.length;
+      if (knownRatio < 0.5) return '';
+    }
     if (known.length >= 1 && words.length <= 2) return fixed;    // «да, это», «не сейчас»
     return '';
   },
@@ -3204,7 +3214,7 @@ function binarizeCanvas(src, polarity, R) {
   return out;
 }
 /** Счётчики проходов: видны в шторке текста, а не «где-то в консоли». */
-const DECODE_STATS = { variantRuns: 0, variantsPicked: 0, uncoveredLines: 0 };
+const DECODE_STATS = { variantRuns: 0, variantsPicked: 0, uncoveredLines: 0, wordsTried: 0, wordsFixed: 0 };
 
 /** Увеличение кропа: мелкий и рукописный текст CTC читает лучше крупнее. */
 function upscaleCanvas(src, k) {
@@ -3239,6 +3249,108 @@ function textScore(text, conf) {
     else junk++;
   }
   return known * 10 - junk * 12 + (conf || 0) * 3;
+}
+
+/**
+ * Дочинить ОТДЕЛЬНЫЕ слова, не трогая уже верные.
+ *
+ * Идея: если в строке одно слово прочитано неверно («БУДЕ.», «ПРИБЫЛА»), то
+ * перебор вариантов по всей строке бесполезен — модель ошибается на всём
+ * кропе сразу. Поэтому строку режем по столбцам на слова, гоним варианты
+ * только по кропу битого слова, а верные слова и верные строки не трогаем.
+ *
+ * Защита от порчи: замена принимается, только если из кропа получилось
+ * настоящее слово (по словарю или как словоформа) близкой длины. На
+ * каллиграфии кропы дают «p», «тр» — такие кандидаты отбрасываются, и
+ * строка остаётся как была.
+ */
+async function refineBrokenWords(crop, text, R) {
+  const re = /[\p{L}]{2,}/gu;
+  const spans = [];
+  let m;
+  while ((m = re.exec(text))) spans.push({ word: m[0], start: m.index, end: re.lastIndex });
+  if (spans.length < 2) return text;
+  const bad = spans.filter(sp => {
+    const low = sp.word.toLowerCase();
+    return !(Words.isKnown(low) || Words.isPlausible(low));
+  });
+  if (!bad.length) return text;                       // всё верно — не трогаем
+
+  const boxes = wordColumns(crop, R);
+  if (boxes.length !== spans.length) return text;     // разметка не совпала — не рискуем
+
+  let out = text;
+  for (let i = spans.length - 1; i >= 0; i--) {       // справа налево, чтобы индексы не ехали
+    const sp = spans[i];
+    if (!bad.includes(sp)) continue;                  // верные слова пропускаем
+    const box = boxes[i];
+    const w = box[1] - box[0] + 1;
+    if (w < 18 || w > crop.width * 0.6) continue;     // слишком узко/широко — не угадать
+    const wordCrop = makeCanvas(w, crop.height);
+    wordCrop.getContext('2d', { willReadFrequently: true })
+      .drawImage(crop, box[0], 0, w, crop.height, 0, 0, w, crop.height);
+    const cand = await bestWordVariant(wordCrop, sp.word, R);
+    if (!cand) continue;
+    DECODE_STATS.wordsFixed++;
+    out = out.slice(0, sp.start) + cand + out.slice(sp.end);
+  }
+  return out;
+}
+
+/** Варианты распознавания одного слова; возвращает первое настоящее слово. */
+async function bestWordVariant(wordCrop, original, R) {
+  const len = Array.from(original).length;
+  const padX = Math.max(2, Math.round(wordCrop.height * 0.25));
+  const padY = Math.max(1, Math.round(wordCrop.height * 0.15));
+  const padded = makeCanvas(wordCrop.width + padX * 2, wordCrop.height + padY * 2);
+  const pctx = padded.getContext('2d', { willReadFrequently: true });
+  pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, padded.width, padded.height);
+  pctx.drawImage(wordCrop, padX, padY);
+  const tries = [
+    ['orig', wordCrop],
+    ['pad', padded],
+    ['up2', upscaleCanvas(wordCrop, 2)],
+    ['padUp2', upscaleCanvas(padded, 2)],
+    ['contrast', contrastCanvas(wordCrop)],
+  ];
+  for (const [name, cv] of tries) {
+    DECODE_STATS.wordsTried++;
+    let cand = '';
+    try { [cand] = await decodeCrop(cv); } catch (e) { continue; }
+    const clean = String(cand).replace(/[^\p{L}]/gu, '');
+    if (!clean || Math.abs(Array.from(clean).length - len) > 1) continue;
+    const low = clean.toLowerCase();
+    if (!(Words.isKnown(low) || Words.isPlausible(low))) continue;
+    if (low === original.toLowerCase()) return null;
+    return clean;
+  }
+  return null;
+}
+
+/** Границы слов в строке по столбцовой проекции «чернил». */
+function wordColumns(crop, R) {
+  const w = crop.width, h = crop.height;
+  if (w < 4 || h < 4) return [];
+  const data = crop.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const luma = lumaFrom(data, w, h);
+  const thr = inkThreshold(luma, R);
+  if (thr < 0) return [];
+  const ink = new Uint8Array(w);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) if (luma[y * w + x] < thr) { ink[x] = 1; break; }
+  }
+  const gapMax = Math.max(2, Math.round(h * 0.30));
+  const boxes = [];
+  let x0 = -1, gap = 0;
+  for (let x = 0; x < w; x++) {
+    if (ink[x]) { if (x0 < 0) x0 = x; gap = 0; }
+    else if (x0 >= 0) {
+      gap++;
+      if (gap >= gapMax) { boxes.push([x0, x - gap]); x0 = -1; gap = 0; }
+    }
+  }
+  if (x0 >= 0) boxes.push([x0, w - 1]);
+  return boxes;
 }
 
 /**
@@ -3328,7 +3440,7 @@ function lineInBand(ln, band, y0) {
 
 async function recognizePage(imgCanvas, R, onProgress, band) {
   const t0 = performance.now();
-  DECODE_STATS.variantRuns = 0; DECODE_STATS.variantsPicked = 0; DECODE_STATS.uncoveredLines = 0;
+  DECODE_STATS.variantRuns = 0; DECODE_STATS.variantsPicked = 0; DECODE_STATS.uncoveredLines = 0; DECODE_STATS.wordsTried = 0; DECODE_STATS.wordsFixed = 0;
   // band = {y0, y1} в пикселях исходного кадра: распознаём ТОЛЬКО видимую
   // полосу. По правилу «длинную страницу читать в пределах видимой области»
   // иначе на вебтуне в 8000 px находились реплики на два экрана вперёд.
@@ -3373,7 +3485,15 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     const items = [];
     for (const ln of lines) {
       const wide = (ln.right - ln.left) / W >= 0.25;   // реплика, а не звук
-      const { text, conf } = await decodeLine(src, ln, wide);
+      let { text, conf } = await decodeLine(src, ln, wide);
+      // Битые слова дочиниваем по одному, верные — не трогаем.
+      if (wide && text && !allWordsKnown(text)) {
+        const crop = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
+        crop.getContext('2d', { willReadFrequently: true })
+          .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, crop.width, crop.height);
+        const fixed = await refineBrokenWords(crop, text, R);
+        if (fixed !== text && textScore(fixed, conf) > textScore(text, conf)) text = fixed;
+      }
       if (text.trim() && conf > R.minConfidence) {
         items.push({
           text,
@@ -3450,6 +3570,8 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     variantRuns: DECODE_STATS.variantRuns,
     variantsPicked: DECODE_STATS.variantsPicked,
     uncoveredLines: DECODE_STATS.uncoveredLines,
+    wordsTried: DECODE_STATS.wordsTried,
+    wordsFixed: DECODE_STATS.wordsFixed,
   };
 }
 
@@ -4813,6 +4935,7 @@ function renderTextSheet(i) {
       + (data.largePasses ? ` · 2-й проход по крупному тексту: ${data.largePasses}` : '')
       + (data.variantRuns ? ` · перебор вариантов: ${data.variantRuns}` : '')
       + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
+      + (data.wordsFixed ? ` · дочинено слов: ${data.wordsFixed}` : '')
       + stamp;
   $('#textOrdered').innerHTML = data.lines.length
     ? data.lines.map((l, n) => `<div class="lineitem${l.large ? ' large' : ''}">`
