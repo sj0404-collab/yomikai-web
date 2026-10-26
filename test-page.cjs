@@ -1,6 +1,6 @@
 // «Какая страница на экране» — по геометрии, а не по застрявшему индексу.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 delete global.indexedDB;
 const els = new Map();
 const el = (id) => {
