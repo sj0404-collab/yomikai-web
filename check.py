@@ -9,7 +9,7 @@ import re
 import sys
 
 CALL_PARTS = ['part2.js', 'part3.js', 'part4.js', 'part5.js']
-DECL_PARTS = ['part0-wasm.js', 'part0-dict.js'] + CALL_PARTS
+DECL_PARTS = ['part0-wasm.js', 'part0-dict.js', 'part0-models.js'] + CALL_PARTS
 html = open('part1.html', encoding='utf-8').read()
 
 

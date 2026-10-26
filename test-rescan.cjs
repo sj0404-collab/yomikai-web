@@ -92,8 +92,16 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(second === null && api.State.pendingScan && api.State.pendingScan.i === 1,
     'во время сканирования второе нажатие встало в очередь на страницу 2');
   await first;
-  await new Promise(r => setTimeout(r, 120));
+  // Ждём не «120 мс», а факт: с v1.9.13 распознавание уступает кадр браузеру
+  // (yieldUI), поэтому очередь досканируется за несколько макротасков.
+  const until = async (cond, ms = 5000) => {
+    const t0 = Date.now();
+    while (!cond() && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 25));
+    return cond();
+  };
+  await until(() => api.State.pendingScan === null);
   ok(api.State.pendingScan === null, 'очередь разобрана');
+  await until(() => R.regions.has(1));
   ok(R.regions.has(1), 'страница из очереди досканирована');
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.log('FATAL', e.message); process.exit(1); });

@@ -375,8 +375,11 @@ const Reader = {
     if (keepSheet) $('#textStats').textContent = `Распознаю страницу ${i + 1} заново…`;
     try {
       const label = band ? `полосу ${i + 1}` : `страницу ${i + 1}`;
-      const res = await recognizePage(c, RULES, (done, total) => {
-        const t = `Распознаём… ${done}/${total}`;
+      const res = await recognizePage(c, RULES, (done, total, phase) => {
+        const n = Math.max(1, Math.ceil(done));
+        const t = phase
+          ? `Распознаём… ${phase} ${n}/${total}`
+          : `Распознаём… ${Math.min(total, n)}/${total}`;
         $('#scanBadge').textContent = t;
         if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
       }, band);

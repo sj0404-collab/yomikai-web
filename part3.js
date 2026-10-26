@@ -711,6 +711,7 @@ async function decodeCrop(cropCanvas) {
     }
     prev = best;
   }
+  await yieldUI();          // отдать кадр браузеру: бейдж и ввод не замирают
   return [text, count ? score / count : 0];
 }
 function binarizeCanvas(src, polarity, R) {
@@ -756,17 +757,22 @@ function allWordsKnown(text) {
   });
 }
 
-/** Оценка текста: сколько слов настоящее и сколько мусорных + уверенность. */
+/** Оценка текста: сколько слов настоящее и сколько мусорных + уверенность.
+ *  Слово из словаря ценим выше, чем просто «похоже на словоформу»: иначе
+ *  «будучию» (форма проходит isPlausible) набирает столько же, сколько
+ *  «будучи», и при равном счёте выигрывает вариант с чуть большей
+ *  уверенностью модели. */
 function textScore(text, conf) {
   const words = String(text).match(/[\p{L}]{2,}/gu) || [];
   if (!words.length) return -50;
-  let known = 0, junk = 0;
+  let known = 0, weak = 0, junk = 0;
   for (const w of words) {
     const low = w.toLowerCase();
-    if (!Words.ready || Words.isKnown(low) || Words.isPlausible(low)) known++;
+    if (!Words.ready || Words.isKnown(low)) known++;
+    else if (Words.isPlausible(low)) weak++;
     else junk++;
   }
-  return known * 10 - junk * 12 + (conf || 0) * 3;
+  return known * 10 + weak * 4 - junk * 12 + (conf || 0) * 3;
 }
 
 /**
@@ -808,6 +814,7 @@ async function refineBrokenWords(crop, text, R) {
     wordCrop.getContext('2d', { willReadFrequently: true })
       .drawImage(crop, box[0], 0, w, crop.height, 0, 0, w, crop.height);
     const cand = await bestWordVariant(wordCrop, sp.word, R);
+    await yieldUI();
     if (!cand) continue;
     DECODE_STATS.wordsFixed++;
     out = out.slice(0, sp.start) + cand + out.slice(sp.end);
@@ -915,6 +922,7 @@ async function decodeAllVariants(crop, R, first) {
       best = { text, conf, score, variant: name };
     }
     if (allWordsKnown(best.text)) break;
+    await yieldUI();
   }
   return best || ['', 0, 'none'];
 }
@@ -1005,12 +1013,58 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   const regions = [];
   let largePasses = 0;
 
-  const decodeLine = async (canvas, ln, wide) => {
-    const c = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
+  const decodeLine = async (canvas, ln, wide, opts) => {
+    const w = Math.max(1, ln.right - ln.left), h = Math.max(1, ln.bottom - ln.top);
+    const c = makeCanvas(w, h);
     c.getContext('2d', { willReadFrequently: true })
-      .drawImage(canvas, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, c.width, c.height);
+      .drawImage(canvas, ln.left, ln.top, w, h, 0, 0, w, h);
     crops++;
-    const [text, conf] = await decodeBetter(c, R, { wide });
+    let [text, conf] = await decodeBetter(c, R, { wide });
+    let bestScore = textScore(text, conf);
+    // Титульная строка «жизнь, будучи старшей» на кропе по боксу строки читается
+    // как «оддучив»: детектор обрезает низ строки, и CTC теряет «б» и «у». Точный
+    // перебор обрезки со всех сторон (см. brute-official-box.json) дал: кроп,
+    // расширяемый вверх на 30 % высоты строки, с полями 15 % — та же модель без
+    // подмены слов читает «жизнь, будучи старшей» (conf 0.74). Перебираем такие
+    // кропы только когда в строке есть незнакомые слова, и берём лучший по
+    // textScore (словарные слова против мусора).
+    if (text && !allWordsKnown(text) && !(opts && opts.skipExt)
+        && (wide || (text.match(/\p{L}/gu) || []).length >= 5)) {
+      const ext = (topFrac, botFrac) => {
+        const dt = Math.round(h * topFrac), db = Math.round(h * botFrac);
+        const t = clamp(ln.top - dt, 0, canvas.height - 1);
+        const b = clamp(ln.bottom + db, t + 1, canvas.height);
+        if (t >= ln.top && b <= ln.bottom) return null;         // нечего расширять
+        const e = makeCanvas(w, Math.max(1, b - t));
+        e.getContext('2d', { willReadFrequently: true })
+          .drawImage(canvas, ln.left, t, w, b - t, 0, 0, w, b - t);
+        return e;
+      };
+      // Подготовки из перебора: без них расширенный кроп даёт «будучь», а не «будучи».
+      const preps = (e) => [
+        ['orig', e], ['pad10', padCanvas(e, 0.10)], ['pad15', padCanvas(e, 0.15)],
+        ['up15', upscaleCanvas(e, 1.5)], ['contrast', contrastCanvas(e)],
+        ['gamma13', (() => { const src = e; const w2 = src.width, h2 = src.height;
+          const ctx = src.getContext('2d', { willReadFrequently: true });
+          const img = ctx.getImageData(0, 0, w2, h2), d = img.data;
+          for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++)
+            d[i + k] = clamp(Math.round(255 * Math.pow(d[i + k] / 255, 1.3)), 0, 255);
+          const out = makeCanvas(w2, h2); out.getContext('2d').putImageData(img, 0, 0); return out; })()],
+      ];
+      outer:
+      for (const maker of [ext(0.30, 0), ext(0.15, 0), ext(0, 0.15)]) {
+        if (!maker) continue;
+        for (const [name, pc] of preps(maker)) {
+          crops++;
+          let t2, c2;
+          try { [t2, c2] = await decodeCrop(pc); } catch (e) { continue; }
+          const s = textScore(t2, c2);
+          if (s > bestScore) { bestScore = s; text = t2; conf = c2; }
+          if (allWordsKnown(text)) break outer;   // все слова словарные — хватит
+          await yieldUI();
+        }
+      }
+    }
     return { text, conf };
   };
 
@@ -1021,7 +1075,11 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   for (const box of det.boxes) {
     const lines = textLines(src, box, R).filter(visible);
     const items = [];
-    for (const ln of lines) {
+    for (let li = 0; li < lines.length; li++) {
+      const ln = lines[li];
+      if (onProgress && det.boxes.length)
+        onProgress(done + (li + 1) / (lines.length + 1), det.boxes.length);
+      await yieldUI();
       const wide = (ln.right - ln.left) / W >= 0.25;   // реплика, а не звук
       let { text, conf } = await decodeLine(src, ln, wide);
       // Битые слова дочиниваем по одному, верные — не трогаем.
@@ -1052,8 +1110,11 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   // увеличиваем и ищем заново — тогда блок делится на строки, и каждая
   // распознаётся отдельно. Берём результат, только если он лучше первого.
   const pageMedian = medianLineHeight(byBox);
+  let largeIdx = 0;
   for (const entry of byBox) {
     if (R.largeText === false) break;
+    if (onProgress) onProgress(++largeIdx, byBox.length, 'крупный текст');
+    await yieldUI();
     const own = entry.items.map(i => i.bottom - i.top).sort((a, b) => a - b);
     const h = own.length ? own[own.length >> 1] * imgCanvas.height : 0;
     const boxW = (entry.box.right - entry.box.left) / W;
@@ -1076,11 +1137,14 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   // «чернилами» без боксов; если в такой полосе нашлись строки — распознаём.
   if (R.uncoveredPass !== false) {
     const extra = uncoveredBands(src, det.boxes, R);
-    for (const band of extra) {
-      for (const ln of textLines(src, band, R)) {
+    for (let bi = 0; bi < extra.length; bi++) {
+      if (onProgress) onProgress(bi + 1, extra.length, 'области без боксов');
+      await yieldUI();
+      for (const ln of textLines(src, extra[bi], R)) {
         if (!visible(ln)) continue;
         const wide = (ln.right - ln.left) / W >= 0.25;
-        const { text, conf } = await decodeLine(src, ln, wide);
+        const { text, conf } = await decodeLine(src, ln, wide, { skipExt: true });
+        await yieldUI();
         if (!text.trim() || conf <= R.minConfidence) continue;
         DECODE_STATS.uncoveredLines++;
         const item = {
@@ -1280,6 +1344,7 @@ async function recognizeLargeBox(src, box, R, ctxInfo) {
   ];
   let best = null;
   for (const work of variants) {
+    await yieldUI();
     const boxes = await detectBoxes(work, R.pageSide, R);
     const lines = [];
     for (const b of boxes) for (const ln of textLines(work, b, R)) lines.push(ln);

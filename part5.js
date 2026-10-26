@@ -475,6 +475,7 @@ async function selfCheck() {
   const saved = await DB.get('kv', 'rules');
   if (saved) { try { RULES = sanitizeRules(JSON.parse(saved.v)); } catch (e) { console.warn(e); } }
   await Library.load();
+  await seedEmbeddedModels().catch(e => console.warn('автосида моделей', e));
   await renderModels();
   const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
   if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);

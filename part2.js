@@ -10,8 +10,12 @@ function toast(msg, ms = 2200) {
   toast._t = setTimeout(() => el.classList.remove('on'), ms);
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Macrotask-пауза: await внутри async-цепочек даёт только микрозадачи, браузер
+// не рисует и не обрабатывает ввод — на телефоне бейдж «Распознаём…» замирает
+// и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
+const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.11';
+const VERSION = 'v1.9.13';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
