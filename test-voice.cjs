@@ -2,7 +2,7 @@
 // Проверяем: speak вызывается даже если прокрутка к реплике падает; ошибки
 // синтеза не молчат; выбор голоса не подменяется без предупреждения.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 const els = new Map();
 const toasts = [];
 const el = (id) => {
