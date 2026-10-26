@@ -514,7 +514,12 @@ async function selfCheck() {
   watchScroll();
   TTS.init();
   const saved = await DB.get('kv', 'rules');
-  if (saved) { try { RULES = sanitizeRules(JSON.parse(saved.v)); } catch (e) { console.warn(e); } }
+  // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
+  // иначе на чистой установке профиль скорости не применялся, и «Быстро»
+  // (pageSide 1280, без перебора) оставалось только словом в настройках.
+  let parsedRules = {};
+  if (saved) { try { parsedRules = JSON.parse(saved.v) || {}; } catch (e) { console.warn(e); } }
+  RULES = sanitizeRules(parsedRules);
   await Library.load();
   await seedEmbeddedModels().catch(e => console.warn('автосида моделей', e));
   await renderModels();

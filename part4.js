@@ -228,11 +228,11 @@ const Reader = {
     if (!r.height || !c.height) return null;
     const scale = c.height / r.height;                 // пиксели кадра на экранный px
     const viewH = scroller.clientHeight || window.innerHeight;
-    const overlap = clamp(Number(RULES.bandOverlap) || 0.15, 0, 0.6);
-    // Запас считаем от экрана, а не от страницы: у вебтуна в 20 000 px
-    // «15 % страницы» — это три лишних экрана. И запас этот нужен ТОЛЬКО
-    // детектору (чтобы облачко на границе попало целиком) — в реплики идут
-    // строки, реально видимые на экране (vy0…vy1, без запаса).
+    const overlap = clamp(Number(RULES.bandOverlap) || 0, 0, 0.6);
+    // Запас по умолчанию НОЛЬ: полоса = ровно то, что видно на экране.
+    // Замер на странице 720×2960: с запасом 200 px — 19,6 с и 147 кропов,
+    // ровно экранами — 13,4 с и 120 кропов, текст одинаковый. Разрезанные
+    // границей экрана строки ловит защита atEdge в recognizePage.
     const pad = Math.min(r.height * overlap, viewH * 0.25);
     // Экран в координатах страницы
     const topPx = (Math.max(sr.top, r.top) - r.top) + 0;      // видимое начало

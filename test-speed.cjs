@@ -55,4 +55,14 @@ for (const sp of ['lightning', 'fast', 'normal', 'thorough']) {
   ok(html.includes('data-speed="' + sp + '"'), 'чип скорости ' + sp);
 }
 
+
+// 8. Чистая установка: правила обязаны пройти sanitize, иначе профиль не работает
+const fresh = api.sanitizeRules({});                      // как в boot без сохранённых правил
+ok(fresh.pageSide !== api.DEFAULT_RULES.pageSide,
+  'профиль применяется и на чистой установке (pageSide ' + fresh.pageSide
+  + ' вместо голых ' + api.DEFAULT_RULES.pageSide + ')');
+ok(fresh.decodeVariants === false && fresh.uncoveredPass === false,
+  'на чистой установке перебор и третий проход выключены — «Быстро» это не только слово');
+ok(fresh.bandOverlap === 0, 'запас полосы по умолчанию 0: полоса = ровно экран');
+
 console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');

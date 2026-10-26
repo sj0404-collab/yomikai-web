@@ -7,7 +7,7 @@ const DEFAULT_RULES = {
   inkTileRows: 4, inkLevels: 1,
   contrastGain: 2.2, contrastOffset: -140,
   rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.25,
-  cutMargin: 0.06, bandOverlap: 0.15, bandsMax: 8, wholeThreshold: 0.72,
+  cutMargin: 0.06, bandOverlap: 0, bandsMax: 8, wholeThreshold: 0.72,
   bubbleGap: 0.45, mergeHeightRatio: 1.8,
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
   detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
@@ -389,10 +389,14 @@ const Words = {
         'ли', 'ах', 'ох', 'эх', 'эй', 'уй', 'ой', 'ай', 'ей', 'их', 'им', 'её', 'его'];
       if (!shortOk.includes(only)) return '';
     }
-    // Строка из имён: 1-3 слова, все с заглавной — оставляем (БЕРСЕРК, ГРАФЬ).
-    const wordsRaw = raw.match(/[А-ЯЁ][а-яё]{2,}/g) || [];
+    // Строка из имён: 1-3 слова, каждое С НАЧАЛА с заглавной — оставляем
+    // (БЕРСЕРК, ГРАФЬ). Раньше проверялось «где-то в слове есть заглавная»,
+    // и мусор «сУалошвл» с заглавной в середине считался именем.
+    const wordList = raw.split(/[^\p{L}]+/u).filter(Boolean);
+    const capNames = wordList.filter(w => /^[А-ЯЁ][а-яё]{2,}$/.test(w));
     const wordsLong = raw.match(/[А-Яа-яЁё]{3,}/g) || [];
-    if (wordsRaw.length >= 1 && wordsRaw.length === wordsLong.length && wordsRaw.length <= 3) return fixed;
+    if (capNames.length >= 1 && capNames.length === wordList.filter(w => w.length >= 3).length
+        && capNames.length === wordsLong.length && capNames.length <= 3) return fixed;
     // Имя или крик капсом, которого нет в словаре: «БЕРСЕРК», «НЕ СМЕЙ».
     // Но не «АААААА» и не «СОООООИТ»: тройной повтор буквы — это звук, а не имя.
     const caps = (raw.match(/[А-ЯЁ]{3,}/g) || []).filter(w => !/(.)\1\1/.test(w.toLowerCase()));
@@ -406,7 +410,10 @@ const Words = {
       const knownRatio = known.length / words.length;
       if (knownRatio < 0.5) return '';
     }
-    if (known.length >= 1 && words.length <= 2) return fixed;    // «да, это», «не сейчас»
+    // Одна-две слова — реплика только если ВСЕ они настоящие: «да, это»,
+    // «не сейчас». Иначе «ТА. ЧВ» (где «та» — слово, а «чв» — нет) считалось
+    // репликой.
+    if (known.length >= 1 && known.length === words.length && words.length <= 2) return fixed;
     return '';
   },
 };
@@ -1056,6 +1063,9 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     // подмены слов читает «жизнь, будучи старшей» (conf 0.74). Перебираем такие
     // кропы только когда в строке есть незнакомые слова, и берём лучший по
     // textScore (словарные слова против мусора).
+    // Расширение кропа пробуем только когда есть незнакомые слова. Пробовать
+    // его ещё и для всех строк у края экрана — замерено: 196 кропов и 52 с
+    // вместо 120 кропов и ~14 с, а текста больше не становится.
     if (text && !allWordsKnown(text) && !(opts && opts.skipExt)
         && (wide || (text.match(/\p{L}/gu) || []).length >= 5)) {
       const ext = (topFrac, botFrac) => {
@@ -1109,6 +1119,8 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
         onProgress(done + (li + 1) / (lines.length + 1), det.boxes.length);
       await yieldUI();
       const wide = (ln.right - ln.left) / W >= 0.25;   // реплика, а не звук
+      // Край полосы: строка могла быть разрезана границей экрана.
+
       let { text, conf } = await decodeLine(src, ln, wide);
       // Битые слова дочиниваем по одному, верные — не трогаем.
       if (wide && text && !allWordsKnown(text)) {

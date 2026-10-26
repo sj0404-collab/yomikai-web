@@ -85,8 +85,9 @@ def main():
             const c = makeCanvas(img.naturalWidth, img.naturalHeight);
             c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
             const t0 = performance.now();
-            const res = await recognizePage(c, RULES, null, null);
-            const lines = readingOrder(res.regions, true, true, RULES);
+            const R = sanitizeRules(RULES);
+            const res = await recognizePage(c, R, null, null);
+            const lines = readingOrder(res.regions, true, true, R);
             return {
                 size: [c.width, c.height], boxes: res.boxes, crops: res.crops,
                 detMs: Math.round(res.detMs), recMs: Math.round(res.recMs),
@@ -105,17 +106,21 @@ def main():
             const c = makeCanvas(img.naturalWidth, img.naturalHeight);
             c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
             const viewH = 800, H = c.height;
-            const pad = Math.min(H * 0.15, viewH * 0.25);
+            // Запас полосы берём из правил — ровно как читалка (bandOverlap).
+            // Шаг — один экран: пользователь пролистывает по экрану.
+            const R = sanitizeRules(RULES);
+            const pad = Math.min(H * R.bandOverlap, viewH * 0.25);
+            const step = viewH;
             const keys = new Map();          // как Reader.bandCache
             const t0 = performance.now();
             let scans = 0;
-            for (let scroll = 0; scroll < H; scroll += viewH * 0.85) {
+            for (let scroll = 0; scroll < H; scroll += step) {
                 const y0 = Math.max(0, scroll - pad);
                 const y1 = Math.min(H, scroll + viewH + pad);
                 const key = Math.round(scroll / 96) + ':' + Math.round((scroll + viewH) / 96);
                 if (keys.has(key)) continue;
-                const res = await recognizePage(c, RULES, null, { y0, y1, vy0: scroll, vy1: scroll + viewH, key });
-                const lines = readingOrder(res.regions, true, true, RULES);
+                const res = await recognizePage(c, R, null, { y0, y1, vy0: scroll, vy1: scroll + viewH, key });
+                const lines = readingOrder(res.regions, true, true, R);
                 keys.set(key, { lines, res });
                 scans++;
             }
