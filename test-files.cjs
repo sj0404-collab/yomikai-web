@@ -1,6 +1,6 @@
 // Что браузер реально умеет с файлами, и добавление страниц в существующую главу.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 delete global.indexedDB;                    // хранилище в памяти, без ожидания
 const els = new Map();
 const el = (id) => {
