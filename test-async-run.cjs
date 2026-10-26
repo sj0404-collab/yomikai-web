@@ -4,7 +4,7 @@
 const fs = require('fs');
 // Мини-canvas из shim.js: здесь DOM не нужен, а dom_shim отдаёт пустой 2d-контекст.
 // window.addEventListener нужен для глобальных обработчиков ошибок из part5.
-require('/tmp/shim.js');
+require('./shim.js');
 global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
 global.document = global.document || {};
