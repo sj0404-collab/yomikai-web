@@ -1,7 +1,7 @@
 // Вшитый словарь: разжимается, слов 250 000, языковая починка включается сама.
 const fs = require('fs');
 const crypto = require('crypto');
-require('/tmp/shim.js');
+require('./shim.js');
 delete global.indexedDB;
 global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
