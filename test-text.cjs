@@ -1,6 +1,6 @@
 // Порядок чтения и починка текста — по мотивам KomaAutoRead.kt / KomaText.kt.
 const fs = require('fs');
-require('/tmp/shim.js');
+require('./shim.js');
 global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
 global.document.addEventListener = () => {};
