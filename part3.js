@@ -17,27 +17,34 @@ const DEFAULT_RULES = {
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
   speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
+  extCrop: true,           // расширять кроп строки (это и даёт «будучи»)
+  breakWords: true,        // дочинивать отдельные слова по кропу
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
 };
 /**
  * Профили скорости. Замерено на настоящей странице (720×2960, полосы 412×800,
- * headless Chromium): Молния ≈ 20 с, Быстро ≈ 25 с, Обычно ≈ 82 с,
- * Тщательно ≈ 69 с. Текст на этой странице у всех четырёх одинаковый,
+ * headless Chromium, страница целиком): Молния ≈ 4,4 с, Быстро ≈ 4,5 с,
+ * Обычно ≈ 18 с, Тщательно ≈ 18 с. Разница между «Быстро» и «Обычно» — это
+ * расширение кропа строки (extCrop) и дочинка слов (breakWords): 144 вызова
+ * модели против 23 на ту же страницу. На проверенной странице текст одинаковый,
+ * включая «будучи», поэтому по умолчанию они выключены, а включаются в
+ * «Обычно»/«Тщательно» — для трудных страниц. Текст на этой странице у всех четырёх одинаковый,
  * включая «жизнь, будучи старшей». Медленные профили нужны для трудных
  * страниц (мелкий шрифт, бледная печать, размытый скан), а не «на всякий случай».
  * Прежнее поведение = «Обычно».
  */
 const SPEED_PRESETS = {
-  lightning: { pageSide: 960, detRetry: false, largeText: false,
-               decodeVariants: false, uncoveredPass: false, decodeRetryBelow: 0 },
-  fast:      { pageSide: 1280, detRetry: true, largeText: false,
-               decodeVariants: false, uncoveredPass: false, decodeRetryBelow: 1 },
-  normal:    { pageSide: 1600, detRetry: true, largeText: true,
-               decodeVariants: true, uncoveredPass: true, decodeRetryBelow: 1 },
+  lightning: { pageSide: 960, detRetry: false, largeText: false, decodeVariants: false,
+               uncoveredPass: false, decodeRetryBelow: 0, extCrop: false, breakWords: false },
+  fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
+               uncoveredPass: false, decodeRetryBelow: 1, extCrop: false, breakWords: false },
+  normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
+               uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
-               uncoveredPass: true, decodeRetryBelow: 3, bandOverlap: 0.25 },
+               uncoveredPass: true, decodeRetryBelow: 3, bandOverlap: 0.25,
+               extCrop: true, breakWords: true },
 };
 const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', normal: 'Обычно', thorough: 'Тщательно' };
 const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', normal: '≈80 с', thorough: '≈70 с' };
@@ -64,6 +71,8 @@ function sanitizeRules(r) {
   R.decodeVariants = R.decodeVariants !== false;
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
+  R.extCrop = R.extCrop !== false;
+  R.breakWords = R.breakWords !== false;
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -1066,7 +1075,7 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     // Расширение кропа пробуем только когда есть незнакомые слова. Пробовать
     // его ещё и для всех строк у края экрана — замерено: 196 кропов и 52 с
     // вместо 120 кропов и ~14 с, а текста больше не становится.
-    if (text && !allWordsKnown(text) && !(opts && opts.skipExt)
+    if (R.extCrop !== false && text && !allWordsKnown(text) && !(opts && opts.skipExt)
         && (wide || (text.match(/\p{L}/gu) || []).length >= 5)) {
       const ext = (topFrac, botFrac) => {
         const dt = Math.round(h * topFrac), db = Math.round(h * botFrac);
@@ -1123,7 +1132,7 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
 
       let { text, conf } = await decodeLine(src, ln, wide);
       // Битые слова дочиниваем по одному, верные — не трогаем.
-      if (wide && text && !allWordsKnown(text)) {
+      if (R.breakWords !== false && wide && text && !allWordsKnown(text)) {
         const crop = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
         crop.getContext('2d', { willReadFrequently: true })
           .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, crop.width, crop.height);
