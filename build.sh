@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 if [ -z "$OUT" ]; then
   if [ -d .git ] || [ "$(basename "$PWD")" != "koma-web" ]; then OUT=./koma-web.html; else OUT=../koma-web.html; fi
 fi
-cat part1.html part0-ort.js part0-wasm.js part0-dict.js part0-models.js part2.js part3.js part4.js part5.js > "$OUT"
+cat part1.html part0-ort.js part0-wasm.js part0-dict.js part2.js part3.js part4.js part5.js > "$OUT"
 python3 check.py
 ls -l "$OUT"
 grep -o "VERSION = 'v[0-9.]*'" "$OUT" | head -1
