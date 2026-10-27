@@ -543,14 +543,24 @@ const OCR = {
       // Требование одно: та же азбука (те же символы в том же порядке, что в
       // словаре), иначе его выход нельзя декодировать нашим словарём — тогда
       // честно говорим и не подсовываем его в работу.
-      this.rec2 = null; this.rec2Note = '';
+      this.rec2 = null; this.rec2Note = ''; this.rec2Kind = null; this.rec2Charset = '';
       const rec2 = await DB.get('kv', 'model:rec2');
       if (rec2) {
         try {
           const sess = await ort.InferenceSession.create(rec2.v, { executionProviders: ['wasm'] });
-          const ok = await this.checkRec2Alphabet(sess);
-          if (ok) { this.rec2 = sess; this.rec2Note = 'второй распознаватель подключён'; }
-          else this.rec2Note = 'азбука не совпадает со словарём — не подключён';
+          const cs = await DB.get('kv', 'model:rec2charset');
+          if (cs && cs.v) {
+            // «Линейная» модель из набора чтеца шрифтов: у неё своя азбука
+            // (файл charset.txt), и читается она своим адаптером.
+            this.rec2 = sess; this.rec2Kind = 'line32';
+            this.rec2Charset = String(cs.v).replace(/\r?\n+$/, '');
+            this.rec2Note = 'линейный распознаватель (' + this.rec2Charset.length + ' символов)';
+          } else if (await this.checkRec2Alphabet(sess)) {
+            this.rec2 = sess; this.rec2Kind = 'dict519';
+            this.rec2Note = 'второй распознаватель подключён';
+          } else {
+            this.rec2Note = 'азбука не совпадает со словарём — не подключён';
+          }
         } catch (e) {
           this.rec2Note = 'не загрузился: ' + String((e && e.message) || e).slice(0, 120);
         }
@@ -1215,6 +1225,81 @@ function variantBetter(cand, base) {
   return a.junk < b.junk;
 }
 
+/**
+ * Адаптер для второго семейства распознавателей — «линейные» модели из
+ * набора чтеца шрифтов (best_r28_final.onnx, best_finetuned_r4.onnx):
+ * вход 1×1×32×ширина, серый, luma/255, белый фон = 1, поля 20 % высоты,
+ * CTC: класс 0 — blank, символы по файлу азбуки, последний класс — «неизвестно»,
+ * дальше латиница A–Z a–z.
+ *
+ * Замер на облачках со скриншотов 27.10 (реальные модели, Chromium):
+ *   b1 «ЛУЧШЕ БЫТЬ БОЛЕЕ РАВНОДУШНЫМ»      наша 0 % · r28 4,0 % · finetuned 8,0 %
+ *   b2 «Я ТОЖЕ ТАК СЧИТАЮ…»               наша 0 % · r28 5,2 % · finetuned 8,6 %
+ *   b3 «НО РАЗВЕ НАШ ЛИДЕР…»               наша 5,9 % · r28 17,6 % · finetuned 17,6 %
+ *   b4 крик «ГДЕ, ЧЁРТ ВОЗЬМИ…»            наша 14,7 % · r28 73,5 % · finetuned 73,5 %
+ * То есть на наших страницах эти модели слабее, зато в 5–10 раз быстрее
+ * (7–23 мс на строку против 78–99). Поэтому они не заменяют основной, а
+ * работают как ещё один вариант в переборе трудных строк: побеждает тот, у
+ * кого по словарю больше верных слов (variantBetter).
+ */
+async function decodeLine32(crop, sess, charset, R) {
+  const chars = String(charset || '');
+  if (!sess || !chars) return ['', 0];
+  // Поля 20 % высоты — так модель обучена (в отчёте чтеца: CER 19,8 % → 2,7 %).
+  const m = Math.max(2, Math.round(crop.height * 0.2));
+  const pad = makeCanvas(crop.width + 2 * m, crop.height + 2 * m);
+  const pctx = pad.getContext('2d', { willReadFrequently: true });
+  pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, pad.width, pad.height);
+  pctx.drawImage(crop, m, m);
+  const h = 32;
+  const w32 = Math.max(8, Math.round(pad.width * h / pad.height));
+  const W = Math.ceil((w32 + 4) / 8) * 8;           // ширина кратна 8, слева 4 px
+  const c = makeCanvas(W, h);
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#fff'; g.fillRect(0, 0, W, h);
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  g.drawImage(pad, 4, 0, w32, h);
+  const px = g.getImageData(0, 0, W, h).data;
+  const data = new Float32Array(h * W);
+  for (let i = 0; i < h * W; i++) {
+    const o = i * 4;
+    data[i] = (0.299 * px[o] + 0.587 * px[o + 1] + 0.114 * px[o + 2]) / 255;
+  }
+  const t = new ort.Tensor('float32', data, [1, 1, h, W]);
+  const out = await runModel(sess, { [sess.inputNames[0]]: t }, 'чтец');
+  if (!out || !out.dims) return ['', 0];
+  // Формы выхода у семейства разные: best_r28_final даёт [1,63,163],
+  // best_finetuned_r4 — [63,1,111]. Классы всегда последним измерением,
+  // время — тем из первых двух, которое не единица.
+  const d = out.dims, v = out.data;
+  let T = 0, C = 0;
+  if (d.length === 3) {
+    C = d[2];
+    if (d[0] === 1 && d[1] > 1) T = d[1];           // [1, T, C]
+    else if (d[1] === 1) T = d[0];                  // [T, 1, C]
+    else if (d[1] > 10) { T = d[1]; C = d[2]; }     // [N, T, C] — берём первый
+    else return ['', 0];
+  } else if (d.length === 2) { T = d[0]; C = d[1]; }
+  else return ['', 0];
+  if (T < 1 || C < 2 || v.length < T * C) return ['', 0];
+  let text = '', prev = 0, score = 0, count = 0;
+  for (let ti = 0; ti < T; ti++) {
+    let best = 0, bestV = v[ti * C], off = ti * C;
+    for (let ci = 1; ci < C; ci++) { const x = v[off + ci]; if (x > bestV) { bestV = x; best = ci; } }
+    if (best !== 0 && best !== prev) {
+      if (best < chars.length) text += chars[best];
+      else if (best >= chars.length + 2) {          // латиница после «неизвестно»
+        const k = best - chars.length - 2;
+        text += k < 26 ? String.fromCharCode(65 + k) : String.fromCharCode(97 + (k - 26));
+      }
+      score += bestV; count++;
+    }
+    prev = best;
+  }
+  await yieldUI();
+  return [text.trim(), count ? score / count : 0];
+}
+
 async function decodeHard(crop, R, first) {
   if (R.hardVariants === false || !OCR.ready) return null;
   // Перебор стоит ~3 вызова модели на строку, поэтому гоняем его только там,
@@ -1239,7 +1324,14 @@ async function decodeHard(crop, R, first) {
   let best = { text: first[0], conf: first[1], variant: 'orig' };
   for (const [name, cv, sess] of tries) {
     let text = '', conf = 0;
-    try { [text, conf] = await decodeCrop(cv, sess); } catch (e) { continue; }
+    try {
+      // Второй распознаватель «линейного» семейства читается своим адаптером
+      // (серый 32 px, своя азбука), остальные — общим (3×48, словарь файла).
+      const isLine32 = sess && sess === OCR.rec2 && OCR.rec2Kind === 'line32';
+      [text, conf] = isLine32
+        ? await decodeLine32(cv, sess, OCR.rec2Charset, R)
+        : await decodeCrop(cv, sess);
+    } catch (e) { continue; }
     DECODE_STATS.variantRuns++;
     // Сравниваем по СЛОВАМ, а не по общей оценке. На титуле сочинения
     // (e2e, «Как прожить жизнь, будучи старшей сестрой тирана») общая оценка
