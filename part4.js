@@ -402,7 +402,7 @@ const Reader = {
           : `Распознаём… ${Math.min(total, n)}/${total}`;
         $('#scanBadge').textContent = t;
         if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
-      }, band);
+      }, band, opts.onBubble || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
       const fresh = readingOrder(res.regions, rtl, true, RULES);
@@ -454,8 +454,8 @@ const Reader = {
   },
 
   /** Совместимость: распознать текущую страницу. */
-  async scanCurrent(force = false) {
-    return this.scanPage(this.page, { force });
+  async scanCurrent(force = false, onBubble = null) {
+    return this.scanPage(this.page, { force, onBubble });
   },
 
   /** Карточка «ничего не запущено»: показывается, пока страница не распознана. */
@@ -706,6 +706,12 @@ const TTS = {
     // Раньше в этот момент вылезало «На этой полосе нет распознанного текста»
     // прямо во время сканирования, хотя текст вот он.
     const i = Reader.page;
+    // Конвейер: распознаём и читаем одновременно. Голос начинает с первой
+    // готовой реплики, остальные досчитываются, пока звучит речь.
+    if (OCR.ready && !State.scanning && RULES.pipeline === true
+        && !Reader.unspokenInBand().length && !Reader.regions.get(i)) {
+      return this.readWhileScanning();
+    }
     if (!Reader.regions.get(i)) {
       if (State.scanning) {
         toast('Распознаю страницу, начну читать сразу после', 4000);
@@ -741,10 +747,71 @@ const TTS = {
     $('#btnRead').textContent = '⏸';
     this.step();
   },
+  /**
+   * Читать и распознавать одновременно.
+   *
+   * Не по строкам: построчная отдача рвала реплики на куски («УЖЕ ПОРА НА-» +
+   * «ЧИНАТЬ ВСТРЕЧУ,»), а реплику резать нельзя. Поэтому так: сначала
+   * распознаём ТОЛЬКО первую целую реплику (0,57 с «Быстро», 0,70 с «Обычно»)
+   * и сразу начинаем её читать, а пока звучит речь — распознаём полосу
+   * целиком и продолжаем с того, что ещё не прочитано.
+   */
+  async readWhileScanning() {
+    this.queue = []; this.idx = 0; this.stopped = false;
+    this.scanDone = false;
+    $('#playBar').style.display = 'flex';
+    $('#btnRead').textContent = '⏸';
+    $('#playStatus').textContent = 'распознаю…';
+    const i = Reader.page;
+    const c = Reader.canvases[i];
+    const band = Reader.visibleBandPx(i);
+    const bandCanvas = (() => {
+      if (!c) return null;
+      if (!band) return c;
+      const y0 = Math.max(0, Math.round(band.y0)), y1 = Math.min(c.height, Math.round(band.y1));
+      const out = makeCanvas(c.width, Math.max(1, y1 - y0));
+      out.getContext('2d', { willReadFrequently: true })
+        .drawImage(c, 0, y0, c.width, y1 - y0, 0, 0, c.width, y1 - y0);
+      return out;
+    })();
+    let first = null;
+    if (bandCanvas && OCR.ready) {
+      first = await recognizeFirstBubble(bandCanvas, RULES, band ? { ...band, y0: 0 } : null).catch(() => null);
+    }
+    if (first) {
+      $('#playStatus').textContent = '';
+      this.queue.push({ text: first, top: 0, bottom: 0 });
+      this.step();                    // голос пошёл, пока идёт распознавание полосы
+    }
+    $('#scanBadge').classList.add('on');
+    $('#scanBadge').textContent = 'Распознаём… стр. ' + (i + 1);
+    try {
+      await Reader.scanCurrent(false);
+    } catch (e) { console.warn('конвейер: полоса не распозналась', e); }
+    finally {
+      this.scanDone = true;
+      $('#scanBadge').classList.remove('on');
+    }
+    // Дальше — обычный путь по уже распознанной полосе (первая реплика уже
+    // отмечена прочитанной, поэтому повторно не читается).
+    if (!this.stopped) {
+      const rest = Reader.unspokenInBand();
+      if (rest.length) this.readQueue(rest);
+      else if (!first) this.readVisible();
+    }
+  },
   step() {
     if (this.stopped) return;
     Reader.saveSpoken();
     if (this.idx >= this.queue.length) {
+      // Конвейер: реплики ещё идут — ждём следующую, а не заканчиваем чтение.
+      if (State.scanning && !this.scanDone) {
+        $('#playStatus').textContent = 'распознаю…';
+        clearTimeout(this._waitMore);
+        this._waitMore = setTimeout(() => { if (!this.stopped) this.step(); }, 150);
+        return;
+      }
+      $('#playStatus').textContent = '';
       this.onQueueEnd();
       return;
     }
