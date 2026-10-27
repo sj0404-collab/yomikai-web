@@ -108,6 +108,16 @@
     background:#232822d9;border-radius:26px;padding:4px 6px;z-index:26;align-items:center;
     opacity:.92;box-shadow:0 6px 18px #0006}
   .floatbar .icon{padding:5px 8px;font-size:15px}
+  /* Где сейчас читает: лента над панелью плеера. Прочитанные буквы светлее,
+     текущая — с тенью-свечением. Сделано так, чтобы видеть, какая именно
+     буква звучит; лента маленькая и не закрывает облачко. */
+  .nowline{position:absolute;left:50%;transform:translateX(-50%);bottom:112%;max-width:88vw;
+    background:#1b1f1aee;border-radius:10px;padding:4px 9px;font-size:12.5px;line-height:1.35;
+    z-index:27;max-height:42px;overflow:hidden;box-shadow:0 4px 14px #0008;white-space:pre-wrap;/* низ растворяется, чтобы обрезанная строка не выглядела обрубленной */-webkit-mask-image:linear-gradient(#000 82%,transparent);mask-image:linear-gradient(#000 82%,transparent);
+    pointer-events:none}
+  .nowline .ch{color:#b9c2b6;transition:color .08s}
+  .nowline .ch.sp{color:#9fd18f}
+  .nowline .ch.cur{color:#fff;text-shadow:0 0 5px #6fa8ff,0 0 12px #6fa8ff,0 0 20px #6fa8ff88}
   .nextArrow{position:absolute;z-index:27;background:#232822e6;border-radius:28px;padding:8px 13px;
     display:flex;align-items:center;gap:6px;font-size:12px;box-shadow:0 6px 20px #0008}
   .nextArrow.down{left:50%;transform:translateX(-50%);bottom:150px}
@@ -159,6 +169,7 @@
   <div class="scanbadge" id="scanBadge">Распознаём…</div>
 
   <div class="floatbar" id="playBar" style="display:none">
+    <div class="nowline" id="nowLine" style="display:none"></div>
     <button class="icon" id="btnPause">⏸</button>
     <button class="icon" id="btnSkip">⏭</button>
     <button class="icon" id="btnStop" style="color:var(--red)">⏹</button>
@@ -2282,7 +2293,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.18';
+const VERSION = 'v1.9.19';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2554,7 +2565,7 @@ const DEFAULT_RULES = {
   speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
   extCrop: 'light',        // расширять кроп строки: 'light' — дешёво, true — полный перебор
   breakWords: true,        // дочинивать отдельные слова по кропу
-  pipeline: false,         // читать, не дожидаясь конца полосы (см. замер в part4.js)
+  pipeline: true,          // читать, не дожидаясь конца полосы (замер в part4.js)
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
@@ -2574,6 +2585,12 @@ const DEFAULT_RULES = {
 const SPEED_PRESETS = {
   lightning: { pageSide: 960, detRetry: false, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 0, extCrop: false, breakWords: false },
+  // «Быстро» — это и есть авто: самый дешёвый путь (extCrop 'light', без
+  // перебора) для всего, включая каллиграфию. Второй проход по крупному
+  // тексту пробовали включить и здесь — на титуле он дал дубль «жизнь, Оцачит
+  // старшей сестрой тирана» и 14,4 с вместо 4,3 с (кропов 88 против 25),
+  // то есть хуже и в шесть раз медленнее. Предел возможного для этого шрифта —
+  // именно этот путь: текст верный («жизнь, будучи старшей сестрой тирана»).
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
@@ -2609,7 +2626,7 @@ function sanitizeRules(r) {
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
-  R.pipeline = R.pipeline === true;      // по умолчанию выключен: см. замер
+  R.pipeline = R.pipeline !== false;     // конвейер включён; [{pipeline:false}] выключает
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -3365,9 +3382,9 @@ function textScore(text, conf) {
  * bubblesOf, что и весь проход. Замер: 0,57 с («Быстро») / 0,70 с («Обычно»)
  * против 1,2 / 12,3 с на всю полосу.
  */
-async function recognizeFirstBubble(src, R, band) {
+async function recognizeFirstBubble(src, R, band, preDet) {
   try {
-    const det = await detectWithRetry(src, R);
+    const det = preDet || await detectWithRetry(src, R);
     if (!det.boxes.length) return null;
     // Группа = самый верхний бокс плюс то, что идёт сразу под ним без большого
     // разрыва (строки одного облачка). Проверка «перекрываются по вертикали»
@@ -3623,7 +3640,7 @@ function lineInBand(ln, band, y0) {
   return over >= h * 0.4;
 }
 
-async function recognizePage(imgCanvas, R, onProgress, band) {
+async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   const t0 = performance.now();
   DECODE_STATS.variantRuns = 0; DECODE_STATS.variantsPicked = 0; DECODE_STATS.uncoveredLines = 0; DECODE_STATS.wordsTried = 0; DECODE_STATS.wordsFixed = 0;
   // band = {y0, y1} в пикселях исходного кадра: распознаём ТОЛЬКО видимую
@@ -3644,7 +3661,9 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   // ── Проход 1: детектор. Если он не нашёл ничего, пробуем другие подготовки
   // кадра: бледная каллиграфия и светлый текст на белом фоне не ловятся на
   // исходном кадре, а на контрастном/бинаризованном находятся.
-  const det = await detectWithRetry(src, R);
+  // Конвейер уже прогнал детектор, чтобы начать читать раньше, — второй раз
+  // его не гоняем (это ~450 мс на полосу). Кадр детектора тот же: полоса.
+  const det = preDet || await detectWithRetry(src, R);
   const detMs = Math.round(performance.now() - t0);
   const t1 = performance.now();
   const W = src.width, H = src.height;
@@ -3784,6 +3803,10 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     // Текст не теряем: принимаем второй проход, только если он сохранил хотя
     // бы 80 % букв (иначе из титула пропадали строки).
     if (!alt.items.length || lettersOf(alt.items.map(i => i.text)) < letters * 0.8) continue;
+    // Если второй проход набрал заметно больше букв, это почти всегда дубль
+    // («… будучи старшей жизнь, Оцачит старшей сестрой тирана»), а не более
+    // точное чтение: такую замену не берём.
+    if (lettersOf(alt.items.map(i => i.text)) > letters * 1.3) continue;
     if (qualityOf(alt.items.map(i => i.text)) > qualityOf(firstTexts)) entry.items = alt.items;
   }
   for (const entry of byBox) for (const item of entry.items) regions.push(item);
@@ -4850,7 +4873,7 @@ const Reader = {
           : `Распознаём… ${Math.min(total, n)}/${total}`;
         $('#scanBadge').textContent = t;
         if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
-      }, band, opts.onBubble || null);
+      }, band, opts.det || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
       const fresh = readingOrder(res.regions, rtl, true, RULES);
@@ -4902,8 +4925,8 @@ const Reader = {
   },
 
   /** Совместимость: распознать текущую страницу. */
-  async scanCurrent(force = false, onBubble = null) {
-    return this.scanPage(this.page, { force, onBubble });
+  async scanCurrent(force = false, preDet = null) {
+    return this.scanPage(this.page, { force, det: preDet });
   },
 
   /** Карточка «ничего не запущено»: показывается, пока страница не распознана. */
@@ -5004,6 +5027,89 @@ const Buffer = {
 };
 
 /* ───────────────────────── 10. Озвучка ───────────────────────── */
+/**
+ * «Где читает»: лента над плеером, где каждая буква — отдельный элемент, а
+ * текущая подсвечена тенью.
+ *
+ * Точную привязку «буква ↔ звук» браузер не даёт: SpeechSynthesis шлёт
+ * onboundary только по границам СЛОВ (и только часть движков). Поэтому так:
+ * границы слов дают точку отсчёта, а внутри слова тень идёт по оценке —
+ * ≈14 символов в секунду при rate 1.0 (замер по длительности реплик:
+ * «УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ, ТАК ЧТО ЕЁ ВЫСОЧЕСТВО, ДОЛЖНО БЫТЬ, ПРИБЫЛА» —
+ * 78 знаков, 5,6 с). Как только приходит новая граница, позиция выравнивается
+ * по ней, поэтому расхождение не копится.
+ */
+const SpeakCursor = {
+  el: null, chars: [], pos: 0, t0: 0, rate: 1, exact: false, timer: 0, on: false,
+  cps() { return 14 * (this.rate || 1); },
+  start(text, rate) {
+    const el = $('#nowLine');
+    if (!el) return;
+    this.el = el; this.rate = rate || 1; this.pos = 0; this.exact = false; this.on = true;
+    this.t0 = performance.now();
+    el.innerHTML = Array.from(text).map((ch, i) =>
+      `<span class="ch" data-i="${i}">${escapeHtml(ch)}</span>`).join('');
+    this.chars = Array.from(el.querySelectorAll('.ch'));
+    el.style.display = 'block';
+    clearInterval(this.timer);
+    this.timer = setInterval(() => this.tick(), 50);
+    this.paint();
+  },
+  /** Точка отсчёта из onboundary: charIndex — начало слова. */
+  boundary(charIndex) {
+    if (!this.on || typeof charIndex !== 'number' || charIndex < 0) return;
+    this.exact = true;
+    this.pos = Math.min(charIndex, this.chars.length);
+    this.pos0 = this.pos;
+    this.t0 = performance.now();
+    this.paint();
+  },
+  tick() {
+    if (!this.on || !this.chars.length) return;
+    if (!this.exact) {
+      const done = (performance.now() - this.t0) / 1000 * this.cps();
+      this.pos = Math.min(this.chars.length, Math.round(done));
+      this.paint();
+    } else {
+      // После границы слова внутри слова ведём тень по оценке.
+      const guess = this.pos0 + (performance.now() - this.t0) / 1000 * this.cps();
+      const p = Math.min(this.chars.length, Math.round(guess));
+      if (p !== this.pos) { this.pos = p; this.paint(); }
+    }
+  },
+  paint() {
+    for (let i = 0; i < this.chars.length; i++) {
+      const c = this.chars[i];
+      const k = i < this.pos ? 'ch sp' : (i === this.pos ? 'ch cur' : 'ch');
+      if (c.className !== k) c.className = k;
+    }
+    // Лента — одна строка в высоту (меньше закрывает страницу), поэтому
+    // за текущей буквой она подкручивается сама: видно именно ту строку, где
+    // сейчас звучит голос.
+    if (this.el && this.pos > 0 && this.chars[this.pos]) {
+      const c = this.chars[this.pos];
+      const y = c.offsetTop || 0;
+      const h = c.offsetHeight || 17;
+      // Прокрутка кратна высоте строки: иначе снизу торчала половина
+      // следующей строки — выглядело как обрезанный текст.
+      // Высота строки — из line-height: у символа offsetHeight округляется
+      // по-разному, и строки «плыли» на пару пикселей.
+      let rowH = h;
+      try { rowH = parseFloat(getComputedStyle(this.el).lineHeight) || h; } catch (e) { rowH = h; }
+      const top = Math.floor(y / rowH) * rowH;
+      if (top < this.el.scrollTop || top + h > this.el.scrollTop + this.el.clientHeight) {
+        this.el.scrollTop = Math.max(0, top);
+      }
+    }
+  },
+  stop() {
+    this.on = false;
+    clearInterval(this.timer); this.timer = 0;
+    if (this.el) { this.el.style.display = 'none'; this.el.innerHTML = ''; }
+    this.chars = [];
+  },
+};
+
 const TTS = {
   voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0, primed: false,
   init() {
@@ -5029,6 +5135,7 @@ const TTS = {
   },
   stop() {
     this.stopped = true; this.speaking = false; this.queue = [];
+    try { SpeakCursor.stop(); } catch (e) { /* ленты ещё нет */ }
     speechSynthesis.cancel();
     Reader.current = null;
     Reader.paintAllFrames();
@@ -5052,7 +5159,20 @@ const TTS = {
     const top = r.top + line.top * r.height;
     const bottom = r.top + line.bottom * r.height;
     const safeTop = sr.top + 72;                        // шапка + бейдж
-    const safeBottom = sr.top + sr.height - 170;         // панель чтения + нижняя
+    // Нижняя граница учитывает ленту «где читает»: она висит над панелью
+    // плеера, и без поправки реплика оказывалась ровно под ней (правило:
+    // UI не должен закрывать облачко).
+    // Высоту ленты берём, только если она реально показана и это лента, а не
+    // случайный нулевой/растянутый элемент: иначе безопасная зона схлопывалась
+    // и читалка дёргала страницу на каждой реплике.
+    let nowH = 0;
+    try {
+      const ln = $('#nowLine');
+      const shown = ln && ln.style && ln.style.display && ln.style.display !== 'none';
+      const lr = ln && ln.getBoundingClientRect ? ln.getBoundingClientRect() : null;
+      if (shown && lr && lr.height > 0 && lr.height < 120) nowH = lr.height + 8;
+    } catch (e) { nowH = 0; }
+    const safeBottom = sr.top + sr.height - 170 - nowH;  // панель чтения + лента
     if (top >= safeTop && bottom <= safeBottom) return;
     const want = sr.top + sr.height * 0.3;               // реплику — в верхнюю треть
     sc.scrollTo({ top: Math.max(0, sc.scrollTop + top - want), behavior: 'smooth' });
@@ -5119,11 +5239,19 @@ const TTS = {
       started = true;
       marked = true;
       try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+      // Тень по буквам стартует вместе со звуком, а не по нажатию кнопки.
+      try { SpeakCursor.start(line.text, this.rate); } catch (e) { /* не критично */ }
     };
-    u.onend = () => { if (then) then(); };
+    // Точная граница слова (Chrome отдаёт её как name:'word').
+    u.onboundary = (e) => {
+      try { SpeakCursor.boundary((e && e.charIndex) || 0); } catch (err) { /* ignore */ }
+    };
+    u.onend = () => { try { SpeakCursor.stop(); } catch (e) {}
+      if (then) then(); };
     u.onerror = (e) => {
       const code = (e && e.error) || 'unknown';
       this.speaking = false;
+      try { SpeakCursor.stop(); } catch (err) {}
       // Не заговорил — снимаем возможную отметку, иначе строка потеряется.
       if (!started && marked) { try { Reader.unmarkSpoken(Reader.page, line.text); } catch (err) {} }
       // Молчать нельзя: раньше «голос не работает» выглядело как поломка
@@ -5173,7 +5301,7 @@ const TTS = {
       }
       if (OCR.ready) {
         toast('Сначала распознаю страницу…', 4000);
-        await Reader.scanCurrent(false);
+        await Reader.scanCurrent(false, det);        // детекция уже есть — второй раз не гоняем
       }
     }
     const lines = Reader.unspokenInBand();
@@ -5222,9 +5350,13 @@ const TTS = {
         .drawImage(c, 0, y0, c.width, y1 - y0, 0, 0, c.width, y1 - y0);
       return out;
     })();
-    let first = null;
+    let first = null, det = null;
     if (bandCanvas && OCR.ready) {
-      first = await recognizeFirstBubble(bandCanvas, RULES, band ? { ...band, y0: 0 } : null).catch(() => null);
+      try {
+        det = await detectWithRetry(bandCanvas, RULES);           // ~450 мс
+        first = await recognizeFirstBubble(bandCanvas, RULES,
+          band ? { ...band, y0: 0 } : null, det).catch(() => null);  // +100…300 мс
+      } catch (e) { console.warn('конвейер: детектор не сработал', e); det = null; }
     }
     if (first) {
       $('#playStatus').textContent = '';
