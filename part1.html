@@ -238,6 +238,15 @@
       Можно выбрать <b>все три файла сразу</b>, можно по одному — шторка не закроется,
       и ниже будет видно, чего ещё не хватает.
     </div>
+    <div class="hint" style="margin-top:8px">
+      <b>Не обязательно:</b> второй распознаватель — файл <code>line32.onnx</code>
+      (или <code>best_r28_final.onnx</code>, <code>best_finetuned_r4.onnx</code>)
+      вместе с азбукой <code>charset.txt</code>. Он используется <b>только</b> на
+      трудных строках, где основной не уверен, и побеждает тот, у кого по словарю
+      больше верных слов. Замер на облачках 27.10: основной точнее
+      (0–15 % ошибок против 4–74 %), второй в 5–10 раз быстрее — поэтому он
+      подстраховка, а не замена.
+    </div>
     <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
       <button class="btn primary" id="btnPickModels">Выбрать файлы</button>
       <button class="btn" id="btnPickModelDir">Папка с моделями</button>
