@@ -19,7 +19,7 @@ const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
-  const txt = fs.readFileSync('/home/user/lab/ru_250k.txt', 'utf8');
+  const txt = fs.readFileSync(__dirname + '/data/ru_250k.txt', 'utf8');
   const rank = new Map(); let n = 0;
   for (const line of txt.split('\n')) { const w = (line.split(/\s+/)[0] || '').toLowerCase(); if (!w) continue; if (!rank.has(w)) rank.set(w, n); n++; }
   const W = api.Words; W.rank = rank; W.size = n; W.ready = true;
