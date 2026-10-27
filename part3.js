@@ -20,6 +20,7 @@ const DEFAULT_RULES = {
   extCrop: 'light',        // расширять кроп строки: 'light' — дешёво, true — полный перебор
   breakWords: true,        // дочинивать отдельные слова по кропу
   pipeline: true,          // читать, не дожидаясь конца полосы (замер в part4.js)
+  hardVariants: true,      // на трудных строках перебирать подготовки и второй распознаватель
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
@@ -38,7 +39,8 @@ const DEFAULT_RULES = {
  */
 const SPEED_PRESETS = {
   lightning: { pageSide: 960, detRetry: false, largeText: false, decodeVariants: false,
-               uncoveredPass: false, decodeRetryBelow: 0, extCrop: false, breakWords: false },
+               uncoveredPass: false, decodeRetryBelow: 0, extCrop: false, breakWords: false,
+               hardVariants: false },
   // «Быстро» — это и есть авто: самый дешёвый путь (extCrop 'light', без
   // перебора) для всего, включая каллиграфию. Второй проход по крупному
   // тексту пробовали включить и здесь — на титуле он дал дубль «жизнь, Оцачит
@@ -81,6 +83,7 @@ function sanitizeRules(r) {
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
   R.pipeline = R.pipeline !== false;     // конвейер включён; [{pipeline:false}] выключает
+  R.hardVariants = R.hardVariants !== false;
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -495,6 +498,23 @@ const OCR = {
   engine: 'idle',        // idle | loading | ready | blocked | failed
   reason: '',
   hasFiles() { return !!(this.pendingDet && this.pendingRec && this.pendingDict); },
+  /**
+   * Совпадает ли азбука второго распознавателя с нашим словарём.
+   * Гоняем пустой (белый) тензор и смотрим число классов: у CTC оно равно
+   * «символы словаря + blank». Если не совпало — декодировать нечем.
+   */
+  async checkRec2Alphabet(sess) {
+    try {
+      const w = 320, h = 48;
+      const data = new Float32Array(3 * h * w).fill(-1);       // белое поле
+      const t = new ort.Tensor('float32', data, [1, 3, h, w]);
+      const out = await runModel(sess, { [sess.inputNames[0]]: t }, 'проверка второго распознавателя');
+      const C = out && out.dims ? out.dims[2] : 0;
+      const want = (OCR.dict ? OCR.dict.length : 0) + 1;
+      return C === want;
+    } catch (e) { return false; }
+  },
+
   async loadModels() {
     const det = await DB.get('kv', 'model:det');
     const rec = await DB.get('kv', 'model:rec');
@@ -519,6 +539,22 @@ const OCR = {
       await installOrtWasm();
       this.det = await ort.InferenceSession.create(det.v, { executionProviders: ['wasm'] });
       this.rec = await ort.InferenceSession.create(rec.v, { executionProviders: ['wasm'] });
+      // Второй распознаватель — по желанию: «субагент» для трудных строк.
+      // Требование одно: та же азбука (те же символы в том же порядке, что в
+      // словаре), иначе его выход нельзя декодировать нашим словарём — тогда
+      // честно говорим и не подсовываем его в работу.
+      this.rec2 = null; this.rec2Note = '';
+      const rec2 = await DB.get('kv', 'model:rec2');
+      if (rec2) {
+        try {
+          const sess = await ort.InferenceSession.create(rec2.v, { executionProviders: ['wasm'] });
+          const ok = await this.checkRec2Alphabet(sess);
+          if (ok) { this.rec2 = sess; this.rec2Note = 'второй распознаватель подключён'; }
+          else this.rec2Note = 'азбука не совпадает со словарём — не подключён';
+        } catch (e) {
+          this.rec2Note = 'не загрузился: ' + String((e && e.message) || e).slice(0, 120);
+        }
+      }
     } catch (e) {
       this.ready = false;
       const msg = String((e && e.message) || e);
@@ -774,7 +810,9 @@ function textLines(imgCanvas, box, R) {
 }
 
 /* ── распознавание кропа (KomaOcrEngine.decode) ── */
-async function decodeCrop(cropCanvas) {
+async function decodeCrop(cropCanvas, sess) {
+  const model = sess || OCR.rec;
+  if (!model) return ['', 0];
   let w0 = cropCanvas.width, h0 = cropCanvas.height;
   if (w0 < 2 || h0 < 2) return ['', 0];
   let src = cropCanvas;
@@ -801,7 +839,7 @@ async function decodeCrop(cropCanvas) {
     }
   }
   const t = new ort.Tensor('float32', data, [1, 3, 48, padded]);
-  const logits = await runModel(OCR.rec, { [OCR.rec.inputNames[0]]: t }, 'распознавание');
+  const logits = await runModel(model, { [model.inputNames[0]]: t }, 'распознавание');
   const T = logits.dims[1], C = logits.dims[2], values = logits.data;   // [1,T,519]
   let text = '', prev = 0, score = 0, count = 0;
   for (let ti = 0; ti < T; ti++) {
@@ -817,6 +855,27 @@ async function decodeCrop(cropCanvas) {
   await yieldUI();          // отдать кадр браузеру: бейдж и ввод не замирают
   return [text, count ? score / count : 0];
 }
+/**
+ * Инверсия (негатив). Замер на облачке-крике со скриншота 17:30: модель
+ * «привыкла» к чёрному тексту на белом; на негативе она читает те же строки
+ * увереннее («БОЛЕЕ РАВНО-» conf 0.88 → 0.92, «ТАЕ ЧЕРТ ВОЗЫМИ» → «ВОЗЬМИ»).
+ */
+function invertCanvas(src) {
+  const w = src.width, h = src.height;
+  if (w < 2 || h < 2) return src;
+  const out = makeCanvas(w, h);
+  const g = out.getContext('2d', { willReadFrequently: true });
+  g.drawImage(src, 0, 0);
+  const img = g.getImageData(0, 0, w, h);
+  for (let i = 0; i < img.data.length; i += 4) {
+    img.data[i] = 255 - img.data[i];
+    img.data[i + 1] = 255 - img.data[i + 1];
+    img.data[i + 2] = 255 - img.data[i + 2];
+  }
+  g.putImageData(img, 0, 0);
+  return out;
+}
+
 function binarizeCanvas(src, polarity, R) {
   const w = src.width, h = src.height;
   if (w < 2 || h < 2) return src;
@@ -836,7 +895,7 @@ function binarizeCanvas(src, polarity, R) {
   return out;
 }
 /** Счётчики проходов: видны в шторке текста, а не «где-то в консоли». */
-const DECODE_STATS = { variantRuns: 0, variantsPicked: 0, uncoveredLines: 0, wordsTried: 0, wordsFixed: 0 };
+const DECODE_STATS = { variantRuns: 0, variantsPicked: 0, uncoveredLines: 0, wordsTried: 0, wordsFixed: 0, hardLines: 0, rec2Picked: 0 };
 
 /** Увеличение кропа: мелкий и рукописный текст CTC читает лучше крупнее. */
 function upscaleCanvas(src, k) {
@@ -1101,13 +1160,98 @@ async function decodeBetter(cropCanvas, R, opts = {}) {
     return [best.text, best.conf];
   }
   const need = Math.max(0, Math.round(R.decodeRetryBelow ?? 1));
-  if (need === 0 || letters(first[0]) >= need) return first;
-  let best = first;
-  for (const pol of [0, 1]) {
-    const att = await decodeCrop(binarizeCanvas(cropCanvas, pol, R));
-    if (letters(att[0]) > letters(best[0])) best = att;
+  let out = first;
+  if (!(need === 0 || letters(first[0]) >= need)) {
+    let best = first;
+    for (const pol of [0, 1]) {
+      const att = await decodeCrop(binarizeCanvas(cropCanvas, pol, R));
+      if (letters(att[0]) > letters(best[0])) best = att;
+    }
+    out = best;
   }
-  return best;
+  // Строку всё ещё не узнаёт словарь — это «трудная строка»: перебираем
+  // подготовки и второй распознаватель (см. decodeHard), берём лучший по
+  // словарю. На нормальном тексте сюда не заходим и времени не тратим.
+  if (!allWordsKnown(out[0])) {
+    const hard = await decodeHard(cropCanvas, R, out);
+    if (hard) return [hard[0], hard[1]];
+  }
+  return out;
+}
+
+/**
+ * Трудная строка: перебор подготовок и второго распознавателя, выбор по словарю.
+ *
+ * Замер на облачке-крике со скриншота 17:30 («ГДЕ, ЧЁРТ ВОЗЬМИ, ТЫ БЫЛ ЧТО ТЫ
+ * МОЖЕШЬ ЗНАТЬ!»), реальные модели:
+ *   как есть            ТАЕ ЧЕРТ ВОЗЫМИ   (2 слова из 3 в словаре)
+ *   бинаризация         ТАЕ ЧЕРТ ВОЗЬМИ   (3 из 3)   ← +слово
+ *   инверсия            ТАЕ ЧЕРТ ВОЗЬМИ   (3 из 3)
+ *   x1.5 / x2 / x3      ТАЕ ЧЕРТ ВОЗЫМИ   (2 из 3)   ← масштаб не помогает
+ * Вторая строка того же облачка:
+ *   как есть            ТЫБЫЧТО ТМО       (0 из 2)
+ *   бинаризация         ТЫ БЫИ ЧТ ТЫМ     (3 из 4)   ← слова хотя бы разделились
+ * Поэтому перебор идёт по бинаризации/инверсии, а не по масштабу: это дешевле и
+ * на замере полезнее. Гоняем ТОЛЬКО на строках, где словарь недоволен, — на
+ * обычном тексте лишних вызовов модели нет.
+ */
+/**
+ * Сравнить два прочтения одной строки по словарю.
+ * better = больше слов, которые словарь знает, при не большем числе мусора.
+ */
+function lineStat(t) {
+  const ws = (String(t).match(/[А-Яа-яЁё]{2,}/g) || []).map(w => w.toLowerCase());
+  let known = 0, junk = 0;
+  for (const w of ws) {
+    if (Words.inDict(w)) known++;
+    else if (!Words.isPlausible(w)) junk++;
+  }
+  return { known, junk, n: ws.length };
+}
+function variantBetter(cand, base) {
+  const a = lineStat(cand), b = lineStat(base);
+  if (a.known > b.known) return true;
+  if (a.known < b.known) return false;
+  return a.junk < b.junk;
+}
+
+async function decodeHard(crop, R, first) {
+  if (R.hardVariants === false || !OCR.ready) return null;
+  // Перебор стоит ~3 вызова модели на строку, поэтому гоняем его только там,
+  // где он осмыслен: строка похожа на речь (два слова и хоть одно из словаря)
+  // или это широкая строка облачка, а не звук «Тг. чв». Плюс потолок на
+  // страницу, чтобы трудная глава не превращалась в минуту ожидания.
+  const stat = lineStat(first[0]);
+  const wide = crop.width / Math.max(1, crop.height) >= 2.2;
+  if (stat.n < 2 && !wide) return null;
+  if (!stat.known && !wide) return null;
+  if ((DECODE_STATS.hardLines = (DECODE_STATS.hardLines || 0) + 1) > 6) return null;
+  // Только бинаризация: на замере именно она дала «ВОЗЬМИ» и разделила
+  // слипшиеся слова, а инверсия/увеличение давали тот же текст (иногда чуть
+  // увереннее). Каждый лишний вариант — это +130 мс на строку, а трудных
+  // строк на странице бывает несколько: на e2e-странице перебор из трёх
+  // вариантов стоил +2 с при том же результате.
+  const tries = [['bin0', binarizeCanvas(crop, 0, R)]];
+  // Второй распознаватель (⚙ → Модели → cyrillic2.onnx): «субагент» для
+  // трудных строк. Работает только если его азбука совпадает с текущим
+  // словарём (проверяется при загрузке), иначе молча пропускается.
+  if (OCR.rec2) tries.push(['rec2', crop, OCR.rec2]);
+  let best = { text: first[0], conf: first[1], variant: 'orig' };
+  for (const [name, cv, sess] of tries) {
+    let text = '', conf = 0;
+    try { [text, conf] = await decodeCrop(cv, sess); } catch (e) { continue; }
+    DECODE_STATS.variantRuns++;
+    // Сравниваем по СЛОВАМ, а не по общей оценке. На титуле сочинения
+    // (e2e, «Как прожить жизнь, будучи старшей сестрой тирана») общая оценка
+    // выбрала вариант, где «будучи» стало «буздчо»: одна знакомая фраза
+    // перевесила испорченное слово. Правило: вариант берём, только если он
+    // добавил хотя бы одно слово, которое словарь знает, и не добавил
+    // незнакомых. Равное число знакомых и меньше мусора — тоже лучше.
+    if (variantBetter(text, best.text)) best = { text, conf, variant: name };
+  }
+  if (best.variant !== 'orig') DECODE_STATS.variantsPicked++;
+  if (best.variant === 'rec2') DECODE_STATS.rec2Picked = (DECODE_STATS.rec2Picked || 0) + 1;
+  return best.variant === 'orig' ? null : [best.text, best.conf, best.variant];
 }
 
 /* ── страница целиком: детектор → строки → распознавание ── */
@@ -1148,6 +1292,7 @@ function lineInBand(ln, band, y0) {
 async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   const t0 = performance.now();
   DECODE_STATS.variantRuns = 0; DECODE_STATS.variantsPicked = 0; DECODE_STATS.uncoveredLines = 0; DECODE_STATS.wordsTried = 0; DECODE_STATS.wordsFixed = 0;
+  DECODE_STATS.hardLines = 0; DECODE_STATS.rec2Picked = 0;
   // band = {y0, y1} в пикселях исходного кадра: распознаём ТОЛЬКО видимую
   // полосу. По правилу «длинную страницу читать в пределах видимой области»
   // иначе на вебтуне в 8000 px находились реплики на два экрана вперёд.
