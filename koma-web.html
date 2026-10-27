@@ -2282,7 +2282,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.17';
+const VERSION = 'v1.9.18';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2554,6 +2554,7 @@ const DEFAULT_RULES = {
   speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
   extCrop: 'light',        // расширять кроп строки: 'light' — дешёво, true — полный перебор
   breakWords: true,        // дочинивать отдельные слова по кропу
+  pipeline: false,         // читать, не дожидаясь конца полосы (см. замер в part4.js)
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
@@ -2608,6 +2609,7 @@ function sanitizeRules(r) {
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
+  R.pipeline = R.pipeline === true;      // по умолчанию выключен: см. замер
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -3352,6 +3354,64 @@ function textScore(text, conf) {
     else junk++;
   }
   return known * 10 + weak * 4 - junk * 12 + (conf || 0) * 3;
+}
+
+/**
+ * Первая ЦЕЛАЯ реплика полосы — чтобы начать читать, не дожидаясь всей полосы.
+ *
+ * Режем не по строкам (это рвало реплики на куски: «УЖЕ ПОРА НА-» + «ЧИНАТЬ
+ * ВСТРЕЧУ,»), а по ОБЛАЧКУ: берём самый верхний бокс и все боксы, которые
+ * перекрываются с ним по вертикали, распознаём их вместе и склеиваем тем же
+ * bubblesOf, что и весь проход. Замер: 0,57 с («Быстро») / 0,70 с («Обычно»)
+ * против 1,2 / 12,3 с на всю полосу.
+ */
+async function recognizeFirstBubble(src, R, band) {
+  try {
+    const det = await detectWithRetry(src, R);
+    if (!det.boxes.length) return null;
+    // Группа = самый верхний бокс плюс то, что идёт сразу под ним без большого
+    // разрыва (строки одного облачка). Проверка «перекрываются по вертикали»
+    // не годилась: у титула строки стоят вплотную, но не перекрываются, и
+    // первая реплика выходила обрезанной («Как прожить» вместо всей строки).
+    const sorted = det.boxes.slice().sort((a, b) => a.top - b.top || a.left - b.left);
+    const first = sorted[0];
+    const h0 = Math.max(first.bottom - first.top, 1);
+    const group = [first];
+    let lastBottom = first.bottom;
+    for (let k = 1; k < sorted.length; k++) {
+      const b = sorted[k];
+      const hb = Math.max(b.bottom - b.top, 1);
+      const gap = b.top - lastBottom;
+      if (gap > h0 * 0.9) break;                       // началось другое облачко
+      if (Math.max(hb, h0) / Math.min(hb, h0) > R.mergeHeightRatio) continue;
+      group.push(b);
+      lastBottom = Math.max(lastBottom, b.bottom);
+    }
+    const regs = [];
+    for (const box of group) {
+      for (const ln of textLines(src, box, R)) {
+        if (band && !lineInBand(ln, band, band.y0 || 0)) continue;
+        const crop = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
+        crop.getContext('2d', { willReadFrequently: true })
+          .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top,
+            0, 0, crop.width, crop.height);
+        const wide = (ln.right - ln.left) / src.width >= 0.25;
+        let text = '', conf = 0;
+        try { [text, conf] = await decodeBetter(crop, R, { wide }); } catch (e) { continue; }
+        if (!text || conf <= R.minConfidence) continue;
+        regs.push({ text, left: ln.left / src.width, top: ln.top / src.height,
+          right: ln.right / src.width, bottom: ln.bottom / src.height });
+      }
+    }
+    if (!regs.length) return null;
+    const rtl = (R.dir || 'rtl') === 'rtl';
+    const bubble = bubblesOf(regs, rtl, R)[0];
+    const text = bubble ? Words.polish(bubble.text, R.junkRatio, bubble.confidence) : '';
+    return text && (text.match(/\p{L}/gu) || []).length >= 2 ? text : null;
+  } catch (e) {
+    console.warn('первая реплика не далась', e);
+    return null;
+  }
 }
 
 /**
@@ -4790,7 +4850,7 @@ const Reader = {
           : `Распознаём… ${Math.min(total, n)}/${total}`;
         $('#scanBadge').textContent = t;
         if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
-      }, band);
+      }, band, opts.onBubble || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
       const fresh = readingOrder(res.regions, rtl, true, RULES);
@@ -4842,8 +4902,8 @@ const Reader = {
   },
 
   /** Совместимость: распознать текущую страницу. */
-  async scanCurrent(force = false) {
-    return this.scanPage(this.page, { force });
+  async scanCurrent(force = false, onBubble = null) {
+    return this.scanPage(this.page, { force, onBubble });
   },
 
   /** Карточка «ничего не запущено»: показывается, пока страница не распознана. */
@@ -5094,6 +5154,12 @@ const TTS = {
     // Раньше в этот момент вылезало «На этой полосе нет распознанного текста»
     // прямо во время сканирования, хотя текст вот он.
     const i = Reader.page;
+    // Конвейер: распознаём и читаем одновременно. Голос начинает с первой
+    // готовой реплики, остальные досчитываются, пока звучит речь.
+    if (OCR.ready && !State.scanning && RULES.pipeline === true
+        && !Reader.unspokenInBand().length && !Reader.regions.get(i)) {
+      return this.readWhileScanning();
+    }
     if (!Reader.regions.get(i)) {
       if (State.scanning) {
         toast('Распознаю страницу, начну читать сразу после', 4000);
@@ -5129,10 +5195,71 @@ const TTS = {
     $('#btnRead').textContent = '⏸';
     this.step();
   },
+  /**
+   * Читать и распознавать одновременно.
+   *
+   * Не по строкам: построчная отдача рвала реплики на куски («УЖЕ ПОРА НА-» +
+   * «ЧИНАТЬ ВСТРЕЧУ,»), а реплику резать нельзя. Поэтому так: сначала
+   * распознаём ТОЛЬКО первую целую реплику (0,57 с «Быстро», 0,70 с «Обычно»)
+   * и сразу начинаем её читать, а пока звучит речь — распознаём полосу
+   * целиком и продолжаем с того, что ещё не прочитано.
+   */
+  async readWhileScanning() {
+    this.queue = []; this.idx = 0; this.stopped = false;
+    this.scanDone = false;
+    $('#playBar').style.display = 'flex';
+    $('#btnRead').textContent = '⏸';
+    $('#playStatus').textContent = 'распознаю…';
+    const i = Reader.page;
+    const c = Reader.canvases[i];
+    const band = Reader.visibleBandPx(i);
+    const bandCanvas = (() => {
+      if (!c) return null;
+      if (!band) return c;
+      const y0 = Math.max(0, Math.round(band.y0)), y1 = Math.min(c.height, Math.round(band.y1));
+      const out = makeCanvas(c.width, Math.max(1, y1 - y0));
+      out.getContext('2d', { willReadFrequently: true })
+        .drawImage(c, 0, y0, c.width, y1 - y0, 0, 0, c.width, y1 - y0);
+      return out;
+    })();
+    let first = null;
+    if (bandCanvas && OCR.ready) {
+      first = await recognizeFirstBubble(bandCanvas, RULES, band ? { ...band, y0: 0 } : null).catch(() => null);
+    }
+    if (first) {
+      $('#playStatus').textContent = '';
+      this.queue.push({ text: first, top: 0, bottom: 0 });
+      this.step();                    // голос пошёл, пока идёт распознавание полосы
+    }
+    $('#scanBadge').classList.add('on');
+    $('#scanBadge').textContent = 'Распознаём… стр. ' + (i + 1);
+    try {
+      await Reader.scanCurrent(false);
+    } catch (e) { console.warn('конвейер: полоса не распозналась', e); }
+    finally {
+      this.scanDone = true;
+      $('#scanBadge').classList.remove('on');
+    }
+    // Дальше — обычный путь по уже распознанной полосе (первая реплика уже
+    // отмечена прочитанной, поэтому повторно не читается).
+    if (!this.stopped) {
+      const rest = Reader.unspokenInBand();
+      if (rest.length) this.readQueue(rest);
+      else if (!first) this.readVisible();
+    }
+  },
   step() {
     if (this.stopped) return;
     Reader.saveSpoken();
     if (this.idx >= this.queue.length) {
+      // Конвейер: реплики ещё идут — ждём следующую, а не заканчиваем чтение.
+      if (State.scanning && !this.scanDone) {
+        $('#playStatus').textContent = 'распознаю…';
+        clearTimeout(this._waitMore);
+        this._waitMore = setTimeout(() => { if (!this.stopped) this.step(); }, 150);
+        return;
+      }
+      $('#playStatus').textContent = '';
       this.onQueueEnd();
       return;
     }
