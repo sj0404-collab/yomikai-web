@@ -168,6 +168,23 @@ function cleanSpeech(raw) {
    assets/koma/dict того же APK, 250 000 слов по убыванию частоты.
    Он НЕ вшит в файл: его выбирают в ⚙ Модели, как и модели.
 */
+/**
+ * Склеить перенос слова через дефис: «РАВНО-» + «ДУШНЫМ» → «РАВНОДУШНЫМ».
+ *
+ * В комиксах реплика часто разбита переносом, и «половинки» — не слова: словарь
+ * выкидывал «РАВНО-» и правил «ДУШНЫМ» в «ДУРНЫМ» (одна буква разницы), после
+ * чего реплика означала совсем другое. Склеиваем до всех проверок: и внутри
+ * строки («РАВНО- ДУШНЫМ»), и между строками (перевод строки).
+ * Тире диалога («— ПРИВЕТ») не трогаем: у него пробелы с двух сторон, а
+ * перенос пишется слитно с концом слова. Регистр второй части не важен —
+ * в комиксах реплики капсом: «РАВНО-» + «ДУШНЫМ».
+ */
+function joinHyphens(text) {
+  return String(text)
+    .replace(/(\p{L})-\s*\n\s*(?=\p{L})/gu, '$1')           // перенос строки
+    .replace(/(\p{L})-\s+(?=\p{L})/gu, '$1');                // перенос внутри строки
+}
+
 const Words = {
   ready: false,
   rank: null,          // слово → номер строки (ранг частоты)
@@ -209,6 +226,18 @@ const Words = {
     if (!this.ready) return true;
     const r = this.rank.get(w.toLowerCase());
     return r !== undefined && r <= this.KNOWN_RANK;
+  },
+  /**
+   * Слово вообще есть в словаре (даже редкое). Отдельно от isKnown: порог
+   * «частого» (KNOWN_RANK) нужен для эвристик «доля знакомых слов», но НЕ для
+   * правки. Иначе «равнодушным» (позиция 51 295) считалось неизвестным и
+   * заменялось на «дурным» (одна буква разницы) — и реплика
+   * «ЛУЧШЕ БЫТЬ БОЛЕЕ РАВНО-ДУШНЫМ» читалась как «…БОЛЕЕ ДУРНЫМ»,
+   * то есть смысл менялся. Правим только то, чего в русском нет.
+   */
+  inDict(w) {
+    if (!this.ready || !this.rank) return false;
+    return this.rank.get(String(w).toLowerCase()) !== undefined;
   },
   /** Одно редактирование: удаление, перестановка, замена, вставка. */
   edits1(word) {
@@ -267,8 +296,15 @@ const Words = {
     if (!this.ready) return word;
     const low = word.toLowerCase();
     if (low.length < 4) return word;
+    // Есть в словаре (пусть и редкое) — не трогаем: замена на «похожее
+    // частотное» слово меняла смысл («равнодушным» → «дурным»).
+    if (this.inDict(low)) return word;
     if (this.isKnown(low) || this.isPlausible(low)) return word;
     const cand = this.candidate(low);
+    // Первую букву у короткого слова не трогаем: «ЖЕШЬ» → «ЕШЬ» — это уже
+    // другое слово (со скриншота реплика «…МОЖЕШЬ ЗНАТЬ!» читалась «ЕШЬ
+    // ЗНАТЬ!»). Длинные слова чиним как раньше: «оддучив» → «будучи».
+    if (cand && cand[0] !== low[0] && low.length < 5) return word;
     if (cand) return this.sameCase(word, cand);
     // Два редактирования — но только к ОЧЕНЬ частым словам и не для КАПСА:
     // «оддучив» → «будучи» (OCR на рукописном шрифте), при этом имена вроде
@@ -331,6 +367,10 @@ const Words = {
     if (known.length < 1) return text;
     const kept = words.filter(w => {
       const low = w.toLowerCase().replace(/[^а-яё]/g, '');
+      // Слово есть в словаре (пусть редкое и длинное) — это не звук.
+      // Иначе «РАВНОДУШНЫМ» (11 букв, позиция 51 295) выбрасывалось правилом
+      // «длинное и неизвестное = звук», и реплика теряла половину смысла.
+      if (this.inDict(low)) return true;
       if (this.isKnown(low) || this.isPlausible(low)) return true;
       // «сттангасоат» (11 букв), «риооооро» (три «о» подряд) — звуки, а не слова.
       // Порог подобран так, чтобы имена («БЕРСЕРК», «ДРЕГЕР») остались.
@@ -342,11 +382,11 @@ const Words = {
     return kept.join(' ').replace(/\s{2,}/g, ' ').trim();
   },
   /** Починка реплики: слова по словарю + висячий дефис в конце. */
-  finish(text) {
-    let t = String(text || '');
+  finish(text, keepAll) {
+    let t = joinHyphens(String(text || ''));
     if (this.ready) {
       t = t.replace(/[А-Яа-яЁё]+/g, w => this.correctWord(w));
-      t = this.stripJunkWords(t);
+      if (!keepAll) t = this.stripJunkWords(t);
     }
     return t.replace(/(?<=\p{L})-\s*$/u, '').trim();
   },
@@ -393,8 +433,19 @@ const Words = {
     if (!words.length) return this.finish(raw);
     const known = words.filter(w => this.isKnown(w));
     const knownLong = known.filter(w => w.length >= 3);
-    const fixed = this.finish(raw);
+    let fixed = this.finish(raw);
     if (!fixed) return '';
+    // Чистка не должна съедать половину реплики. Пример со скриншота:
+    // «ГДЕ, ЧЁРТ ВОЗЬМИ, ТЫ БЫЛ ЧТО ТЫ МОЖЕШЬ ЗНАТЬ!» осталось как
+    // «ЕШЬ ЗНАТЬ!» — слова не из словаря выбросились, и смысл пропал.
+    // Если выброшено больше 40 % слов, оставляем реплику целиком (словарь
+    // только чинит слова, но ничего не выкидывает).
+    const before = (raw.match(/[А-Яа-яЁё]{2,}/g) || []).length;
+    const after = (fixed.match(/[А-Яа-яЁё]{2,}/g) || []).length;
+    if (before >= 3 && after < before * 0.6) {
+      const kept = this.finish(raw, true);
+      if (kept) fixed = kept;
+    }
     if (knownLong.length >= 1) return fixed;                     // есть настоящие слова
 
     // Одна-две буквы — это реплика только если это настоящее короткое слово:
