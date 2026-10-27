@@ -620,6 +620,7 @@ const OCR = {
     // Ровно как в KomaOcrEngine: blank(0) + символы словаря + пробел.
     this.dict = [''].concat(lines).concat([' ']);
     this.ready = true; this.engine = 'ready'; this.reason = '';
+    this.stamp = (this.stamp || 0) + 1;      // см. _textCache: кэш живёт до смены модели
     return true;
   },
   /** Короткая строка для интерфейса. */
@@ -870,6 +871,42 @@ function textLines(imgCanvas, box, R) {
  * Ключ — сам объект canvas, поэтому наклон (новый canvas) кэш не путает.
  */
 let _probsCache = { canvas: null, res: null };
+/**
+ * Кэш «кроп → текст». Полосы чтения перекрываются (запас bandOverlap), поэтому
+ * одна и та же строка попадает в две полосы и читается дважды — а это 78 мс на
+ * вызов модели. Ключ — отпечаток самих пикселей (дешёвая выборка, ~0,3 мс) и
+ * настройки, влияющие на чтение. При смене модели кэш забывается (OCR.stamp).
+ */
+const _textCache = new Map();
+const TEXT_CACHE_MAX = 128;
+function _cropKey(cv, wide, R) {
+  // Отпечаток берём с МАЛЕНЬКОЙ копии (8×8): getImageData по всему кропу стоил
+  // дороже самого чтения (замер: 5,4 с → 18,1 с на страницу), а 64 пикселя —
+  // доли миллисекунды и достаточно, чтобы отличить строку от строки.
+  let h = 2166136261 >>> 0;
+  try {
+    const thumb = makeCanvas(8, 8);
+    const tg = thumb.getContext('2d', { willReadFrequently: true });
+    tg.imageSmoothingEnabled = true; tg.imageSmoothingQuality = 'low';
+    tg.drawImage(cv, 0, 0, 8, 8);
+    const d = tg.getImageData(0, 0, 8, 8).data;
+    for (let i = 0; i < d.length; i += 4) { h ^= d[i]; h = Math.imul(h, 16777619) >>> 0; }
+  } catch (e) { return null; }
+  return h + ':' + cv.width + 'x' + cv.height + ':' + (wide ? 1 : 0) +
+    ':' + (R.extCrop === false ? 0 : (R.extCrop === 'light' ? 1 : 2)) +
+    ':' + (R.decodeVariants === false ? 0 : 1) + ':' + (OCR.stamp || 0);
+}
+function textCacheGet(key) {
+  if (!key || !_textCache.has(key)) return null;
+  const v = _textCache.get(key);
+  _textCache.delete(key); _textCache.set(key, v);      // освежаем порядок (LRU)
+  return v;
+}
+function textCachePut(key, val) {
+  if (!key) return;
+  _textCache.set(key, val);
+  if (_textCache.size > TEXT_CACHE_MAX) _textCache.delete(_textCache.keys().next().value);
+}
 async function recProbs(cropCanvas, sess) {
   const model = sess || OCR.rec;
   if (!model) return null;
@@ -1728,6 +1765,9 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     c.getContext('2d', { willReadFrequently: true })
       .drawImage(canvas, ln.left, ln.top, w, h, 0, 0, w, h);
     crops++;
+    const ckey = _cropKey(c, wide, R);
+    const hit = textCacheGet(ckey);
+    if (hit) return hit;
     let [text, conf] = await decodeBetter(c, R, { wide });
     let bestScore = textScore(text, conf);
     // Титульная строка «жизнь, будучи старшей» на кропе по боксу строки читается
@@ -1788,7 +1828,9 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         }
       }
     }
-    return { text, conf };
+    const out = { text, conf };
+    textCachePut(ckey, out);
+    return out;
   };
 
   // ── Проход 1: строки внутри боксов. Сначала собираем всё, потом (зная
