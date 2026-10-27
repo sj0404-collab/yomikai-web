@@ -19,6 +19,7 @@ const DEFAULT_RULES = {
   speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
   extCrop: 'light',        // расширять кроп строки: 'light' — дешёво, true — полный перебор
   breakWords: true,        // дочинивать отдельные слова по кропу
+  pipeline: false,         // читать, не дожидаясь конца полосы (см. замер в part4.js)
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
@@ -73,6 +74,7 @@ function sanitizeRules(r) {
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
+  R.pipeline = R.pipeline === true;      // по умолчанию выключен: см. замер
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -817,6 +819,64 @@ function textScore(text, conf) {
     else junk++;
   }
   return known * 10 + weak * 4 - junk * 12 + (conf || 0) * 3;
+}
+
+/**
+ * Первая ЦЕЛАЯ реплика полосы — чтобы начать читать, не дожидаясь всей полосы.
+ *
+ * Режем не по строкам (это рвало реплики на куски: «УЖЕ ПОРА НА-» + «ЧИНАТЬ
+ * ВСТРЕЧУ,»), а по ОБЛАЧКУ: берём самый верхний бокс и все боксы, которые
+ * перекрываются с ним по вертикали, распознаём их вместе и склеиваем тем же
+ * bubblesOf, что и весь проход. Замер: 0,57 с («Быстро») / 0,70 с («Обычно»)
+ * против 1,2 / 12,3 с на всю полосу.
+ */
+async function recognizeFirstBubble(src, R, band) {
+  try {
+    const det = await detectWithRetry(src, R);
+    if (!det.boxes.length) return null;
+    // Группа = самый верхний бокс плюс то, что идёт сразу под ним без большого
+    // разрыва (строки одного облачка). Проверка «перекрываются по вертикали»
+    // не годилась: у титула строки стоят вплотную, но не перекрываются, и
+    // первая реплика выходила обрезанной («Как прожить» вместо всей строки).
+    const sorted = det.boxes.slice().sort((a, b) => a.top - b.top || a.left - b.left);
+    const first = sorted[0];
+    const h0 = Math.max(first.bottom - first.top, 1);
+    const group = [first];
+    let lastBottom = first.bottom;
+    for (let k = 1; k < sorted.length; k++) {
+      const b = sorted[k];
+      const hb = Math.max(b.bottom - b.top, 1);
+      const gap = b.top - lastBottom;
+      if (gap > h0 * 0.9) break;                       // началось другое облачко
+      if (Math.max(hb, h0) / Math.min(hb, h0) > R.mergeHeightRatio) continue;
+      group.push(b);
+      lastBottom = Math.max(lastBottom, b.bottom);
+    }
+    const regs = [];
+    for (const box of group) {
+      for (const ln of textLines(src, box, R)) {
+        if (band && !lineInBand(ln, band, band.y0 || 0)) continue;
+        const crop = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
+        crop.getContext('2d', { willReadFrequently: true })
+          .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top,
+            0, 0, crop.width, crop.height);
+        const wide = (ln.right - ln.left) / src.width >= 0.25;
+        let text = '', conf = 0;
+        try { [text, conf] = await decodeBetter(crop, R, { wide }); } catch (e) { continue; }
+        if (!text || conf <= R.minConfidence) continue;
+        regs.push({ text, left: ln.left / src.width, top: ln.top / src.height,
+          right: ln.right / src.width, bottom: ln.bottom / src.height });
+      }
+    }
+    if (!regs.length) return null;
+    const rtl = (R.dir || 'rtl') === 'rtl';
+    const bubble = bubblesOf(regs, rtl, R)[0];
+    const text = bubble ? Words.polish(bubble.text, R.junkRatio, bubble.confidence) : '';
+    return text && (text.match(/\p{L}/gu) || []).length >= 2 ? text : null;
+  } catch (e) {
+    console.warn('первая реплика не далась', e);
+    return null;
+  }
 }
 
 /**
