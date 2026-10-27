@@ -266,7 +266,7 @@ function bindUI() {
       return;
     }
     clearTimeout(armTimer); armedClear = false; b.textContent = 'Убрать модели';
-    for (const k of ['model:det', 'model:rec', 'model:dict', 'model:rec2']) await DB.del('kv', k);
+    for (const k of ['model:det', 'model:rec', 'model:dict', 'model:rec2', 'model:rec2charset']) await DB.del('kv', k);
     OCR.ready = false; OCR.det = OCR.rec = OCR.rec2 = null; OCR.engine = 'idle';
     await renderModels();
     toast('Модели убраны. Словарь вшит в файл — его трогать не нужно', 5000);
