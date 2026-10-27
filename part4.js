@@ -1230,6 +1230,9 @@ async function renderModels() {
     `${mark(!!det)} ${f(det, 'detection.onnx')}`,
     `${mark(!!rec)} ${f(rec, 'cyrillic.onnx')}`,
     `${mark(!!dict)} ${dict ? `cyrillic.txt: ${String(dict.v).split('\n').filter(Boolean).length} символов` : 'cyrillic.txt: нет'}`,
+    (await DB.get('kv', 'model:rec2'))
+      ? `➕ cyrillic2.onnx: ${OCR.rec2 ? 'подключён (трудные строки)' : 'есть, но ' + (OCR.rec2Note || 'не подключён')}`
+      : '➕ cyrillic2.onnx: нет (не обязательно)',
   ].join('<br>');
   const note = $('#engineNote');
   if (note) {
@@ -1329,6 +1332,11 @@ async function storeModelFiles(files) {
     if (n === 'detection.onnx') { await DB.put('kv', { k: 'model:det', v: await f.arrayBuffer() }); saved.push('detection.onnx'); }
     else if (n === 'cyrillic.onnx') { await DB.put('kv', { k: 'model:rec', v: await f.arrayBuffer() }); saved.push('cyrillic.onnx'); }
     else if (n === 'cyrillic.txt') { await DB.put('kv', { k: 'model:dict', v: await f.text() }); saved.push('cyrillic.txt'); }
+    // Второй распознаватель — по желанию. Имя файла принципиально другое,
+    // чтобы его нельзя было принять за основной.
+    else if (n === 'cyrillic2.onnx' || n === 'rec2.onnx') {
+      await DB.put('kv', { k: 'model:rec2', v: await f.arrayBuffer() }); saved.push('cyrillic2.onnx (второй распознаватель)');
+    }
   }
   if (!saved.length) {
     await renderModels();
