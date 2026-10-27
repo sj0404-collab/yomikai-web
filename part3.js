@@ -896,8 +896,10 @@ function _cropKey(cv, wide, R) {
     ':' + (R.extCrop === false ? 0 : (R.extCrop === 'light' ? 1 : 2)) +
     ':' + (R.decodeVariants === false ? 0 : 1) + ':' + (OCR.stamp || 0);
 }
+let _textHits = 0, _textMiss = 0;
 function textCacheGet(key) {
-  if (!key || !_textCache.has(key)) return null;
+  if (!key || !_textCache.has(key)) { if (key) _textMiss++; return null; }
+  _textHits++;
   const v = _textCache.get(key);
   _textCache.delete(key); _textCache.set(key, v);      // освежаем порядок (LRU)
   return v;
@@ -1218,7 +1220,7 @@ function binarizeCanvas(src, polarity, R) {
   return out;
 }
 /** Счётчики проходов: видны в шторке текста, а не «где-то в консоли». */
-const DECODE_STATS = { variantRuns: 0, variantsPicked: 0, uncoveredLines: 0, wordsTried: 0, wordsFixed: 0, hardLines: 0, rec2Picked: 0 };
+const DECODE_STATS = { byVariant: {}, variantRuns: 0, variantsPicked: 0, uncoveredLines: 0, wordsTried: 0, wordsFixed: 0, hardLines: 0, rec2Picked: 0 };
 
 /** Увеличение кропа: мелкий и рукописный текст CTC читает лучше крупнее. */
 function upscaleCanvas(src, k) {
@@ -1467,6 +1469,9 @@ async function decodeAllVariants(crop, R, first) {
     if (allWordsKnown(best.text)) break;
     await yieldUI();
   }
+  // Какой вариант в итоге выбран — по этим числам решаем, какие подготовки
+  // кропа вообще нужны (замер 27.10: на 45 строках побеждает orig в 43 случаях).
+  if (best) DECODE_STATS.byVariant[best.variant] = (DECODE_STATS.byVariant[best.variant] || 0) + 1;
   return best || ['', 0, 'none'];
 }
 
