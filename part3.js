@@ -192,6 +192,7 @@ const Words = {
   ready: false,
   rank: null,          // слово → номер строки (ранг частоты)
   size: 0,
+  ordered: true,       // список по убыванию частоты (иначе — только членство)
   KNOWN_RANK: 50000,
   COMMON_RANK: 100000,
   ALPHABET: 'абвгдежзийклмнопрстуфхцчшщъыьэюяё'.split(''),
@@ -222,12 +223,43 @@ const Words = {
       n++;
     }
     this.rank = rank; this.size = n; this.ready = n > 1000;
+    // Частотный порядок — это не украшение: KNOWN_RANK/COMMON_RANK сравнивают
+    // НОМЕР СТРОКИ. Если пользователь положит большой словарь, отсортированный
+    // по алфавиту (а 3-миллионные списки почти всегда такие), то «первыми»
+    // окажутся слова на «а», все остальные получат номер > 100 000 и весь
+    // разбор решит, что речь состоит из несуществующих слов: на замере 27.10
+    // читалка вернула НОЛЬ реплик на странице, которая до этого читалась.
+    // Поэтому проверяем порядок и честно выключаем то, что на нём держится.
+    this.ordered = this.looksOrdered(rank);
+    if (!this.ordered) {
+      this.source = (this.source || 'свой файл') + ', без частотного порядка';
+    }
     return this.ready;
   },
-  /** Слово верное, если оно из частых. */
+  /**
+   * Проверка, что словарь лежит по убыванию частоты: самые частые русские
+   * слова должны стоять в начале. Дешёвая (12 поисков), делается один раз.
+   */
+  looksOrdered(rank) {
+    // Большой список, отсортированный ПО АЛФАВИТУ, — главный признак беды:
+    // тогда номер строки ничего не говорит о частоте. Маленькие списки
+    // (свои, ручные, из тестов) не проверяем: там ранги и так почти все «частые».
+    if (rank.size < 50000) return true;
+    let prev = null, asc = 0, total = 0;
+    for (const w of rank.keys()) {
+      if (prev !== null) { total++; if (prev <= w) asc++; }
+      prev = w;
+      if (total >= 2000) break;
+    }
+    if (!total) return true;
+    return asc / total < 0.95;      // почти всё по возрастанию → это алфавит
+  },
+  /** Слово верное, если оно из частых. Без частотного порядка — «есть вообще». */
   isKnown(w) {
     if (!this.ready) return true;
-    const r = this.rank.get(w.toLowerCase());
+    const low = w.toLowerCase();
+    if (this.ordered === false) return this.rank.has(low);
+    const r = this.rank.get(low);
     return r !== undefined && r <= this.KNOWN_RANK;
   },
   /**
@@ -261,6 +293,9 @@ const Words = {
     return out;
   },
   candidate(word) {
+    // Без частотного порядка «похожее слово» выбрать нельзя: ближайшим окажется
+    // случайное редкое. Тогда лучше не править вовсе, чем испортить смысл.
+    if (this.ordered === false) return null;
     let best = null, bestRank = Infinity;
     for (const cand of this.edits1(word)) {
       const r = this.rank.get(cand);
@@ -284,6 +319,7 @@ const Words = {
    */
   isPlausible(word) {
     if (!this.ready) return true;
+    if (this.ordered === false) return this.inDict(word);
     const low = String(word).toLowerCase();
     if (this.isKnown(low)) return true;
     if (low.length < 5) return false;
@@ -403,6 +439,7 @@ const Words = {
     if (!words.length) return 1;
     let junk = 0;
     for (const w of words) {
+      if (this.ordered === false) { if (!this.rank.has(w)) junk++; continue; }
       const r = this.rank.get(w);
       if (r === undefined || r > this.COMMON_RANK) junk++;
     }
