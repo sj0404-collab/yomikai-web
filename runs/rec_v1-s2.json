@@ -1,0 +1,38 @@
+{
+ "val_cer": 0.0688836104513064,
+ "history": [
+  {
+   "epoch": 4,
+   "val_cer": 0.5523,
+   "sec": 16.4
+  },
+  {
+   "epoch": 5,
+   "val_cer": 0.2625,
+   "sec": 15.9
+  },
+  {
+   "epoch": 6,
+   "val_cer": 0.2506,
+   "sec": 15.9
+  },
+  {
+   "epoch": 7,
+   "val_cer": 0.12,
+   "sec": 15.8
+  },
+  {
+   "epoch": 8,
+   "val_cer": 0.0689,
+   "sec": 15.7
+  },
+  {
+   "epoch": 9,
+   "val_cer": 0.1021,
+   "sec": 15.6
+  }
+ ],
+ "params": 967047,
+ "charset": 517,
+ "classes": 519
+}
