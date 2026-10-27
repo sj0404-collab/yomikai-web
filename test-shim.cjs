@@ -52,4 +52,20 @@ global.localStorage = { getItem(){return null}, setItem(){} };
 global.speechSynthesis = { getVoices:()=>[], speak(){}, cancel(){}, pause(){}, resume(){}, speaking:false };
 global.indexedDB = { open(){ return {}; } };
 global.URL = { createObjectURL(){return ''}, revokeObjectURL(){} };
+// ── самопроверка шима ───────────────────────────────────────────────────────
+// Файл называется test-*, поэтому run_all.sh его запускает. Раньше он молчал,
+// и прогон считал это падением (нет строки «ALL PASSED») — 27.10 это вылезло
+// в чистом клоне. Теперь шьём: шим проверяет сам себя и печатает итог.
+let bad = 0;
+const chk = (name, cond) => { if (!cond) { console.log('FAIL', name); bad++; } else console.log('ok  ', name); };
+chk('document.createElement есть', typeof global.document.createElement === 'function');
+chk('canvas 8×8 создаётся', (() => { const c = global.document.createElement('canvas');
+  c.width = 8; c.height = 8; return c.width === 8 && !!c.getContext('2d'); })());
+chk('window.innerHeight задан', global.window && global.window.innerHeight > 0);
+chk('performance.now — число', typeof global.performance.now() === 'number');
+chk('localStorage.getItem → null', global.localStorage.getItem('нет такого') === null);
+chk('speechSynthesis.getVoices → массив', Array.isArray(global.speechSynthesis.getVoices()));
+chk('URL.createObjectURL → строка', typeof global.URL.createObjectURL({}) === 'string');
+console.log(bad ? `\n${bad} FAILED` : '\nALL PASSED');
+process.exit(bad ? 1 : 0);
 module.exports = {};
