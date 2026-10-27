@@ -521,10 +521,14 @@ async function selfCheck() {
   if (saved) { try { parsedRules = JSON.parse(saved.v) || {}; } catch (e) { console.warn(e); } }
   RULES = sanitizeRules(parsedRules);
   await Library.load();
-  await seedEmbeddedModels().catch(e => console.warn('автосида моделей', e));
   await renderModels();
   const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
   if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);
+  // Модели НЕ вшиты в файл (так файл в 2,5 раза легче). Их даёт человек через
+  // ⚙ → Модели: detection.onnx, cyrillic.onnx, cyrillic.txt.
+  if (!(await DB.get('kv', 'model:det'))) {
+    toast('Модели не загружены. Откройте ⚙ → Модели и выберите 3 файла (det, rec, словарь)', 8000);
+  }
   renderRulesInfo();
   showEnvBanner();
   await selfCheck();
