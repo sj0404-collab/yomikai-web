@@ -30,13 +30,21 @@ def read_dict():
         return f.read()
 
 
+def launch(p):
+    exe = os.environ.get('CHROME_EXE') or ''
+    kw = {'args': ['--no-sandbox', '--allow-file-access-from-files']}
+    if exe and os.path.exists(exe):
+        kw['executable_path'] = exe
+    return p.chromium.launch(**kw)
+
+
 def b64(path):
     return base64.b64encode(open(path, 'rb').read()).decode()
 
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(args=['--allow-file-access-from-files'])
+        browser = launch(p)
         page = browser.new_page(viewport={'width': 412, 'height': 800})
         logs = []
         page.on('console', lambda m: logs.append(m.text[:300]))
