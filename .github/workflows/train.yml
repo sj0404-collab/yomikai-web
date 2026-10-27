@@ -1,0 +1,50 @@
+name: обучение распознавателя
+
+# Запускается вручную: Actions → «обучение распознавателя» → Run workflow.
+# Раннер GitHub — 2 ядра CPU и 4 ГБ: модель на 1 млн параметров доходит до
+# читаемых строк за 10–20 минут. Большую koma_rec на CPU так не обучить — это
+# отдельная история про GPU (см. README раздела tools).
+on:
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: 'строк за эпоху'
+        default: '1200'
+      epochs:
+        description: 'эпох'
+        default: '8'
+      batch:
+        description: 'батч'
+        default: '16'
+      lr:
+        description: 'скорость обучения'
+        default: '0.003'
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: tools/requirements-train.txt
+      - name: Зависимости (CPU-сборка torch)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-dejavu-core
+          python3 -m pip install -q -r tools/requirements-train.txt
+      - name: Обучение + экспорт ONNX
+        run: |
+          python3 tools/bench.py --steps ${{ inputs.steps }} --epochs ${{ inputs.epochs }} \
+            --batch ${{ inputs.batch }} --lr ${{ inputs.lr }} \
+            --out runs/rec.pt --onnx models/rec.onnx
+      - name: Артефакты (модель, отчёт, журнал)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rec-model
+          path: |
+            models/*.onnx
+            runs/*
