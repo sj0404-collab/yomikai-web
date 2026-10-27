@@ -145,6 +145,16 @@ def main():
         full = bands
 
         print(f"  полос {full['scans']} · боксов {full['boxes']} · кропов {full['crops']} · всего {full['ms']} мс")
+        # Сколько кропов не пришлось читать заново: полосы перекрываются, и одна
+        # и та же строка попадает в две полосы. Кэш текста (part3.js) экономит
+        # вызов модели на 78 мс каждый.
+        try:
+            st = page.evaluate("[_textHits, _textMiss, _textCache.size]")
+            print(f"  кэш текста: попаданий {st[0]} · промахов {st[1]} · в кэше {st[2]}")
+            ds = page.evaluate("[DECODE_STATS.variantRuns, DECODE_STATS.byVariant]")
+            print(f"  подготовок кропа прогнано {ds[0]} · выбран вариант: {ds[1]}")
+        except Exception as e:
+            print('  кэш текста: статистика недоступна —', str(e)[:80])
         print('\nКАК ЧИТАЕТСЯ:')
         for i, l in enumerate(full['lines'], 1):
             mark = '  [крупный]' if l['large'] else ''
