@@ -156,6 +156,8 @@ const Reader = {
     if (!this.frames) return;
     const data = this.regions.get(i);
     if (!data) return;
+    // Рамка рисуется КАЖДОЙ распознанной строке, независимо от того, прочитана
+    // она или нет. «Прочитано» — это только цвет (класс done), а не фильтр.
     for (const line of data.lines) {
       const d = document.createElement('div');
       d.className = 'frame';
@@ -478,6 +480,11 @@ const Reader = {
     const t = String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     return i + '|' + t;
   },
+  unmarkSpoken(i, text) {
+    this.spoken.delete(this.spokenKey(i, text));
+    this.spokenDirty = true;
+    this.paintPage(i);
+  },
   markSpoken(i, text) {
     this.spoken.add(this.spokenKey(i, text));
     this.spokenDirty = true;
@@ -632,9 +639,11 @@ const TTS = {
     return avail.find(v => /^ru/i.test(v.lang)) || null;
   },
   speakLine(line, then) {
-    // Отмечаем прочитанным сразу: даже если синтез откажет, эта реплика уже
-    // «в работе» и при продолжении чтения не должна начинаться заново.
-    try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+    // «Прочитано» отмечаем ТОЛЬКО когда голос реально заговорил (onstart).
+    // Раньше отметка ставилась сразу: если синтез отказывал (нет голоса,
+    // not-allowed), строка считалась прочитанной и при продолжении чтения
+    // ПРОПУСКАЛАСЬ — то есть текст терялся. Отказ = не отмечаем, прочтём снова.
+    let marked = false;
     if (typeof speechSynthesis === 'undefined') { toast('В этой среде нет синтеза речи'); return; }
     let avail = [];
     try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
@@ -658,11 +667,17 @@ const TTS = {
     Reader.current = line;
     Reader.paintAllFrames();
     let started = false;
-    u.onstart = () => { started = true; };
+    u.onstart = () => {
+      started = true;
+      marked = true;
+      try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+    };
     u.onend = () => { if (then) then(); };
     u.onerror = (e) => {
       const code = (e && e.error) || 'unknown';
       this.speaking = false;
+      // Не заговорил — снимаем возможную отметку, иначе строка потеряется.
+      if (!started && marked) { try { Reader.unmarkSpoken(Reader.page, line.text); } catch (err) {} }
       // Молчать нельзя: раньше «голос не работает» выглядело как поломка
       // читалки, хотя браузер просто отбил озвучку.
       if (code === 'not-allowed') toast('Браузер не разрешил озвучку — нажмите ▶ ещё раз', 5000);
@@ -908,10 +923,16 @@ function renderTextSheet(i) {
       + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
       + (data.wordsFixed ? ` · дочинено слов: ${data.wordsFixed}` : '')
       + stamp;
+  // Показываем ВСЕ реплики страницы, включая уже прочитанные: прочитанное не
+  // исчезает из списка, а помечается. Иначе выглядело бы, будто текст пропал.
   $('#textOrdered').innerHTML = data.lines.length
-    ? data.lines.map((l, n) => `<div class="lineitem${l.large ? ' large' : ''}">`
-        + `<b>${n + 1}</b>${escapeHtml(l.text)}`
-        + (l.large ? '<span class="hint"> · крупный текст</span>' : '') + '</div>').join('')
+    ? data.lines.map((l, n) => {
+        const done = Reader.spoken.has(Reader.spokenKey(i, l.text));
+        return `<div class="lineitem${l.large ? ' large' : ''}">`
+          + `<b>${n + 1}</b>${done ? '<span class="done">✔ </span>' : ''}${escapeHtml(l.text)}`
+          + (l.large ? '<span class="hint"> · крупный текст</span>' : '')
+          + (done ? '<span class="hint"> · прочитано</span>' : '') + '</div>';
+      }).join('')
     : '<div class="hint">Реплик не найдено</div>';
   $('#textRaw').textContent = raw.map(r => r.text).join('\n') || '—';
 }
