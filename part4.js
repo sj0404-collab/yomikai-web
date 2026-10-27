@@ -255,10 +255,81 @@ const Reader = {
     if (c.height <= viewH * 2.2) return null;
     const vy0 = clamp(topPx * scale, 0, c.height);
     const vy1 = clamp(botPx * scale, 0, c.height);
+    // Границы полосы прилипают к пустому месту страницы: иначе экран режет
+    // облачко пополам, и реплика читалась двумя кусками на двух «страницах»
+    // («НО РАЗВЕ» отдельно от остального облачка — скриншот 17:30).
+    // Если карту «где пусто» построить нельзя (нет canvas/getImageData или
+    // страница не отрисована), полоса остаётся как была — это не повод её
+    // терять целиком.
+    let snap = { y0, y1 };
+    try { snap = this.blankSnap(i, y0, y1); } catch (e) { snap = { y0, y1 }; }
     return {
-      y0, y1, vy0, vy1,
+      y0: snap.y0, y1: snap.y1, vy0, vy1,
       key: Math.round(vy0 / 96) + ':' + Math.round(vy1 / 96),
     };
+  },
+
+  /**
+   * Карта «где на странице пусто»: по строке берём самую тёмную точку. Нужна,
+   * чтобы границы полосы не проходили через текст.
+   */
+  inkRows(i) {
+    if (this._ink && this._ink.page === i && this._ink.canvas === this.canvases[i]) return this._ink;
+    const c = this.canvases[i];
+    if (!c || !c.width) return null;
+    try {
+    const w = 48;
+    const h = Math.max(1, Math.round(c.height * (w / c.width)));
+    const t = makeCanvas(w, h);
+    const g = t.getContext('2d', { willReadFrequently: true });
+    g.drawImage(c, 0, 0, w, h);
+    let data;
+    try { data = g.getImageData(0, 0, w, h).data; } catch (e) { return null; }
+    const dark = new Uint8Array(h);
+    for (let y = 0; y < h; y++) {
+      let m = 255;
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        const v = Math.min(data[o], data[o + 1], data[o + 2]);
+        if (v < m) m = v;
+      }
+      dark[y] = m;
+    }
+    this._ink = { page: i, canvas: c, h, dark };
+    return this._ink;
+    } catch (e) { return null; }        // нет canvas/getImageData — полоса как есть
+  },
+
+  /** Сдвинуть границу полосы к ближайшей пустой строке (в пределах допуска). */
+  blankSnap(i, y0, y1) {
+    const ink = this.inkRows(i);
+    const c = this.canvases[i];
+    if (!ink || !c) return { y0, y1 };
+    const rowOf = (px) => clamp(Math.round(px / c.height * ink.h), 0, ink.h - 1);
+    const isBlank = (r) => ink.dark[clamp(r, 0, ink.h - 1)] >= 232;
+    const maxShift = Math.round(c.height / ink.h) * 6;      // ~6 строк растра
+    const find = (px, dir) => {
+      const r0 = rowOf(px);
+      for (let d = 0; d <= 6; d++) {
+        const r = dir < 0 ? r0 - d : r0 + d;
+        if (r < 0 || r >= ink.h) break;
+        if (isBlank(r)) return Math.round(r * c.height / ink.h);
+      }
+      return null;
+    };
+    let ny1 = y1, ny0 = y0;
+    const down = find(y1, +1);
+    const up = find(y1, -1);
+    // Низ двигаем вниз, если пусто близко; иначе вверх — но не меньше 55 %
+    // исходной полосы, иначе начнём резать по живому.
+    if (down != null && down - y1 <= maxShift) ny1 = Math.min(c.height, down);
+    else if (up != null && y1 - up <= maxShift && up - y0 >= (y1 - y0) * 0.55) ny1 = up;
+    const upTop = find(y0, -1);
+    const downTop = find(y0, +1);
+    if (upTop != null && y0 - upTop <= maxShift) ny0 = Math.max(0, upTop);
+    else if (downTop != null && downTop - y0 <= maxShift && ny1 - downTop >= (y1 - y0) * 0.55) ny0 = downTop;
+    if (ny1 - ny0 < 32) return { y0, y1 };
+    return { y0: ny0, y1: ny1 };
   },
 
   pageAtViewport() {
@@ -405,7 +476,11 @@ const Reader = {
       }, band, opts.det || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
-      const fresh = readingOrder(res.regions, rtl, true, RULES);
+      let fresh = readingOrder(res.regions, rtl, true, RULES);
+      // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
+      // показано «на экране», а что распознано раньше с этой же страницы.
+      const bandTop = band ? Math.round(band.y0) : 0;
+      fresh = fresh.map(l => ({ ...l, bandTop }));
       const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
       // Собираем полосы страницы: новая заменяет старую с тем же ключом,
@@ -1101,13 +1176,32 @@ function renderTextSheet(i) {
       + stamp;
   // Показываем ВСЕ реплики страницы, включая уже прочитанные: прочитанное не
   // исчезает из списка, а помечается. Иначе выглядело бы, будто текст пропал.
+  // Группируем по полосам страницы. Раньше был один общий список, и на
+  // странице 3 в нём оказалась реплика, которую видно на странице 2 — это
+  // выглядело как чужие/пропавшие реплики.
+  const bandOf = (l) => (Number.isFinite(l.bandTop) ? l.bandTop : 0);
+  const groups = new Map();
+  for (const l of data.lines) {
+    const k = bandOf(l);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(l);
+  }
+  const curTop = Reader.band && Number.isFinite(Reader.band.y0) ? Math.round(Reader.band.y0) : null;
+  let counter = 0;
   $('#textOrdered').innerHTML = data.lines.length
-    ? data.lines.map((l, n) => {
-        const done = Reader.spoken.has(Reader.spokenKey(i, l.text));
-        return `<div class="lineitem${l.large ? ' large' : ''}">`
-          + `<b>${n + 1}</b>${done ? '<span class="done">✔ </span>' : ''}${escapeHtml(l.text)}`
-          + (l.large ? '<span class="hint"> · крупный текст</span>' : '')
-          + (done ? '<span class="hint"> · прочитано</span>' : '') + '</div>';
+    ? Array.from(groups.entries()).sort((a, b) => a[0] - b[0]).map(([top, list]) => {
+        const onScreen = curTop != null && Math.abs(top - curTop) < 12;
+        const head = groups.size > 1
+          ? `<div class="hint" style="margin:6px 0 2px">${onScreen ? '● на экране' : '○ распознано раньше'}</div>`
+          : '';
+        return head + list.map((l) => {
+          counter++;
+          const done = Reader.spoken.has(Reader.spokenKey(i, l.text));
+          return `<div class="lineitem${l.large ? ' large' : ''}">`
+            + `<b>${counter}</b>${done ? '<span class="done">✔ </span>' : ''}${escapeHtml(l.text)}`
+            + (l.large ? '<span class="hint"> · крупный текст</span>' : '')
+            + (done ? '<span class="hint"> · прочитано</span>' : '') + '</div>';
+        }).join('');
       }).join('')
     : '<div class="hint">Реплик не найдено</div>';
   $('#textRaw').textContent = raw.map(r => r.text).join('\n') || '—';
