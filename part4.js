@@ -1231,8 +1231,8 @@ async function renderModels() {
     `${mark(!!rec)} ${f(rec, 'cyrillic.onnx')}`,
     `${mark(!!dict)} ${dict ? `cyrillic.txt: ${String(dict.v).split('\n').filter(Boolean).length} символов` : 'cyrillic.txt: нет'}`,
     (await DB.get('kv', 'model:rec2'))
-      ? `➕ cyrillic2.onnx: ${OCR.rec2 ? 'подключён (трудные строки)' : 'есть, но ' + (OCR.rec2Note || 'не подключён')}`
-      : '➕ cyrillic2.onnx: нет (не обязательно)',
+      ? `➕ второй распознаватель: ${OCR.rec2 ? 'подключён — ' + (OCR.rec2Note || 'трудные строки') : 'есть, но ' + (OCR.rec2Note || 'не подключён')}`
+      : '➕ второй распознаватель: нет (не обязательно)',
   ].join('<br>');
   const note = $('#engineNote');
   if (note) {
@@ -1334,8 +1334,16 @@ async function storeModelFiles(files) {
     else if (n === 'cyrillic.txt') { await DB.put('kv', { k: 'model:dict', v: await f.text() }); saved.push('cyrillic.txt'); }
     // Второй распознаватель — по желанию. Имя файла принципиально другое,
     // чтобы его нельзя было принять за основной.
-    else if (n === 'cyrillic2.onnx' || n === 'rec2.onnx') {
-      await DB.put('kv', { k: 'model:rec2', v: await f.arrayBuffer() }); saved.push('cyrillic2.onnx (второй распознаватель)');
+    else if (n === 'cyrillic2.onnx' || n === 'rec2.onnx' || n === 'line32.onnx'
+             || n === 'best_r28_final.onnx' || n === 'best_finetuned_r4.onnx' || n === 'best_base_r3.onnx') {
+      await DB.put('kv', { k: 'model:rec2', v: await f.arrayBuffer() });
+      saved.push(f.name + ' (второй распознаватель)');
+    }
+    // Азбука второго распознавателя — отдельно от основного словаря:
+    // перепутать нельзя, иначе основной распознаватель начнёт читать мусор.
+    else if (n === 'charset.txt' || n === 'line32.txt') {
+      await DB.put('kv', { k: 'model:rec2charset', v: await f.text() });
+      saved.push(f.name + ' (азбука второго распознавателя)');
     }
   }
   if (!saved.length) {
