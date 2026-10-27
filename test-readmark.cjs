@@ -82,10 +82,14 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(!R.spoken.has(R.spokenKey(0, 'ЧЕТВЁРТАЯ')), 'отметку можно снять (unmarkSpoken)');
 
   // 5. В «Тексте страницы» показываются ВСЕ реплики, прочитанные помечены
-  const html = fs.readFileSync('/home/user/koma-web/part4.js', 'utf8');
+  const html = fs.readFileSync(require('path').join(__dirname, 'part4.js'), 'utf8');
   ok(/Показываем ВСЕ реплики страницы/.test(html), 'список реплик не фильтруется по «прочитано»');
-  ok(/data\.lines\.map\(/.test(html) && /Reader\.spoken\.has/.test(html),
+  // Список теперь сгруппирован по полосам, поэтому проверяем не «.map(», а
+  // то, что в него попадают ВСЕ строки страницы и что прочитанные помечены.
+  ok(/for \(const l of data\.lines\)/.test(html) && /Reader\.spoken\.has/.test(html),
     'в списке есть и прочитанные строки, с пометкой');
+  ok(/на экране/.test(html) && /распознано раньше/.test(html),
+    'в списке видно, какие реплики на экране, а какие распознаны раньше');
 
   // 6. Рамка рисуется каждой строке, «прочитано» — только цвет
   const paint = html.slice(html.indexOf('paintPage(i) {'), html.indexOf('paintAllFrames()'));
