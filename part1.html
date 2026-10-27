@@ -76,6 +76,8 @@
   #strip .frames{position:absolute;inset:0;pointer-events:none}
   #strip .frame{position:absolute;border:1.5px solid var(--orange);border-radius:8px;pointer-events:auto}
   #strip .frame.done{border-color:#ff8a4c33}
+  /* Прочитанное в «Тексте страницы» — видно и помечено, но не спрятано */
+  .lineitem .done{color:#8fd18f}
   #strip .frame.cur{background:#ff8a4c33;border-width:2.5px;border-color:var(--orange)}
   #strip .frame.spk::after{content:"🔊";position:absolute;right:-4px;top:-22px;font-size:15px}
   /* Крупный текст (титул, каллиграфия) — другим цветом, чтобы не путать с репликой */
