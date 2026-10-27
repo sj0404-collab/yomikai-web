@@ -76,6 +76,8 @@
   #strip .frames{position:absolute;inset:0;pointer-events:none}
   #strip .frame{position:absolute;border:1.5px solid var(--orange);border-radius:8px;pointer-events:auto}
   #strip .frame.done{border-color:#ff8a4c33}
+  /* Прочитанное в «Тексте страницы» — видно и помечено, но не спрятано */
+  .lineitem .done{color:#8fd18f}
   #strip .frame.cur{background:#ff8a4c33;border-width:2.5px;border-color:var(--orange)}
   #strip .frame.spk::after{content:"🔊";position:absolute;right:-4px;top:-22px;font-size:15px}
   /* Крупный текст (титул, каллиграфия) — другим цветом, чтобы не путать с репликой */
@@ -2280,7 +2282,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.16';
+const VERSION = 'v1.9.17';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2550,7 +2552,7 @@ const DEFAULT_RULES = {
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
   speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
-  extCrop: true,           // расширять кроп строки (это и даёт «будучи»)
+  extCrop: 'light',        // расширять кроп строки: 'light' — дешёво, true — полный перебор
   breakWords: true,        // дочинивать отдельные слова по кропу
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
@@ -2572,7 +2574,7 @@ const SPEED_PRESETS = {
   lightning: { pageSide: 960, detRetry: false, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 0, extCrop: false, breakWords: false },
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
-               uncoveredPass: false, decodeRetryBelow: 1, extCrop: false, breakWords: false },
+               uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
@@ -2604,7 +2606,7 @@ function sanitizeRules(r) {
   R.decodeVariants = R.decodeVariants !== false;
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
-  R.extCrop = R.extCrop !== false;
+  R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
@@ -3631,10 +3633,21 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
             d[i + k] = clamp(Math.round(255 * Math.pow(d[i + k] / 255, 1.3)), 0, 255);
           const out = makeCanvas(w2, h2); out.getContext('2d').putImageData(img, 0, 0); return out; })()],
       ];
+      // Режим 'light' — один дешёвый вариант (захват вверх 30 % + поля 15 %):
+      // именно он даёт «будучи», но стоит 1–2 вызова модели вместо 18.
+      const makers = (R.extCrop === 'light')
+        ? [ext(0.30, 0)]
+        : [ext(0.30, 0), ext(0.15, 0), ext(0, 0.15)];
+      const prepList = (R.extCrop === 'light')
+        ? null                        // ниже берём только pad15
+        : null;
       outer:
-      for (const maker of [ext(0.30, 0), ext(0.15, 0), ext(0, 0.15)]) {
+      for (const maker of makers) {
         if (!maker) continue;
-        for (const [name, pc] of preps(maker)) {
+        const list = (R.extCrop === 'light')
+          ? [['pad15', padCanvas(maker, 0.15)]]
+          : preps(maker);
+        for (const [name, pc] of list) {
           crops++;
           let t2, c2;
           try { [t2, c2] = await decodeCrop(pc); } catch (e) { continue; }
@@ -4531,6 +4544,8 @@ const Reader = {
     if (!this.frames) return;
     const data = this.regions.get(i);
     if (!data) return;
+    // Рамка рисуется КАЖДОЙ распознанной строке, независимо от того, прочитана
+    // она или нет. «Прочитано» — это только цвет (класс done), а не фильтр.
     for (const line of data.lines) {
       const d = document.createElement('div');
       d.className = 'frame';
@@ -4853,6 +4868,11 @@ const Reader = {
     const t = String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     return i + '|' + t;
   },
+  unmarkSpoken(i, text) {
+    this.spoken.delete(this.spokenKey(i, text));
+    this.spokenDirty = true;
+    this.paintPage(i);
+  },
   markSpoken(i, text) {
     this.spoken.add(this.spokenKey(i, text));
     this.spokenDirty = true;
@@ -5007,9 +5027,11 @@ const TTS = {
     return avail.find(v => /^ru/i.test(v.lang)) || null;
   },
   speakLine(line, then) {
-    // Отмечаем прочитанным сразу: даже если синтез откажет, эта реплика уже
-    // «в работе» и при продолжении чтения не должна начинаться заново.
-    try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+    // «Прочитано» отмечаем ТОЛЬКО когда голос реально заговорил (onstart).
+    // Раньше отметка ставилась сразу: если синтез отказывал (нет голоса,
+    // not-allowed), строка считалась прочитанной и при продолжении чтения
+    // ПРОПУСКАЛАСЬ — то есть текст терялся. Отказ = не отмечаем, прочтём снова.
+    let marked = false;
     if (typeof speechSynthesis === 'undefined') { toast('В этой среде нет синтеза речи'); return; }
     let avail = [];
     try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
@@ -5033,11 +5055,17 @@ const TTS = {
     Reader.current = line;
     Reader.paintAllFrames();
     let started = false;
-    u.onstart = () => { started = true; };
+    u.onstart = () => {
+      started = true;
+      marked = true;
+      try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+    };
     u.onend = () => { if (then) then(); };
     u.onerror = (e) => {
       const code = (e && e.error) || 'unknown';
       this.speaking = false;
+      // Не заговорил — снимаем возможную отметку, иначе строка потеряется.
+      if (!started && marked) { try { Reader.unmarkSpoken(Reader.page, line.text); } catch (err) {} }
       // Молчать нельзя: раньше «голос не работает» выглядело как поломка
       // читалки, хотя браузер просто отбил озвучку.
       if (code === 'not-allowed') toast('Браузер не разрешил озвучку — нажмите ▶ ещё раз', 5000);
@@ -5283,10 +5311,16 @@ function renderTextSheet(i) {
       + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
       + (data.wordsFixed ? ` · дочинено слов: ${data.wordsFixed}` : '')
       + stamp;
+  // Показываем ВСЕ реплики страницы, включая уже прочитанные: прочитанное не
+  // исчезает из списка, а помечается. Иначе выглядело бы, будто текст пропал.
   $('#textOrdered').innerHTML = data.lines.length
-    ? data.lines.map((l, n) => `<div class="lineitem${l.large ? ' large' : ''}">`
-        + `<b>${n + 1}</b>${escapeHtml(l.text)}`
-        + (l.large ? '<span class="hint"> · крупный текст</span>' : '') + '</div>').join('')
+    ? data.lines.map((l, n) => {
+        const done = Reader.spoken.has(Reader.spokenKey(i, l.text));
+        return `<div class="lineitem${l.large ? ' large' : ''}">`
+          + `<b>${n + 1}</b>${done ? '<span class="done">✔ </span>' : ''}${escapeHtml(l.text)}`
+          + (l.large ? '<span class="hint"> · крупный текст</span>' : '')
+          + (done ? '<span class="hint"> · прочитано</span>' : '') + '</div>';
+      }).join('')
     : '<div class="hint">Реплик не найдено</div>';
   $('#textRaw').textContent = raw.map(r => r.text).join('\n') || '—';
 }
