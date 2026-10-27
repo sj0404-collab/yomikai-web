@@ -9,7 +9,7 @@ import re
 import sys
 
 CALL_PARTS = ['part2.js', 'part3.js', 'part4.js', 'part5.js']
-DECL_PARTS = ['part0-wasm.js', 'part0-dict.js', 'part0-models.js'] + CALL_PARTS
+DECL_PARTS = ['part0-wasm.js', 'part0-dict.js'] + CALL_PARTS
 html = open('part1.html', encoding='utf-8').read()
 
 
@@ -70,6 +70,7 @@ readVisible rej resolve scanCurrent translateY buildStrip blank closeSheets open
 renderModels importZip importDir saveRules loadRules applyRules syncSettingsUI selfCheck
 showEnvBanner openBook storeModelFiles pickModels paintPage recognizePage orderBubbles scanPage rescanInDir renderTextSheet openTextSheet savePageBuffer syncPage pageAtViewport visibleBandPx
 bubblesOf bandsOf
+advanceReading markSpoken saveSpoken spokenKey unspokenInBand showStart hideStart prefetchNext waitIdle
 """.split())
 
 calls = set(re.findall(r'(?<![\w.$])([A-Za-z_$][\w$]*)\s*\(', call_src))
