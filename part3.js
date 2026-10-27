@@ -17,7 +17,7 @@ const DEFAULT_RULES = {
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
   speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
-  extCrop: true,           // расширять кроп строки (это и даёт «будучи»)
+  extCrop: 'light',        // расширять кроп строки: 'light' — дешёво, true — полный перебор
   breakWords: true,        // дочинивать отдельные слова по кропу
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
@@ -39,7 +39,7 @@ const SPEED_PRESETS = {
   lightning: { pageSide: 960, detRetry: false, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 0, extCrop: false, breakWords: false },
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
-               uncoveredPass: false, decodeRetryBelow: 1, extCrop: false, breakWords: false },
+               uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
@@ -71,7 +71,7 @@ function sanitizeRules(r) {
   R.decodeVariants = R.decodeVariants !== false;
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
-  R.extCrop = R.extCrop !== false;
+  R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
@@ -1098,10 +1098,21 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
             d[i + k] = clamp(Math.round(255 * Math.pow(d[i + k] / 255, 1.3)), 0, 255);
           const out = makeCanvas(w2, h2); out.getContext('2d').putImageData(img, 0, 0); return out; })()],
       ];
+      // Режим 'light' — один дешёвый вариант (захват вверх 30 % + поля 15 %):
+      // именно он даёт «будучи», но стоит 1–2 вызова модели вместо 18.
+      const makers = (R.extCrop === 'light')
+        ? [ext(0.30, 0)]
+        : [ext(0.30, 0), ext(0.15, 0), ext(0, 0.15)];
+      const prepList = (R.extCrop === 'light')
+        ? null                        // ниже берём только pad15
+        : null;
       outer:
-      for (const maker of [ext(0.30, 0), ext(0.15, 0), ext(0, 0.15)]) {
+      for (const maker of makers) {
         if (!maker) continue;
-        for (const [name, pc] of preps(maker)) {
+        const list = (R.extCrop === 'light')
+          ? [['pad15', padCanvas(maker, 0.15)]]
+          : preps(maker);
+        for (const [name, pc] of list) {
           crops++;
           let t2, c2;
           try { [t2, c2] = await decodeCrop(pc); } catch (e) { continue; }
