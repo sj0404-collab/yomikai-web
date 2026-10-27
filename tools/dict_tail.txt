@@ -1,0 +1,12 @@
+
+/** Разжать вшитый словарь и отдать текстом (построчно, «слово частота»). */
+async function embeddedDictText() {
+  const bytes = b64ToBytes(DICT_GZ_B64);
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('браузер не умеет DecompressionStream');
+  }
+  const buf = await new Response(
+    new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
+  ).arrayBuffer();
+  return new TextDecoder('utf-8').decode(new Uint8Array(buf));
+}
