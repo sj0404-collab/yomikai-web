@@ -20,6 +20,28 @@ tools/
   requirements.txt, requirements-train.txt
 ```
 
+## Настоящие страницы → разметка → дообучение
+
+```bash
+# 1) вырезать строки из скриншотов ровно так, как это делает читалка
+LD_LIBRARY_PATH=~/libs/usr/lib/x86_64-linux-gnu CHROME_EXE=<chrome> \
+python3 tools/make_dataset.py --pages "/home/user/uploads/Screenshot_*.jpg" \
+        --scale 1.6 --out data/lines
+# 2) посмотреть sheet-*.png (под каждым кропом печатается, что прочитала модель)
+#    и заполнить data/lines/labels.tsv: путь<TAB>текст<TAB>страница<TAB>train|val
+# 3) точка отсчёта: что умеет штатная модель на этих строках
+python3 lab/eval_in_app.py --split val
+# 4) дообучение своей модели на настоящих строках
+bash tools/train_manga.sh
+# 5) замер своей модели на тех же строках (питон, путь ONNX)
+python3 tools/eval_dataset.py --split val --onnx models/rec_manga.onnx
+```
+
+`tools/make_dataset.py` кладёт рядом `index.json` (откуда каждый кроп) и
+`sheet-*.png` — листы для разметки. Разметку `data/lines/labels.tsv` собирает
+`lab/label_lines.py`: 56 строк подписаны руками, 104 взяты по консенсусу
+(правка по словарю ничего не меняет), приложение-UI и обрезки выброшены.
+
 ## Быстрые команды
 
 ```bash
