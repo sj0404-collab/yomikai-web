@@ -65,4 +65,9 @@ ok(fresh.decodeVariants === false && fresh.uncoveredPass === false,
   'на чистой установке перебор и третий проход выключены — «Быстро» это не только слово');
 ok(fresh.bandOverlap === 0, 'запас полосы по умолчанию 0: полоса = ровно экран');
 
+
+// 9. Конвейер: по умолчанию выключен, включается осознанно
+ok(api.sanitizeRules({}).pipeline === false, 'конвейер по умолчанию выключен');
+ok(api.sanitizeRules({ pipeline: true }).pipeline === true, 'конвейер можно включить');
+
 console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
