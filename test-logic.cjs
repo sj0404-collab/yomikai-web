@@ -1,9 +1,13 @@
-require('/tmp/shim.js');
+// Логика читалки без браузера. Пути — ТОЛЬКО внутри репозитория: раньше тест
+// тянул /tmp/shim.js и /tmp/all.js, и в чистом клоне падал с MODULE_NOT_FOUND
+// (замечено 27.10 при сверке клона). Источник — те же part2.js/part3.js, что
+// идут в сборку.
+require('./shim.js');
 const fs=require('fs');
-const src = fs.readFileSync('/tmp/all.js','utf8');
-// вырезаем только части 2-3 (без UI/boot)
-const cut = src.indexOf('/* ───────────────────────── 8. Читалка');
-const code = src.slice(0, cut);
+const path=require('path');
+const here = __dirname;
+const code = ['part2.js','part3.js']
+  .map((f) => fs.readFileSync(path.join(here, f), 'utf8')).join('\n');
 const run = new Function(code + `
   return { inkThreshold, greyInkRange, components, textLines, bandsOf, bubblesOf,
     readingOrder, splitPanels, applyWordFixes, cutAtBandBottom, sanitizeRules, DEFAULT_RULES,
