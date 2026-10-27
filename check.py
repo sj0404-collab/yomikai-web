@@ -70,7 +70,7 @@ readVisible rej resolve scanCurrent translateY buildStrip blank closeSheets open
 renderModels importZip importDir saveRules loadRules applyRules syncSettingsUI selfCheck
 showEnvBanner openBook storeModelFiles pickModels paintPage recognizePage orderBubbles scanPage rescanInDir renderTextSheet openTextSheet savePageBuffer syncPage pageAtViewport visibleBandPx
 bubblesOf bandsOf
-canFlush onBubble readWhileScanning
+canFlush onBubble readWhileScanning getComputedStyle
 advanceReading markSpoken saveSpoken spokenKey unspokenInBand showStart hideStart prefetchNext waitIdle
 """.split())
 
