@@ -402,7 +402,7 @@ const Reader = {
           : `Распознаём… ${Math.min(total, n)}/${total}`;
         $('#scanBadge').textContent = t;
         if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
-      }, band, opts.onBubble || null);
+      }, band, opts.det || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
       const fresh = readingOrder(res.regions, rtl, true, RULES);
@@ -454,8 +454,8 @@ const Reader = {
   },
 
   /** Совместимость: распознать текущую страницу. */
-  async scanCurrent(force = false, onBubble = null) {
-    return this.scanPage(this.page, { force, onBubble });
+  async scanCurrent(force = false, preDet = null) {
+    return this.scanPage(this.page, { force, det: preDet });
   },
 
   /** Карточка «ничего не запущено»: показывается, пока страница не распознана. */
@@ -556,6 +556,89 @@ const Buffer = {
 };
 
 /* ───────────────────────── 10. Озвучка ───────────────────────── */
+/**
+ * «Где читает»: лента над плеером, где каждая буква — отдельный элемент, а
+ * текущая подсвечена тенью.
+ *
+ * Точную привязку «буква ↔ звук» браузер не даёт: SpeechSynthesis шлёт
+ * onboundary только по границам СЛОВ (и только часть движков). Поэтому так:
+ * границы слов дают точку отсчёта, а внутри слова тень идёт по оценке —
+ * ≈14 символов в секунду при rate 1.0 (замер по длительности реплик:
+ * «УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ, ТАК ЧТО ЕЁ ВЫСОЧЕСТВО, ДОЛЖНО БЫТЬ, ПРИБЫЛА» —
+ * 78 знаков, 5,6 с). Как только приходит новая граница, позиция выравнивается
+ * по ней, поэтому расхождение не копится.
+ */
+const SpeakCursor = {
+  el: null, chars: [], pos: 0, t0: 0, rate: 1, exact: false, timer: 0, on: false,
+  cps() { return 14 * (this.rate || 1); },
+  start(text, rate) {
+    const el = $('#nowLine');
+    if (!el) return;
+    this.el = el; this.rate = rate || 1; this.pos = 0; this.exact = false; this.on = true;
+    this.t0 = performance.now();
+    el.innerHTML = Array.from(text).map((ch, i) =>
+      `<span class="ch" data-i="${i}">${escapeHtml(ch)}</span>`).join('');
+    this.chars = Array.from(el.querySelectorAll('.ch'));
+    el.style.display = 'block';
+    clearInterval(this.timer);
+    this.timer = setInterval(() => this.tick(), 50);
+    this.paint();
+  },
+  /** Точка отсчёта из onboundary: charIndex — начало слова. */
+  boundary(charIndex) {
+    if (!this.on || typeof charIndex !== 'number' || charIndex < 0) return;
+    this.exact = true;
+    this.pos = Math.min(charIndex, this.chars.length);
+    this.pos0 = this.pos;
+    this.t0 = performance.now();
+    this.paint();
+  },
+  tick() {
+    if (!this.on || !this.chars.length) return;
+    if (!this.exact) {
+      const done = (performance.now() - this.t0) / 1000 * this.cps();
+      this.pos = Math.min(this.chars.length, Math.round(done));
+      this.paint();
+    } else {
+      // После границы слова внутри слова ведём тень по оценке.
+      const guess = this.pos0 + (performance.now() - this.t0) / 1000 * this.cps();
+      const p = Math.min(this.chars.length, Math.round(guess));
+      if (p !== this.pos) { this.pos = p; this.paint(); }
+    }
+  },
+  paint() {
+    for (let i = 0; i < this.chars.length; i++) {
+      const c = this.chars[i];
+      const k = i < this.pos ? 'ch sp' : (i === this.pos ? 'ch cur' : 'ch');
+      if (c.className !== k) c.className = k;
+    }
+    // Лента — одна строка в высоту (меньше закрывает страницу), поэтому
+    // за текущей буквой она подкручивается сама: видно именно ту строку, где
+    // сейчас звучит голос.
+    if (this.el && this.pos > 0 && this.chars[this.pos]) {
+      const c = this.chars[this.pos];
+      const y = c.offsetTop || 0;
+      const h = c.offsetHeight || 17;
+      // Прокрутка кратна высоте строки: иначе снизу торчала половина
+      // следующей строки — выглядело как обрезанный текст.
+      // Высота строки — из line-height: у символа offsetHeight округляется
+      // по-разному, и строки «плыли» на пару пикселей.
+      let rowH = h;
+      try { rowH = parseFloat(getComputedStyle(this.el).lineHeight) || h; } catch (e) { rowH = h; }
+      const top = Math.floor(y / rowH) * rowH;
+      if (top < this.el.scrollTop || top + h > this.el.scrollTop + this.el.clientHeight) {
+        this.el.scrollTop = Math.max(0, top);
+      }
+    }
+  },
+  stop() {
+    this.on = false;
+    clearInterval(this.timer); this.timer = 0;
+    if (this.el) { this.el.style.display = 'none'; this.el.innerHTML = ''; }
+    this.chars = [];
+  },
+};
+
 const TTS = {
   voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0, primed: false,
   init() {
@@ -581,6 +664,7 @@ const TTS = {
   },
   stop() {
     this.stopped = true; this.speaking = false; this.queue = [];
+    try { SpeakCursor.stop(); } catch (e) { /* ленты ещё нет */ }
     speechSynthesis.cancel();
     Reader.current = null;
     Reader.paintAllFrames();
@@ -604,7 +688,20 @@ const TTS = {
     const top = r.top + line.top * r.height;
     const bottom = r.top + line.bottom * r.height;
     const safeTop = sr.top + 72;                        // шапка + бейдж
-    const safeBottom = sr.top + sr.height - 170;         // панель чтения + нижняя
+    // Нижняя граница учитывает ленту «где читает»: она висит над панелью
+    // плеера, и без поправки реплика оказывалась ровно под ней (правило:
+    // UI не должен закрывать облачко).
+    // Высоту ленты берём, только если она реально показана и это лента, а не
+    // случайный нулевой/растянутый элемент: иначе безопасная зона схлопывалась
+    // и читалка дёргала страницу на каждой реплике.
+    let nowH = 0;
+    try {
+      const ln = $('#nowLine');
+      const shown = ln && ln.style && ln.style.display && ln.style.display !== 'none';
+      const lr = ln && ln.getBoundingClientRect ? ln.getBoundingClientRect() : null;
+      if (shown && lr && lr.height > 0 && lr.height < 120) nowH = lr.height + 8;
+    } catch (e) { nowH = 0; }
+    const safeBottom = sr.top + sr.height - 170 - nowH;  // панель чтения + лента
     if (top >= safeTop && bottom <= safeBottom) return;
     const want = sr.top + sr.height * 0.3;               // реплику — в верхнюю треть
     sc.scrollTo({ top: Math.max(0, sc.scrollTop + top - want), behavior: 'smooth' });
@@ -671,11 +768,19 @@ const TTS = {
       started = true;
       marked = true;
       try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+      // Тень по буквам стартует вместе со звуком, а не по нажатию кнопки.
+      try { SpeakCursor.start(line.text, this.rate); } catch (e) { /* не критично */ }
     };
-    u.onend = () => { if (then) then(); };
+    // Точная граница слова (Chrome отдаёт её как name:'word').
+    u.onboundary = (e) => {
+      try { SpeakCursor.boundary((e && e.charIndex) || 0); } catch (err) { /* ignore */ }
+    };
+    u.onend = () => { try { SpeakCursor.stop(); } catch (e) {}
+      if (then) then(); };
     u.onerror = (e) => {
       const code = (e && e.error) || 'unknown';
       this.speaking = false;
+      try { SpeakCursor.stop(); } catch (err) {}
       // Не заговорил — снимаем возможную отметку, иначе строка потеряется.
       if (!started && marked) { try { Reader.unmarkSpoken(Reader.page, line.text); } catch (err) {} }
       // Молчать нельзя: раньше «голос не работает» выглядело как поломка
@@ -725,7 +830,7 @@ const TTS = {
       }
       if (OCR.ready) {
         toast('Сначала распознаю страницу…', 4000);
-        await Reader.scanCurrent(false);
+        await Reader.scanCurrent(false, det);        // детекция уже есть — второй раз не гоняем
       }
     }
     const lines = Reader.unspokenInBand();
@@ -774,9 +879,13 @@ const TTS = {
         .drawImage(c, 0, y0, c.width, y1 - y0, 0, 0, c.width, y1 - y0);
       return out;
     })();
-    let first = null;
+    let first = null, det = null;
     if (bandCanvas && OCR.ready) {
-      first = await recognizeFirstBubble(bandCanvas, RULES, band ? { ...band, y0: 0 } : null).catch(() => null);
+      try {
+        det = await detectWithRetry(bandCanvas, RULES);           // ~450 мс
+        first = await recognizeFirstBubble(bandCanvas, RULES,
+          band ? { ...band, y0: 0 } : null, det).catch(() => null);  // +100…300 мс
+      } catch (e) { console.warn('конвейер: детектор не сработал', e); det = null; }
     }
     if (first) {
       $('#playStatus').textContent = '';
