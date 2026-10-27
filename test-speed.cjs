@@ -67,7 +67,7 @@ ok(fresh.bandOverlap === 0, 'запас полосы по умолчанию 0: 
 
 
 // 9. Конвейер: по умолчанию выключен, включается осознанно
-ok(api.sanitizeRules({}).pipeline === false, 'конвейер по умолчанию выключен');
-ok(api.sanitizeRules({ pipeline: true }).pipeline === true, 'конвейер можно включить');
+ok(api.sanitizeRules({}).pipeline === true, 'конвейер включён по умолчанию (нужна скорость)');
+ok(api.sanitizeRules({ pipeline: false }).pipeline === false, 'конвейер отключается правилом');
 
 console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
