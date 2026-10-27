@@ -1,0 +1,5 @@
+# Всё для обучения и экспорта. CPU-сборка torch — GPU-обучения у нас нет.
+--extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements.txt
+torch==2.9.1
+onnxscript>=0.1         # нужен новому экспортёру torch.onnx (torch >= 2.6)
