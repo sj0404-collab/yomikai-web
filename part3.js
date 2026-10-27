@@ -19,7 +19,7 @@ const DEFAULT_RULES = {
   speed: 'fast',           // Молния | Быстро | Обычно | Тщательно (см. SPEED_PRESETS)
   extCrop: 'light',        // расширять кроп строки: 'light' — дешёво, true — полный перебор
   breakWords: true,        // дочинивать отдельные слова по кропу
-  pipeline: false,         // читать, не дожидаясь конца полосы (см. замер в part4.js)
+  pipeline: true,          // читать, не дожидаясь конца полосы (замер в part4.js)
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
@@ -39,6 +39,12 @@ const DEFAULT_RULES = {
 const SPEED_PRESETS = {
   lightning: { pageSide: 960, detRetry: false, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 0, extCrop: false, breakWords: false },
+  // «Быстро» — это и есть авто: самый дешёвый путь (extCrop 'light', без
+  // перебора) для всего, включая каллиграфию. Второй проход по крупному
+  // тексту пробовали включить и здесь — на титуле он дал дубль «жизнь, Оцачит
+  // старшей сестрой тирана» и 14,4 с вместо 4,3 с (кропов 88 против 25),
+  // то есть хуже и в шесть раз медленнее. Предел возможного для этого шрифта —
+  // именно этот путь: текст верный («жизнь, будучи старшей сестрой тирана»).
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
@@ -74,7 +80,7 @@ function sanitizeRules(r) {
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
-  R.pipeline = R.pipeline === true;      // по умолчанию выключен: см. замер
+  R.pipeline = R.pipeline !== false;     // конвейер включён; [{pipeline:false}] выключает
   num('largeMinWidth', 0.05, 0.6);
   num('decodeRetryBelow', 0, 6);                           // <N букв → пробуем бинаризации
   num('junkRatio', 0, 1);                                  // 0 — фильтр выключен
@@ -830,9 +836,9 @@ function textScore(text, conf) {
  * bubblesOf, что и весь проход. Замер: 0,57 с («Быстро») / 0,70 с («Обычно»)
  * против 1,2 / 12,3 с на всю полосу.
  */
-async function recognizeFirstBubble(src, R, band) {
+async function recognizeFirstBubble(src, R, band, preDet) {
   try {
-    const det = await detectWithRetry(src, R);
+    const det = preDet || await detectWithRetry(src, R);
     if (!det.boxes.length) return null;
     // Группа = самый верхний бокс плюс то, что идёт сразу под ним без большого
     // разрыва (строки одного облачка). Проверка «перекрываются по вертикали»
@@ -1088,7 +1094,7 @@ function lineInBand(ln, band, y0) {
   return over >= h * 0.4;
 }
 
-async function recognizePage(imgCanvas, R, onProgress, band) {
+async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   const t0 = performance.now();
   DECODE_STATS.variantRuns = 0; DECODE_STATS.variantsPicked = 0; DECODE_STATS.uncoveredLines = 0; DECODE_STATS.wordsTried = 0; DECODE_STATS.wordsFixed = 0;
   // band = {y0, y1} в пикселях исходного кадра: распознаём ТОЛЬКО видимую
@@ -1109,7 +1115,9 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
   // ── Проход 1: детектор. Если он не нашёл ничего, пробуем другие подготовки
   // кадра: бледная каллиграфия и светлый текст на белом фоне не ловятся на
   // исходном кадре, а на контрастном/бинаризованном находятся.
-  const det = await detectWithRetry(src, R);
+  // Конвейер уже прогнал детектор, чтобы начать читать раньше, — второй раз
+  // его не гоняем (это ~450 мс на полосу). Кадр детектора тот же: полоса.
+  const det = preDet || await detectWithRetry(src, R);
   const detMs = Math.round(performance.now() - t0);
   const t1 = performance.now();
   const W = src.width, H = src.height;
@@ -1249,6 +1257,10 @@ async function recognizePage(imgCanvas, R, onProgress, band) {
     // Текст не теряем: принимаем второй проход, только если он сохранил хотя
     // бы 80 % букв (иначе из титула пропадали строки).
     if (!alt.items.length || lettersOf(alt.items.map(i => i.text)) < letters * 0.8) continue;
+    // Если второй проход набрал заметно больше букв, это почти всегда дубль
+    // («… будучи старшей жизнь, Оцачит старшей сестрой тирана»), а не более
+    // точное чтение: такую замену не берём.
+    if (lettersOf(alt.items.map(i => i.text)) > letters * 1.3) continue;
     if (qualityOf(alt.items.map(i => i.text)) > qualityOf(firstTexts)) entry.items = alt.items;
   }
   for (const entry of byBox) for (const item of entry.items) regions.push(item);
