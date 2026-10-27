@@ -1,0 +1,208 @@
+{
+ "val_cer": 0.06,
+ "history": [
+  {
+   "epoch": 21,
+   "val_cer": 0.38,
+   "sec": 1.7
+  },
+  {
+   "epoch": 22,
+   "val_cer": 0.3,
+   "sec": 1.5
+  },
+  {
+   "epoch": 23,
+   "val_cer": 0.16,
+   "sec": 1.5
+  },
+  {
+   "epoch": 24,
+   "val_cer": 0.12,
+   "sec": 1.5
+  },
+  {
+   "epoch": 25,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 26,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 27,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 28,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 29,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 30,
+   "val_cer": 0.1,
+   "sec": 1.6
+  },
+  {
+   "epoch": 31,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 32,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 33,
+   "val_cer": 0.12,
+   "sec": 1.5
+  },
+  {
+   "epoch": 34,
+   "val_cer": 0.12,
+   "sec": 1.5
+  },
+  {
+   "epoch": 35,
+   "val_cer": 0.12,
+   "sec": 1.5
+  },
+  {
+   "epoch": 36,
+   "val_cer": 0.12,
+   "sec": 1.4
+  },
+  {
+   "epoch": 37,
+   "val_cer": 0.12,
+   "sec": 1.5
+  },
+  {
+   "epoch": 38,
+   "val_cer": 0.12,
+   "sec": 1.5
+  },
+  {
+   "epoch": 39,
+   "val_cer": 0.12,
+   "sec": 1.5
+  },
+  {
+   "epoch": 40,
+   "val_cer": 0.12,
+   "sec": 1.4
+  },
+  {
+   "epoch": 41,
+   "val_cer": 0.12,
+   "sec": 1.4
+  },
+  {
+   "epoch": 42,
+   "val_cer": 0.1,
+   "sec": 1.4
+  },
+  {
+   "epoch": 43,
+   "val_cer": 0.1,
+   "sec": 1.5
+  },
+  {
+   "epoch": 44,
+   "val_cer": 0.1,
+   "sec": 1.4
+  },
+  {
+   "epoch": 45,
+   "val_cer": 0.1,
+   "sec": 1.4
+  },
+  {
+   "epoch": 46,
+   "val_cer": 0.1,
+   "sec": 1.4
+  },
+  {
+   "epoch": 47,
+   "val_cer": 0.08,
+   "sec": 1.5
+  },
+  {
+   "epoch": 48,
+   "val_cer": 0.08,
+   "sec": 1.6
+  },
+  {
+   "epoch": 49,
+   "val_cer": 0.08,
+   "sec": 1.4
+  },
+  {
+   "epoch": 50,
+   "val_cer": 0.08,
+   "sec": 1.4
+  },
+  {
+   "epoch": 51,
+   "val_cer": 0.08,
+   "sec": 1.4
+  },
+  {
+   "epoch": 52,
+   "val_cer": 0.08,
+   "sec": 1.4
+  },
+  {
+   "epoch": 53,
+   "val_cer": 0.08,
+   "sec": 1.4
+  },
+  {
+   "epoch": 54,
+   "val_cer": 0.08,
+   "sec": 1.4
+  },
+  {
+   "epoch": 55,
+   "val_cer": 0.08,
+   "sec": 1.5
+  },
+  {
+   "epoch": 56,
+   "val_cer": 0.08,
+   "sec": 1.5
+  },
+  {
+   "epoch": 57,
+   "val_cer": 0.08,
+   "sec": 1.5
+  },
+  {
+   "epoch": 58,
+   "val_cer": 0.06,
+   "sec": 1.4
+  },
+  {
+   "epoch": 59,
+   "val_cer": 0.06,
+   "sec": 1.4
+  },
+  {
+   "epoch": 60,
+   "val_cer": 0.06,
+   "sec": 1.5
+  }
+ ],
+ "params": 967047,
+ "charset": 517,
+ "classes": 519
+}
