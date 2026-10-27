@@ -108,6 +108,16 @@
     background:#232822d9;border-radius:26px;padding:4px 6px;z-index:26;align-items:center;
     opacity:.92;box-shadow:0 6px 18px #0006}
   .floatbar .icon{padding:5px 8px;font-size:15px}
+  /* Где сейчас читает: лента над панелью плеера. Прочитанные буквы светлее,
+     текущая — с тенью-свечением. Сделано так, чтобы видеть, какая именно
+     буква звучит; лента маленькая и не закрывает облачко. */
+  .nowline{position:absolute;left:50%;transform:translateX(-50%);bottom:112%;max-width:88vw;
+    background:#1b1f1aee;border-radius:10px;padding:4px 9px;font-size:12.5px;line-height:1.35;
+    z-index:27;max-height:42px;overflow:hidden;box-shadow:0 4px 14px #0008;white-space:pre-wrap;/* низ растворяется, чтобы обрезанная строка не выглядела обрубленной */-webkit-mask-image:linear-gradient(#000 82%,transparent);mask-image:linear-gradient(#000 82%,transparent);
+    pointer-events:none}
+  .nowline .ch{color:#b9c2b6;transition:color .08s}
+  .nowline .ch.sp{color:#9fd18f}
+  .nowline .ch.cur{color:#fff;text-shadow:0 0 5px #6fa8ff,0 0 12px #6fa8ff,0 0 20px #6fa8ff88}
   .nextArrow{position:absolute;z-index:27;background:#232822e6;border-radius:28px;padding:8px 13px;
     display:flex;align-items:center;gap:6px;font-size:12px;box-shadow:0 6px 20px #0008}
   .nextArrow.down{left:50%;transform:translateX(-50%);bottom:150px}
@@ -159,6 +169,7 @@
   <div class="scanbadge" id="scanBadge">Распознаём…</div>
 
   <div class="floatbar" id="playBar" style="display:none">
+    <div class="nowline" id="nowLine" style="display:none"></div>
     <button class="icon" id="btnPause">⏸</button>
     <button class="icon" id="btnSkip">⏭</button>
     <button class="icon" id="btnStop" style="color:var(--red)">⏹</button>
