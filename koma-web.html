@@ -2302,7 +2302,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.23';
+const VERSION = 'v1.9.24';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3412,11 +3412,25 @@ function textLines(imgCanvas, box, R) {
 }
 
 /* ── распознавание кропа (KomaOcrEngine.decode) ── */
-async function decodeCrop(cropCanvas, sess) {
+/**
+ * Прогнать кроп через распознаватель и отдать его выход как есть
+ * ({T, C, p}) — вероятности по кадрам. Нужно для собственного декодера:
+ * жадный разбор берёт только argmax, а поиск по словарю смотрит на все
+ * классы кадра.
+ */
+/**
+ * Кэш выхода модели на один кроп. Жадный разбор и свой декодер смотрят ОДИН
+ * и тот же выход модели, и второй раз гонять распознаватель незачем: на
+ * замере 27.10 это была самая дорогая часть перебора (+90–150 мс на строку).
+ * Ключ — сам объект canvas, поэтому наклон (новый canvas) кэш не путает.
+ */
+let _probsCache = { canvas: null, res: null };
+async function recProbs(cropCanvas, sess) {
   const model = sess || OCR.rec;
-  if (!model) return ['', 0];
+  if (!model) return null;
+  if (!sess && _probsCache.canvas === cropCanvas && _probsCache.res) return _probsCache.res;
   let w0 = cropCanvas.width, h0 = cropCanvas.height;
-  if (w0 < 2 || h0 < 2) return ['', 0];
+  if (w0 < 2 || h0 < 2) return null;
   let src = cropCanvas;
   if (h0 > w0 * 1.8) {                    // как в paddlePage: вертикальный кроп поворачиваем
     const rot = makeCanvas(h0, w0);
@@ -3443,6 +3457,16 @@ async function decodeCrop(cropCanvas, sess) {
   const t = new ort.Tensor('float32', data, [1, 3, 48, padded]);
   const logits = await runModel(model, { [model.inputNames[0]]: t }, 'распознавание');
   const T = logits.dims[1], C = logits.dims[2], values = logits.data;   // [1,T,519]
+  const out = { T, C, p: values, width, padded };
+  if (!sess) _probsCache = { canvas: cropCanvas, res: out };
+  return out;
+}
+
+/** Жадный разбор выхода: самый вероятный класс на кадр (как было раньше). */
+async function decodeCrop(cropCanvas, sess) {
+  const res = await recProbs(cropCanvas, sess);
+  if (!res) return ['', 0];
+  const { T, C, p: values } = res;
   let text = '', prev = 0, score = 0, count = 0;
   for (let ti = 0; ti < T; ti++) {
     const base = ti * C;
@@ -3457,6 +3481,221 @@ async function decodeCrop(cropCanvas, sess) {
   await yieldUI();          // отдать кадр браузеру: бейдж и ввод не замирают
   return [text, count ? score / count : 0];
 }
+/**
+ * Наклон строки (shear). Замер 27.10 на облачке-крике: буквы там наклонены,
+ * и модель читает их хуже. Если сдвинуть строку так, чтобы штрихи стали
+ * вертикальными, восстанавливаются именно потерянные буквы:
+ *   tan −0,2: «ТЫБЫЧТО ТМО» → «ТЫ БЫЛ ЧТ ТЫМО»   (появилось «БЫЛ»)
+ *   tan −0,3: «ТАЕ ЧЕРТ ВОЗЫМИ» → «…ВОЗЬМИ»     (исправилось «ВОЗЫМИ»)
+ *   tan +0,2: «ПΛОХ?» → «ПЛОХ?»                  (латинская Λ стала Л)
+ * На ровных строках наклон только портит («ЛУЧШЕБbТЬ»), поэтому он не
+ * заменяет чтение, а идёт отдельным вариантом в перебор трудных строк.
+ */
+function shearCanvas(src, tan) {
+  const w = src.width, h = src.height;
+  const extra = Math.ceil(Math.abs(tan) * h) + 1;
+  const out = makeCanvas(w + extra, h);
+  const g = out.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#fff'; g.fillRect(0, 0, out.width, out.height);
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  // Сдвигаем построчно — так это работает и на настоящем canvas, и в тестах
+  // (мини-canvas не умеет transform, и раньше наклон падал на g.save()).
+  const base = tan > 0 ? extra : 0;
+  for (let y = 0; y < h; y++) {
+    const dx = base + Math.round(-tan * y);
+    g.drawImage(src, 0, y, w, 1, dx, y, w, 1);
+  }
+  return out;
+}
+
+/**
+ * СВОЙ ОЦЕНЩИК НАКЛОНА. Классика: если строку сдвинуть так, чтобы штрихи
+ * букв стали вертикальными, столбцы «чернил» становятся резкими, и сумма
+ * квадратов их высот растёт. Считаем по уменьшенной копии (высота 24 px),
+ * поэтому стоит меньше 2 мс — вместо двух слепых прогонов модели по 90 мс.
+ * Замер 27.10: на наклонной строке-крике находит −0,25…−0,30, на ровной — 0.
+ */
+function estimateSlant(crop, R) {
+  const h = Math.min(24, crop.height), w = Math.max(8, Math.min(320, Math.round(crop.width * h / Math.max(1, crop.height))));
+  if (w < 16 || h < 8) return 0;
+  const small = makeCanvas(w, h);
+  const g = small.getContext('2d', { willReadFrequently: true });
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  g.drawImage(crop, 0, 0, w, h);
+  const px = g.getImageData(0, 0, w, h).data;
+  const ink = new Uint8Array(w * h);
+  const thr = (R && R.binThreshold) || 128;
+  for (let i = 0; i < w * h; i++) {
+    const l = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+    ink[i] = l < thr ? 1 : 0;
+  }
+  const extra = Math.ceil(0.4 * h) + 1;
+  const sums = new Float64Array(w + 2 * extra);
+  let bestTan = 0, bestScore = -1;
+  for (let tan = -0.35; tan <= 0.351; tan += 0.05) {
+    sums.fill(0);
+    for (let y = 0; y < h; y++) {
+      const dx = extra + Math.round(-tan * y);
+      const row = y * w;
+      for (let x = 0; x < w; x++) if (ink[row + x]) sums[x + dx]++;
+    }
+    let score = 0;
+    for (let i = 0; i < sums.length; i++) score += sums[i] * sums[i];
+    if (score > bestScore) { bestScore = score; bestTan = tan; }
+  }
+  return Math.round(bestTan * 100) / 100;
+}
+
+/**
+ * Словарь для декодера: слова БЕЗ регистра, по алфавиту — чтобы за один
+ * двоичный поиск отвечать «есть ли слово, начинающееся с этих букв».
+ * Строится один раз и только когда понадобился трудный разбор, поэтому на
+ * обычных страницах не тратится ни времени, ни памяти.
+ */
+function decoderWords() {
+  if (OCR._decWords !== undefined) return OCR._decWords;
+  if (!Words.ready || !Words.rank) { OCR._decWords = null; return null; }
+  const arr = [];
+  for (const w of Words.rank.keys()) {
+    let u = '';
+    for (const ch of w) {
+      const c = ch.toUpperCase();
+      if ((c >= 'А' && c <= 'Я') || c === 'Ё') u += c;
+    }
+    if (u) arr.push(u);
+  }
+  arr.sort();
+  OCR._decWords = arr;
+  return arr;
+}
+/** Есть ли в словаре слово, начинающееся с u (двоичный поиск по алфавиту). */
+function isWordPrefix(u, arr) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const w = arr[mid];
+    if (w < u) lo = mid + 1;
+    else if (!w.startsWith(u)) hi = mid;
+    else return true;
+  }
+  return false;
+}
+
+/**
+ * СВОЙ ДЕКОДЕР: поиск лучшей строки, а не жадный разбор.
+ *
+ * Жадный разбор берёт самый вероятный класс на каждом кадре и потом склеивает
+ * повторы. Он не умеет ни «додумать» букву по словарю, ни отказаться от
+ * мусорной вставки. Здесь — CTC-поиск по нескольким вариантам (beam search):
+ * держим 10 лучших гипотез, и к вероятности кадров добавляем подсказку словаря:
+ *   • буква продолжает слово из словаря .... +1,2
+ *   • буква делает слово невозможным ..... −0,7
+ *   • пробел после слова из словаря ....... +бонус по частоте слова
+ * Пробел сразу после пробела и пустое слово не допускаются.
+ *
+ * Вес: ноль новых мегабайт — берётся уже вшитый словарь.
+ * Замер на облачках 27.10 (CER, меньше — лучше):
+ *   b1  0 % → 0 %     b2  0 % → 0 %
+ *   b3  5,9 % → 2,9 % («УЖЕ», «НЕДОСТАТОЧНО», «ПЛОХ?» вместо «УЖІ», «НЕДОСТАТОЧНС», «ПΛОХ?»)
+ *   b4 14,7 % → 14,7 % (шрифт слишком далёк от обучающего)
+ */
+function _beamLogsumexp(a, b) {
+  if (a === -Infinity) return b;
+  if (b === -Infinity) return a;
+  const m = a > b ? a : b;
+  return m + Math.log(Math.exp(a - m) + Math.exp(b - m));
+}
+function beamDecode(res, opts) {
+  const { T, C, p } = res;
+  const o = opts || {};
+  const BEAM = o.beam || 10, TOPK = o.topk || 8;
+  const BONUS = o.bonus ?? 1.2, PEN = o.pen ?? 0.7, WORD_W = o.wordW ?? 1.6;
+  const dict = OCR.dict, words = decoderWords();
+  const LN = (x) => (x > 1e-9 ? Math.log(x) : -20.72);
+  const topC = new Int32Array(TOPK + 1), topV = new Float32Array(TOPK + 1);
+  let beams = new Map([['', [0, -Infinity]]]);
+  for (let ti = 0; ti < T; ti++) {
+    const row = ti * C;
+    // частичный отбор TOPK+1 самых вероятных классов кадра
+    let n = 0;
+    for (let c = 0; c < C; c++) {
+      const v = p[row + c];
+      if (n < TOPK + 1) {
+        topC[n] = c; topV[n] = v;
+        let i = n++;
+        while (i > 0 && topV[i] > topV[i - 1]) {
+          const tv = topV[i]; topV[i] = topV[i - 1]; topV[i - 1] = tv;
+          const tc = topC[i]; topC[i] = topC[i - 1]; topC[i - 1] = tc; i--;
+        }
+      } else if (v > topV[TOPK]) {
+        topC[TOPK] = c; topV[TOPK] = v;
+        let i = TOPK;
+        while (i > 0 && topV[i] > topV[i - 1]) {
+          const tv = topV[i]; topV[i] = topV[i - 1]; topV[i - 1] = tv;
+          const tc = topC[i]; topC[i] = topC[i - 1]; topC[i - 1] = tc; i--;
+        }
+      }
+    }
+    const next = new Map();
+    const put = (pref, pb, pnb) => {
+      const cur = next.get(pref);
+      if (!cur) { next.set(pref, [pb, pnb]); return; }
+      cur[0] = _beamLogsumexp(cur[0], pb);
+      cur[1] = _beamLogsumexp(cur[1], pnb);
+    };
+    for (const [pref, sc] of beams) {
+      const tot = _beamLogsumexp(sc[0], sc[1]);
+      put(pref, tot + LN(p[row]), -Infinity);            // blank (класс 0)
+      const lastCh = pref ? pref[pref.length - 1] : '';
+      const sp = pref.lastIndexOf(' ');
+      const word = pref.slice(sp + 1);
+      for (let k = 0; k < n; k++) {
+        const c = topC[k];
+        if (c === 0) continue;
+        const ch = dict[c] ?? '';
+        if (!ch) continue;
+        let bonus;
+        if (ch === ' ') {
+          if (!word) continue;                            // «  » и пробел в начале — нет
+          if (words) {
+            // частое слово — чуть выгоднее редкого
+            const r = Words.rank.get(word.toLowerCase());
+            bonus = (r !== undefined)
+              ? WORD_W * (1 - Math.min(1, Math.log10(r + 1) / 6))
+              : -PEN * 2;
+          }
+        } else {
+          const cu = ch.toUpperCase();
+          if (words && ((cu >= 'А' && cu <= 'Я') || cu === 'Ё')) {
+            bonus = isWordPrefix((word + ch).toUpperCase(), words) ? BONUS : -PEN;
+          } else bonus = 0;
+        }
+        const lp = LN(p[row + c]) + bonus;
+        const np = pref + ch;
+        // p_b — гипотеза «последним кадром был blank», p_nb — «последним была буква».
+        // Всё, что добавляет букву, попадает в p_nb; blank — в p_b.
+        if (lastCh && ch === lastCh) {
+          put(pref, -Infinity, sc[1] + lp);              // повтор без blank — тот же префикс
+          put(np, -Infinity, sc[0] + lp);                // повтор ПОСЛЕ blank — новый префикс
+        } else {
+          put(np, -Infinity, tot + lp);
+        }
+      }
+    }
+    const arr = Array.from(next.entries())
+      .map(([pref, sc]) => ({ pref, v: _beamLogsumexp(sc[0], sc[1]) }))
+      .sort((a, b) => b.v - a.v)
+      .slice(0, BEAM);
+    beams = new Map(arr.map(x => [x.pref, next.get(x.pref)]));
+  }
+  let best = '', bestV = -Infinity;
+  for (const [pref, sc] of beams) {
+    const v = _beamLogsumexp(sc[0], sc[1]);
+    if (v > bestV) { bestV = v; best = pref; }
+  }
+  return [best.replace(/\s{2,}/g, ' ').trim(), bestV];
+}
+
 /**
  * Инверсия (негатив). Замер на облачке-крике со скриншота 17:30: модель
  * «привыкла» к чёрному тексту на белом; на негативе она читает те же строки
@@ -3908,22 +4147,29 @@ async function decodeHard(crop, R, first) {
   // увереннее). Каждый лишний вариант — это +130 мс на строку, а трудных
   // строк на странице бывает несколько: на e2e-странице перебор из трёх
   // вариантов стоил +2 с при том же результате.
-  const tries = [['bin0', binarizeCanvas(crop, 0, R)]];
+  // Один и тот же кроп читаем по-разному: жадным разбором, своим декодером
+  // со словарём, бинаризацией и (если подключён) вторым распознавателем.
+  const readAs = async (cv, sess, mode) => {
+    if (mode === 'beam') {
+      const res = await recProbs(cv, sess);
+      if (!res) return ['', 0];
+      const [text, v] = beamDecode(res);
+      return [text, Number.isFinite(v) ? Math.min(1, Math.max(0, 1 + v / 20)) : 0];
+    }
+    const isLine32 = sess && sess === OCR.rec2 && OCR.rec2Kind === 'line32';
+    if (mode === 'line32' || isLine32) return decodeLine32(cv, sess, OCR.rec2Charset, R);
+    return decodeCrop(cv, sess);
+  };
+  const bin0 = binarizeCanvas(crop, 0, R);
+  const tries = [['bin0', bin0, null, 'greedy']];
   // Второй распознаватель (⚙ → Модели → cyrillic2.onnx): «субагент» для
   // трудных строк. Работает только если его азбука совпадает с текущим
   // словарём (проверяется при загрузке), иначе молча пропускается.
-  if (OCR.rec2) tries.push(['rec2', crop, OCR.rec2]);
+  if (OCR.rec2) tries.push(['rec2', crop, OCR.rec2, 'line32']);
   let best = { text: first[0], conf: first[1], variant: 'orig' };
-  for (const [name, cv, sess] of tries) {
+  const takeVariant = async (name, cv, sess, mode) => {
     let text = '', conf = 0;
-    try {
-      // Второй распознаватель «линейного» семейства читается своим адаптером
-      // (серый 32 px, своя азбука), остальные — общим (3×48, словарь файла).
-      const isLine32 = sess && sess === OCR.rec2 && OCR.rec2Kind === 'line32';
-      [text, conf] = isLine32
-        ? await decodeLine32(cv, sess, OCR.rec2Charset, R)
-        : await decodeCrop(cv, sess);
-    } catch (e) { continue; }
+    try { [text, conf] = await readAs(cv, sess, mode); } catch (e) { return; }
     DECODE_STATS.variantRuns++;
     // Сравниваем по СЛОВАМ, а не по общей оценке. На титуле сочинения
     // (e2e, «Как прожить жизнь, будучи старшей сестрой тирана») общая оценка
@@ -3932,8 +4178,34 @@ async function decodeHard(crop, R, first) {
     // добавил хотя бы одно слово, которое словарь знает, и не добавил
     // незнакомых. Равное число знакомых и меньше мусора — тоже лучше.
     if (variantBetter(text, best.text)) best = { text, conf, variant: name };
+  };
+  for (const [name, cv, sess, mode] of tries) await takeVariant(name, cv, sess, mode);
+  // Поиск по словарю на ОРИГИНАЛЕ — самый дорогой шаг (второй прогон модели на
+  // ту же строку). Он вытаскивает «БЫЛ» и «ЧТО» на наклонном шрифте, но за
+  // страницу платим временем, поэтому ограничен тремя строками: на e2e-странице
+  // без потолка это стоило +1,0 с, с потолком — вдвое меньше.
+  if (lineStat(best.text).junk > 0
+      && (DECODE_STATS.beamExtra = (DECODE_STATS.beamExtra || 0) + 1) <= 3) {
+    await takeVariant('beam', crop, null, 'beam');
+  }
+  // Наклон — только если строка всё ещё не нравится словарю И наклон у неё
+  // действительно есть (свой оценщик, ~1 мс). Раньше здесь было два слепых
+  // прогона модели (±0,28/±0,24) — это +180 мс на каждую трудную строку.
+  if (lineStat(best.text).junk > 0) {
+    // Свой оценщик даёт ЗНАК наклона надёжно (на наклонных строках −0,1…−0,2,
+    // на ровных 0), а точную величину — нет. Поэтому знак берём у него, а
+    // величину — проверенную на замере. Один прогон вместо двух.
+    const est = estimateSlant(binarizeCanvas(crop, 0, R) || crop, R);
+    DECODE_STATS.slant = est;
+    const tan = est < -0.05 ? -0.28 : (est > 0.05 ? 0.24 : 0);
+    if (tan) {
+      const name = tan < 0 ? 'shear-' : 'shear+';
+      await takeVariant(name, shearCanvas(crop, tan), null, 'beam');
+      if (best.variant === name) DECODE_STATS.shearPicked = (DECODE_STATS.shearPicked || 0) + 1;
+    }
   }
   if (best.variant !== 'orig') DECODE_STATS.variantsPicked++;
+  if (best.variant === 'beam') DECODE_STATS.beamPicked = (DECODE_STATS.beamPicked || 0) + 1;
   if (best.variant === 'rec2') DECODE_STATS.rec2Picked = (DECODE_STATS.rec2Picked || 0) + 1;
   return best.variant === 'orig' ? null : [best.text, best.conf, best.variant];
 }
