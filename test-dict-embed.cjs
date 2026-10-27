@@ -1,4 +1,8 @@
-// Вшитый словарь: разжимается, слов 250 000, языковая починка включается сама.
+// Вшитый словарь: разжимается, 487 247 слов (250 000 частотных + 237 247
+// словоформ частых лемм), языковая починка включается сама.
+// Замер 27.10: словоформы дают тот же результат, что словарь на 1,5 млн
+// («равнодушные» больше не превращается в «равнодушным»), но файл легче на
+// 3,2 МБ и старт вдвое быстрее.
 const fs = require('fs');
 const crypto = require('crypto');
 require('./shim.js');
@@ -19,15 +23,24 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
     'словарь вшит в файл: ' + (api.DICT_GZ_B64.length / 1048576).toFixed(2) + ' МБ base64 (gzip)');
   const text = await api.embeddedDictText();
   const lines = text.split('\n').filter(l => l.trim());
-  ok(lines.length === 250000, 'слов в словаре: ' + lines.length);
+  ok(lines.length === 487247, 'слов в словаре: ' + lines.length);
   ok(lines[0].startsWith('я ') && lines[0].split(' ')[1] === '5081568', 'первое слово по частоте: «' + lines[0] + '»');
   const md5 = crypto.createHash('md5').update(text, 'utf8').digest('hex');
-  const src = crypto.createHash('md5').update(fs.readFileSync('/home/user/lab/ru_250k.txt', 'utf8'), 'utf8').digest('hex');
-  ok(md5 === src, 'разжатый словарь побайтово равен исходному ru_250k.txt');
+  const src = crypto.createHash('md5').update(fs.readFileSync('/home/user/lab/d_morph60.txt', 'utf8'), 'utf8').digest('hex');
+  ok(md5 === src, 'разжатый словарь побайтово равен исходному d_morph60.txt');
+  // Частотная часть не тронута: первые 250 000 строк — это ровно ru_250k
+  const freqPart = lines.slice(0, 250000).join('\n') + '\n';
+  const freqMd5 = crypto.createHash('md5').update(freqPart, 'utf8').digest('hex');
+  const ruMd5 = crypto.createHash('md5').update(fs.readFileSync('/home/user/lab/ru_250k.txt', 'utf8'), 'utf8').digest('hex');
+  ok(freqMd5 === ruMd5, 'первые 250 000 строк — тот же частотный список');
+  // Словоформы стоят ПОСЛЕ частотного списка (поэтому «частыми» не считаются)
+  ok(lines.indexOf('равнодушные') >= 250000, 'словоформа «равнодушные» есть: строка ' + lines.indexOf('равнодушные'));
 
   const ready = await api.Words.load();
   ok(ready === true && api.Words.source === 'вшит в файл', 'словарь подхватывается сам, без выбора файла');
-  ok(api.Words.size === 250000, 'загружено слов: ' + api.Words.size);
+  ok(api.Words.size === 487247, 'загружено слов: ' + api.Words.size);
+  ok(api.Words.inDict('равнодушные') === true, 'словоформа «равнодушные» известна словарю');
+  ok(api.Words.isKnown('равнодушные') === false, 'но «частой» не считается (порог по частоте цел)');
   ok(api.Words.finish('ПОШЕВЕАИТЬСЯ') === 'ПОШЕВЕЛИТЬСЯ', 'починка работает: ПОШЕВЕАИТЬСЯ → ' + api.Words.finish('ПОШЕВЕАИТЬСЯ'));
   ok(api.Words.polish('ол кослл алмчлс', 0.6) === '', 'мусорная строка отброшена');
   ok(api.Words.polish('УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ,', 0.6) !== '', 'настоящая реплика сохранена');
