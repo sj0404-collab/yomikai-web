@@ -6,7 +6,8 @@ const Reader = {
   regions: new Map(),          // page → {regions, boxes, ms}
   bandCache: new Map(),        // page → Map(ключ полосы → распознанное)
                                // (поле bands занято массивом полос из bandsOf)
-  spoken: new Set(),
+  spoken: new Set(),        // «стр|текст» — что уже прочитано вслух
+  spokenDirty: false,
   current: null,
   scrollBusy: false,
 
@@ -17,7 +18,10 @@ const Reader = {
     this.mode = book.mode || 'vertical';
     this.dir = book.dir || 'rtl';
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
-    this.regions.clear(); this.spoken.clear();
+    this.regions.clear();
+    // Что уже прочитано — из базы: после остановки и даже перезапуска чтение
+    // продолжается с первого непрочитанного места, а не с начала страницы.
+    this.spoken = new Set((await DB.get('kv', 'spoken:' + book.id))?.v || []);
     // Уже распознанные страницы берём из буфера: повторное открытие книги и
     // повторное чтение не должны снова стоить 10 секунд на страницу.
     let cleaned = 0;
@@ -160,7 +164,7 @@ const Reader = {
       d.style.width = ((line.right - line.left) * 100) + '%';
       d.style.height = ((line.bottom - line.top) * 100) + '%';
       const isCur = this.current && this.current.text === line.text;
-      const isDone = this.spoken.has(line.text);
+      const isDone = this.spoken.has(this.spokenKey(i, line.text));
       if (line.large) d.classList.add('large');     // титул/каллиграфия — другой цвет
       if (isCur) d.classList.add('cur');
       else if (isDone) d.classList.add('done');
@@ -346,6 +350,7 @@ const Reader = {
    */
   async scanPage(i, opts = {}) {
     this.hideStart();
+    const silent = !!opts.silent;          // предзагрузка: без бейджа и тостов
     const force = !!opts.force;
     const keepSheet = !!opts.keepSheet;
     if (i == null || i < 0 || i >= this.pages.length) return null;
@@ -365,7 +370,8 @@ const Reader = {
     const fresh = cached && (band ? (hasBands && bandMap.has(bandKey)) : !hasBands);
     if (cached && fresh && !force) { this.paintPage(i); return cached; }
 
-    if (State.scanning) {
+    if (silent && (State.scanning || State.prefetching)) return null;
+    if (State.scanning && !silent) {
       // Молча выходить нельзя: нажатие «Распознать заново» выглядело как
       // «кнопка не работает». Ставим в очередь и говорим об этом.
       State.pendingScan = { i, force, keepSheet, full: !!opts.full };
@@ -379,9 +385,11 @@ const Reader = {
     if (!c) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
     if (!OCR.ready) { openSheet('sheetModels'); toast('Сначала добавьте модели OCR (⚙)'); return null; }
 
-    State.scanning = true;
-    $('#scanBadge').classList.add('on');
-    $('#scanBadge').textContent = `Распознаём… стр. ${i + 1}`;
+    if (silent) State.prefetching = true; else State.scanning = true;
+    if (!silent) {
+      $('#scanBadge').classList.add('on');
+      $('#scanBadge').textContent = `Распознаём… стр. ${i + 1}`;
+    }
     if (keepSheet) $('#textStats').textContent = `Распознаю страницу ${i + 1} заново…`;
     try {
       const label = band ? `полосу ${i + 1}` : `страницу ${i + 1}`;
@@ -417,6 +425,7 @@ const Reader = {
       });
       await this.savePageBuffer(i);
       this.paintPage(i);
+      if (silent) return this.regions.get(i);      // молча: это фоновая загрузка
       toast(`${band ? 'Полоса' : 'Страница'} ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${fresh.length} реплик на полосе`
         + (parts.length > 1 ? `, всего ${lines.length} на странице` : '')
         + ` · ${(res.ms / 1000).toFixed(1)} с (детектор ${(res.detMs / 1000).toFixed(1)} с, `
@@ -434,6 +443,7 @@ const Reader = {
       return null;
     } finally {
       State.scanning = false;
+      State.prefetching = false;
       $('#scanBadge').classList.remove('on');
       const p = State.pendingScan;
       State.pendingScan = null;
@@ -461,6 +471,52 @@ const Reader = {
   hideStart() {
     const el = $('#startCard');
     if (el) el.style.display = 'none';
+  },
+
+  /** Ключ «прочитано»: страница + нормализованный текст (OCR может дать вариант). */
+  spokenKey(i, text) {
+    const t = String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    return i + '|' + t;
+  },
+  markSpoken(i, text) {
+    this.spoken.add(this.spokenKey(i, text));
+    this.spokenDirty = true;
+    this.paintPage(i);
+  },
+  /** Сохранить отметки «прочитано» в базу (не чаще раза в 3 с). */
+  saveSpoken() {
+    if (!this.spokenDirty || !this.book) return;
+    this.spokenDirty = false;
+    const k = 'spoken:' + this.book.id;
+    DB.put('kv', { k, v: Array.from(this.spoken).slice(-4000) }).catch(() => {});
+  },
+  /** Непрочитанные реплики текущей полосы. */
+  unspokenInBand() {
+    const i = this.page;
+    return this.visibleLines().filter(l => !this.spoken.has(this.spokenKey(i, l.text)));
+  },
+
+  /**
+   * Пока человек слушает текущую страницу, тихо распознаём следующую. Тогда
+   * переход не упирается в «Распознаём… стр. N»: страница уже готова. Раньше
+   * 14 страниц читались как 14 ожиданий подряд.
+   */
+  prefetchNext() {
+    if (!OCR.ready) return;
+    const i = this.page + 1;
+    if (i >= this.pages.length || this.regions.get(i)) return;
+    clearTimeout(this.prefetchTimer);
+    this.prefetchTimer = setTimeout(async () => {
+      if (this.stopped === undefined) return;
+      if (State.scanning || State.prefetching) return;
+      if (!this.canvases[i]) return;               // страница ещё не декодирована
+      try { await this.scanPage(i, { full: true, silent: true }); } catch (e) { /* фон — молча */ }
+    }, 700);
+  },
+  /** Дождаться конца фоновой загрузки, чтобы не запускать два распознавания. */
+  async waitIdle(ms = 25000) {
+    const t0 = Date.now();
+    while ((State.scanning || State.prefetching) && Date.now() - t0 < ms) await sleep(120);
   },
 
   /* Реплики текущей полосы — то, что читается */
@@ -576,6 +632,9 @@ const TTS = {
     return avail.find(v => /^ru/i.test(v.lang)) || null;
   },
   speakLine(line, then) {
+    // Отмечаем прочитанным сразу: даже если синтез откажет, эта реплика уже
+    // «в работе» и при продолжении чтения не должна начинаться заново.
+    try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
     if (typeof speechSynthesis === 'undefined') { toast('В этой среде нет синтеза речи'); return; }
     let avail = [];
     try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
@@ -648,22 +707,28 @@ const TTS = {
         await Reader.scanCurrent(false);
       }
     }
-    const lines = Reader.visibleLines();
-    if (!lines.length) {
+    const lines = Reader.unspokenInBand();
+    if (!lines.length && Reader.visibleLines().length) {
+      // На этой полосе всё прочитано — переходим к следующему куску.
+      return this.advanceReading();
+    }
+    if (!lines.length && !Reader.visibleLines().length) {
       if (Reader.scrollBusy) return toast('Лента едет — дочитаю, когда остановится', 3000);
       const data = Reader.regions.get(i);
       if (!data) { toast('Сначала нужно распознать страницу: ✨ Текст страницы', 4000); return; }
       toast('На этой полосе нет распознанного текста — прокрутите к репликам', 4000);
       return;
     }
-    this.queue = lines.slice();
+    this.queue = lines.slice();          // только непрочитанное на этой полосе
     this.stopped = false; this.idx = 0;
+    Reader.prefetchNext();               // следующая страница — пока слушаем эту
     $('#playBar').style.display = 'flex';
     $('#btnRead').textContent = '⏸';
     this.step();
   },
   step() {
     if (this.stopped) return;
+    Reader.saveSpoken();
     if (this.idx >= this.queue.length) {
       this.onQueueEnd();
       return;
@@ -672,17 +737,83 @@ const TTS = {
     $('#playStatus').textContent = (RULES.semiManual && State.semi) ? 'ждём прокрутки' : '';
     this.speakLine(line, () => { if (!this.stopped) this.step(); });
   },
+  /**
+   * Дальше по чтению: следующая полоса той же страницы → следующая страница →
+   * конец книги. Раньше сразу прыгали на следующую СТРАНИЦУ, и остаток
+   * длинной страницы не читался. И полосу перед чтением обязательно
+   * распознаём: «страница уже есть в памяти» не значит «есть эта полоса».
+   */
+  async advanceReading() {
+    // Страницу запоминаем на входе: прокрутка ленты может пересчитать
+    // Reader.page по геометрии, и тогда «следующая страница» перескакивала
+    // через одну (0 → 2 → 4 …).
+    let page = Reader.page;
+    for (let guard = 0; guard < 64; guard++) {
+      if (this.stopped) return;
+      const i = page;
+      Reader.page = i;
+      const bands = Reader.bands || [];
+      const ni = (Reader.bandIndex || 0) + 1;
+      if (ni < bands.length) {
+        Reader.bandIndex = ni;
+        Reader.band = bands[ni];
+        const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+        const sc = $('#strip');
+        const h = wrap ? wrap.getBoundingClientRect().height : ((Reader.pageRect(i) || {}).height || 0);
+        if (sc && wrap && h) {
+          // Абсолютная позиция полосы внутри ленты — без накопления сдвига,
+          // иначе к третьей полосе лента уезжала на следующую страницу.
+          const top = (wrap.offsetTop || 0) + bands[ni].top * h;
+          sc.scrollTo({ top, behavior: 'smooth' });
+          await sleep(420);
+        }
+        Reader.page = i;
+        await Reader.waitIdle();
+        await Reader.scanCurrent(false);        // ключ полосы другой — распознаём её
+        const un = Reader.unspokenInBand();
+        if (un.length) return this.readQueue(un);
+        continue;                                // полоса пустая/уже прочитана
+      }
+      // Полосы кончились — следующая страница
+      if (i < Reader.pages.length - 1) {
+        Reader.bandIndex = 0;
+        // И «текущая полоса» тоже должна вернуться к первой: иначе на новой
+        // странице читались реплики ПРОШЛОЙ полосы (пропускался верх страницы).
+        Reader.band = (Reader.bands || [])[0] || null;
+        Reader.scrollToPage(i + 1);
+        Reader.page = i + 1;
+        page = i + 1;                       // дальше читаем уже эту страницу
+        await sleep(320);
+        await Reader.waitIdle();
+        await Reader.scanCurrent(false);
+        const un = Reader.unspokenInBand();
+        if (un.length) return this.readQueue(un);
+        continue;
+      }
+      this.stop();
+      toast('Конец книги', 2500);
+      return;
+    }
+    this.stop();
+    toast('Дальше читать нечего', 2500);
+  },
+  /** Прочитать ровно этот список реплик (без повторного вывода полосы). */
+  readQueue(lines) {
+    this.queue = lines.slice();
+    this.idx = 0;
+    this.stopped = false;
+    $('#playBar').style.display = 'flex';
+    $('#btnRead').textContent = '⏸';
+    Reader.prefetchNext();
+    this.step();
+  },
+
   async onQueueEnd() {
     Reader.current = null;
     Reader.paintAllFrames();
     if (!RULES.semiManual || !State.semi) {
-      // обычный режим: листаем дальше и читаем следующую страницу
-      if (Reader.page < Reader.pages.length - 1) {
-        Reader.scrollToPage(Reader.page + 1);
-        await sleep(350);
-        Reader.scanCurrent(false).then(() => { if (!this.stopped) this.readVisible(); });
-      } else { this.stop(); toast('Конец книги'); }
-      return;
+      // обычный режим: следующая полоса → следующая страница → конец книги
+      return this.advanceReading();
     }
     // полуручной: встали и ждём прокрутки
     State.waitingScroll = true;
@@ -693,7 +824,7 @@ const TTS = {
 };
 
 /* ───────────────────────── 11. Состояние и интерфейс ───────────────────────── */
-const State = { scanning: false, semi: false, waitingScroll: false, autoScroll: true, pendingScan: null };
+const State = { scanning: false, prefetching: false, semi: false, waitingScroll: false, autoScroll: true, pendingScan: null };
 
 function show(id) {
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === id));
