@@ -42,19 +42,36 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
       return { y: { dims: [1, T, C], data: d } };
     },
   };
-  const crop = api.makeCanvas(40, 20);
-  for (let i = 0; i < crop.data.length; i += 4) { crop.data[i] = crop.data[i + 1] = crop.data[i + 2] = 240; crop.data[i + 3] = 255; }
+  // Каждый кроп страницы — новый canvas, поэтому и здесь берём свежий:
+  // иначе сработает кэш выхода модели на тот же canvas (он появился в v1.9.24).
+  const freshCrop = () => {
+    const c = api.makeCanvas(40, 20);
+    for (let i = 0; i < c.data.length; i += 4) {
+      c.data[i] = c.data[i + 1] = c.data[i + 2] = 240; c.data[i + 3] = 255;
+    }
+    return c;
+  };
 
   runs = 0;
-  await api.decodeBetter(crop, { ...api.DEFAULT_RULES, decodeRetryBelow: 0 });
+  await api.decodeBetter(freshCrop(), { ...api.DEFAULT_RULES, decodeRetryBelow: 0 });
   ok(runs === 1, 'при decodeRetryBelow=0 — один прогон (было бы 3)');
 
   runs = 0;
-  await api.decodeBetter(crop, { ...api.DEFAULT_RULES, decodeRetryBelow: 1 });
+  await api.decodeBetter(freshCrop(), { ...api.DEFAULT_RULES, decodeRetryBelow: 1 });
   ok(runs === 1, 'текст из букв есть → повторов нет');
 
   runs = 0;
-  await api.decodeBetter(crop, { ...api.DEFAULT_RULES, decodeRetryBelow: 5 });
+  await api.decodeBetter(freshCrop(), { ...api.DEFAULT_RULES, decodeRetryBelow: 5 });
   ok(runs === 3, 'порог 5 → первый прогон + два бинаризованных');
+
+  // Тот же самый canvas второй раз модель не гоняет: выход кэшируется и
+  // используется и жадным разбором, и своим декодером (v1.9.24).
+  const once = freshCrop();
+  runs = 0;
+  await api.decodeBetter(once, { ...api.DEFAULT_RULES, decodeRetryBelow: 0 });
+  const firstRuns = runs;
+  runs = 0;
+  await api.decodeBetter(once, { ...api.DEFAULT_RULES, decodeRetryBelow: 0 });
+  ok(firstRuns === 1 && runs === 0, 'повторный разбор того же кропа — без прогона модели');
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.log('FATAL', e.stack); process.exit(1); });
