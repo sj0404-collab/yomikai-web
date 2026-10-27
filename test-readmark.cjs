@@ -37,7 +37,7 @@ global.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
   .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
-  + '; return {Reader, TTS, sanitizeRules, setRules: (o) => { RULES = sanitizeRules(o); }};')();
+  + '; return {Reader, TTS, SpeakCursor, sanitizeRules, setRules: (o) => { RULES = sanitizeRules(o); }};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
@@ -92,5 +92,20 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(/for \(const line of data\.lines\)/.test(paint), 'рамки рисуются по всем строкам страницы');
   ok(!/filter\(.*spoken/.test(paint), 'прочитанные строки не выпадают из рамок');
 
-  console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
+  
+// ── Тень по буквам: лента «где читает» ──────────────────────────────────
+{
+  const C = api.SpeakCursor;
+  ok(typeof C.start === 'function' && typeof C.tick === 'function', 'лента где читает есть');
+  // Границы слов из onboundary: позиция встаёт ровно на начало слова.
+  C.el = { innerHTML: '', style: {}, querySelectorAll: () => [], scrollTop: 0, clientHeight: 40 };
+  C.chars = Array.from({ length: 20 }, () => ({ className: 'ch' }));
+  C.on = true; C.exact = false; C.pos = 0; C.rate = 1;
+  C.boundary(7);
+  ok(C.pos === 7 && C.exact === true, 'onboundary двигает тень на начало слова');
+  C.stop();
+  ok(C.on === false && C.chars.length === 0, 'стоп убирает ленту');
+}
+
+console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.error('FATAL', e.stack); process.exit(1); });
