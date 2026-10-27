@@ -1245,7 +1245,12 @@ async function renderModels() {
   }
   if ($('#dictState')) {
     const row = Words.ready
-      ? '✅ словарь: ' + Words.size.toLocaleString('ru-RU') + ' слов (' + (Words.source || 'вшит') + ')'
+      ? (Words.ordered === false
+        ? '⚠️ словарь: ' + Words.size.toLocaleString('ru-RU') + ' слов (' + (Words.source || 'свой файл')
+          + '). Список не по убыванию частоты, поэтому правка слов выключена: слова не '
+          + 'исправляются, но и верные не портятся. Чтобы правка работала, нужен словарь '
+          + 'по частоте (как ru_250k).'
+        : '✅ словарь: ' + Words.size.toLocaleString('ru-RU') + ' слов (' + (Words.source || 'вшит') + ')')
       : '❌ словарь не разжался — мусорные строки попадут в озвучку';
     $('#dictState').innerHTML = row;
   }
