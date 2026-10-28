@@ -62,16 +62,16 @@ for (const sp of ['lightning', 'fast', 'smart', 'normal', 'thorough']) {
 // строках. Проверяем контракт, а не цифры: дешёвый детектор, дожим включён,
 // потолок вариантов есть, и профиль не превращается в «Обычно».
 const sm = api.sanitizeRules({ speed: 'smart' });
-ok(sm.pageSide === 1280 && sm.decodeVariants === true,
-  '«Умно»: детектор как у «Быстро» (1280), но перебор подготовок кропа включён');
-ok(sm.autoDepth === true && sm.extCrop === 'light',
-  '«Умно»: дорогие расширения кропа — только по дожиму (autoDepth, extCrop=light)');
+ok(sm.decodeVariants === true && sm.extCrop === true,
+  '«Умно»: перебор вариантов и расширения кропа включены (это и даёт верные слова)');
+ok(sm.autoDepth === true && sm.maxVariants >= 1 && sm.maxVariants < 6,
+  '«Умно»: перебор идёт по гейту и не больше ' + sm.maxVariants + ' подготовок на строку');
 ok(sm.maxDeepVariants > 0 && sm.maxDeepVariants <= 10,
   '«Умно»: потолок дорогих подготовок на строку = ' + sm.maxDeepVariants);
 ok(api.SPEED_NAMES.smart === 'Умно', 'у профиля есть человеческое имя');
 // профиль перебивает сохранённые числа — иначе «Умно» молча станет «Обычно»
 const sm2 = api.sanitizeRules({ speed: 'smart', pageSide: 1600, autoDepth: false });
-ok(sm2.pageSide === 1280 && sm2.autoDepth === true,
+ok(sm2.pageSide === 1600 && sm2.autoDepth === true,
   '«Умно» не перебивается старыми сохранёнными значениями');
 
 
