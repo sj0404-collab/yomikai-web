@@ -18,8 +18,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.WebViewAssetLoader
 import java.io.File
 import java.io.FileInputStream
@@ -38,7 +36,7 @@ import java.io.IOException
  *    потому что в WebView это запрещено CORS — мост KomaLens обходит запрет,
  *    не открывая никаких сайтов и вкладок.
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : android.app.Activity() {
 
     private lateinit var web: WebView
     private lateinit var updater: Updater
@@ -48,19 +46,8 @@ class MainActivity : AppCompatActivity() {
         try { packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0" } catch (e: Exception) { "1.0" }
     }
 
-    private val pickFiles = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val cb = fileCallback ?: return@registerForActivityResult
-        fileCallback = null
-        val data = res.data
-        val uris: Array<Uri>? = when {
-            data == null -> null
-            (data.clipData?.itemCount ?: 0) > 1 -> (0 until data.clipData!!.itemCount)
-                .map { data.clipData!!.getItemAt(it).uri }.toTypedArray()
-            data.data != null -> arrayOf(data.data!!)
-            else -> null
-        }
-        cb.onReceiveValue(uris)
-    }
+    // Выбор файлов моделей: три файла сразу, через системный «Файлы».
+    private val RC_FILES = 1001
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -137,7 +124,7 @@ class MainActivity : AppCompatActivity() {
                         type = "*/*"
                         putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)   // три файла моделей сразу
                     }
-                    pickFiles.launch(Intent.createChooser(intent, "Выберите файлы моделей"))
+                    startActivityForResult(Intent.createChooser(intent, "Выберите файлы моделей"), RC_FILES)
                     true
                 } catch (e: Exception) {
                     fileCallback = null
@@ -198,6 +185,23 @@ class MainActivity : AppCompatActivity() {
                 null
             }
         }
+    }
+
+    /** Итог системного выбора файлов — отдаём странице. */
+    @Deprecated("framework API: ActivityResult стартует библиотеку, а нам хватает этого")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != RC_FILES) return
+        val cb = fileCallback ?: return
+        fileCallback = null
+        val uris: Array<Uri>? = when {
+            data == null -> null
+            (data.clipData?.itemCount ?: 0) > 1 -> (0 until data.clipData!!.itemCount)
+                .map { data.clipData!!.getItemAt(it).uri }.toTypedArray()
+            data.data != null -> arrayOf(data.data!!)
+            else -> null
+        }
+        cb.onReceiveValue(uris)
     }
 
     override fun onBackPressed() {

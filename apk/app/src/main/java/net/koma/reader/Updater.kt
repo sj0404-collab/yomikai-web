@@ -95,7 +95,7 @@ class Updater(private val ctx: Context, private val assetsVersion: String) {
             GlensEngine.log("обновлено до $ver (${bytes.size} Б из $tag)")
             out.put("updated", true).put("version", ver).put("bytes", bytes.size)
         } catch (e: Throwable) {
-            out.put("reason", String(e.message ?: e.javaClass.simpleName))
+            out.put("reason", (e.message ?: e.javaClass.simpleName))
         }
         return out
     }

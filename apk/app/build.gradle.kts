@@ -43,8 +43,10 @@ android {
 }
 
 dependencies {
+    // Только то, что нужно: WebViewAssetLoader. Ни appcompat, ни material —
+    // интерфейс целиком рисует сама читалка, а меньше зависимостей = быстрее
+    // и меньше АПК.
     implementation("androidx.webkit:webkit:1.11.0")
-    implementation("androidx.appcompat:appcompat:1.7.0")
 }
 
 /**
