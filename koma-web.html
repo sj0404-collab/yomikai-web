@@ -26,6 +26,10 @@
   .btn{display:inline-flex;align-items:center;gap:6px;padding:9px 14px;border-radius:12px;
     background:var(--panel2);font-size:13px}
   .btn.primary{background:#6c5ce7}
+  /* Выбранный движок: раньше подсветка класса .hot была только у иконочных
+     кнопок (.icon.hot), и на .btn она не работала вовсе — выбранный движок
+     выглядел так же, как невыбранный. */
+  .btn.hot{background:#4b3f7a;box-shadow:inset 0 0 0 1px #8a7be0}
   .btn.warn{background:#7a3030}
   .btn:disabled{opacity:.45}
   .scroll{flex:1;overflow:auto;-webkit-overflow-scrolling:touch}
@@ -272,7 +276,7 @@
     <div id="ortState" class="kv hint"></div>
     <div id="engineNote" class="hint" style="display:none;color:#ffd2d2;margin-top:6px"></div>
     <div id="dictState" class="hint" style="margin-top:6px"></div>
-    <div class="hint" style="margin-top:10px">
+    <div class="hint" id="privacyNote" style="margin-top:10px">
       Распознавание целиком в браузере: ни один кадр никуда не отправляется.
       Модели хранятся в IndexedDB этого сайта.
     </div>
@@ -7213,18 +7217,6 @@ function bindUI() {
   // ── Google Lens как отдельный движок ──────────────────────────────────────
   // Переключатель живёт в ⚙ → Модели. По умолчанию «в файле»: пока человек сам
   // не выбрал Lens, картинка страницы никуда не уходит.
-  const syncEngineUI = () => {
-    for (const id of ['engineLocal', 'engineLens']) {
-      const b = $('#' + id); if (!b) continue;
-      b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
-    }
-    const note = $('#engineLensNote');
-    if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
-    const ort = $('#ortState');
-    if (ort && LENS.isLens()) {
-      ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
-    }
-  };
   // По обработчику на кнопку, а не один на контейнер: так «кнопка без
   // обработчика» не проскочит проверку сборки, и обработчик точно на месте.
   const setEngine = async (mode) => {
@@ -7397,6 +7389,31 @@ function bindUI() {
     }
   });
 }
+/** Показать, какой движок выбран. Вызывается и при старте (после LENS.load),
+ * и при каждом переключении — иначе кнопка «В файле» выглядела бы выбранной
+ * всегда, даже когда человек уже переключился на Lens. */
+function syncEngineUI() {
+  for (const id of ['engineLocal', 'engineLens']) {
+    const b = $('#' + id); if (!b) continue;
+    b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
+  }
+  const note = $('#engineLensNote');
+  if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
+  const ort = $('#ortState');
+  if (ort && LENS.isLens()) {
+    ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
+  }
+  // Обещание «ни один кадр никуда не отправляется» верно ТОЛЬКО в офлайн-режиме,
+  // поэтому с включённым Lens эту строку нельзя показывать как есть.
+  const priv = $('#privacyNote');
+  if (priv) {
+    priv.textContent = LENS.isLens()
+      ? 'Сейчас включён Google Lens: по нажатию «Распознать» кадр страницы уходит в Google. Верните «В файле» (офлайн), чтобы ничего не отправлялось.'
+      : 'Распознавание целиком в браузере: ни один кадр никуда не отправляется. Модели хранятся в IndexedDB этого сайта.';
+    priv.style.color = LENS.isLens() ? '#ffd2d2' : '';
+  }
+}
+
 async function saveRules() {
   RULES = sanitizeRules(RULES);
   await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
@@ -7461,6 +7478,7 @@ async function selfCheck() {
   // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
   // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
   await LENS.load();
+  syncEngineUI();                       // показать сохранённый выбор, а не «по умолчанию»
   const saved = await DB.get('kv', 'rules');
   // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
   // иначе на чистой установке профиль скорости не применялся, и «Быстро»
