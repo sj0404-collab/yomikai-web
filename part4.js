@@ -509,7 +509,15 @@ const Reader = {
 
     const c = this.canvases[i];
     if (!c) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
-    if (!OCR.ready) { openSheet('sheetModels'); toast('Сначала добавьте модели OCR (⚙)'); return null; }
+    if (!OCR.ready) {
+      // Раньше шторка «Модели» открывалась ПУСТОЙ: состояние рисует renderModels,
+      // а её здесь никто не звал. На скриншоте с телефона 28.10 так и было —
+      // «СОСТОЯНИЕ» без единой строки, непонятно, чего не хватает.
+      openSheet('sheetModels');
+      renderModels().catch(() => {});
+      toast('Сначала добавьте модели OCR (⚙ → Модели)');
+      return null;
+    }
 
     if (silent) State.prefetching = true; else State.scanning = true;
     if (!silent) {
@@ -1297,7 +1305,7 @@ function renderLensSheet(pageIndex) {
   }
 }
 
-function renderTextSheet(i) {
+async function renderTextSheet(i) {
   // Открывая шторку, сначала сверяем индекс с тем, что реально на экране:
   // раньше здесь стоял «застрявший» Reader.page, и текст открывался не той
   // страницы, которую человек видит.
@@ -1389,14 +1397,16 @@ async function renderModels() {
   const dict = await DB.get('kv', 'model:dict');
   const f = (x, n) => x ? `${n}: ${(x.v.byteLength / 1048576).toFixed(1)} МБ` : `${n}: нет`;
   const mark = (ok) => ok ? '✅' : '❌';
+  const noneYet = !det && !rec && !dict;
   $('#modelsState').innerHTML = [
+    noneYet ? '❌ моделей нет — выберите три файла кнопкой «Выбрать файлы» ниже' : '',
     `${mark(!!det)} ${f(det, 'detection.onnx')}`,
     `${mark(!!rec)} ${f(rec, 'cyrillic.onnx')}`,
     `${mark(!!dict)} ${dict ? `cyrillic.txt: ${String(dict.v).split('\n').filter(Boolean).length} символов` : 'cyrillic.txt: нет'}`,
     (await DB.get('kv', 'model:rec2'))
       ? `➕ второй распознаватель: ${OCR.rec2 ? 'подключён — ' + (OCR.rec2Note || 'трудные строки') : 'есть, но ' + (OCR.rec2Note || 'не подключён')}`
       : '➕ второй распознаватель: нет (не обязательно)',
-  ].join('<br>');
+  ].filter(Boolean).join('<br>');
   const note = $('#engineNote');
   if (note) {
     note.style.display = OCR.engine === 'blocked' || OCR.engine === 'failed' ? 'block' : 'none';
