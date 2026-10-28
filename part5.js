@@ -364,7 +364,45 @@ function bindUI() {
     renderLensSheet(i);
     toast('Открываю Google Lens — страница ' + (i + 1) + ' ушла в новую вкладку', 6000);
   };
+  // Прямое распознавание: без сайта и без новой вкладки (как в АПК).
+  const lensDirect = async (speak) => {
+    const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
+    const cv = Reader.canvases[i];
+    if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась', 4000); return; }
+    if (!LENS.hasDirect()) {
+      // Не делаем вид, что распознали: говорим, чего не хватает, и куда идти.
+      toast('Прямой путь недоступен: нет моста KomaLens из АПК и не задан свой релей', 9000);
+      renderLensSheet(i);
+      return;
+    }
+    const band = Reader.visibleBandPx(i);
+    const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+    toast('Отправляю кадр в Lens напрямую…', 4000);
+    const got = await LENS.recognizeDirect(crop, { page: i });
+    if (!got.ok) { toast('Прямое распознавание не вышло: ' + got.reason, 10000); renderLensSheet(i); return; }
+    const res = await applyLensText(i, got.lines.join('\n'), { fromDirect: true });
+    if (!res || !res.ok) { toast('Текст пришёл, но строк не нашлось', 6000); return; }
+    toast('Lens напрямую (' + (got.via === 'native' ? 'движок АПК' : 'свой релей') + '): '
+          + res.lines + ' реплик за ' + got.ms + ' мс', 6000);
+    renderLensSheet(i);
+    if (speak) Reader.readPage?.(i);
+  };
+  $('#btnLensDirect').onclick = () => lensDirect(false);
   $('#btnLensOpen').onclick = () => lensSend(LENS.pendingPage);
+
+  // Свой релей: адрес сохраняется в правила, чтобы не вводить заново.
+  const relayBox = $('#lensRelayUrl');
+  if (relayBox) {
+    relayBox.value = RULES.lensRelay || '';
+    relayBox.onchange = async () => {
+      RULES.lensRelay = String(relayBox.value || '').trim();
+      await saveRules();
+      syncSettingsUI();
+      toast(RULES.lensRelay
+        ? 'Релей сохранён — Lens будет распознавать напрямую, без сайта'
+        : 'Релей убран — прямой путь отключён', 5000);
+    };
+  }
   // Из читалки в один тап: 🔍 в шапке открывает шторку Lens, а кнопки в
   // настройках сразу отправляют текущую страницу / открывают вставку.
   const openLensSheet = () => {
@@ -551,6 +589,17 @@ function syncEngineUI() {
   if (hdr) {
     hdr.classList.toggle('hot', LENS.isLens());
     hdr.title = LENS.isLens() ? 'Google Lens включён' : 'Google Lens';
+  }
+  const relay = $('#lensRelayState');
+  if (relay) {
+    const native = typeof window !== 'undefined' && window.KomaLens && typeof window.KomaLens.recognize === 'function';
+    const tr = (typeof LENS !== 'undefined' && LENS.transports) ? LENS.transports() : [];
+    relay.innerHTML = native
+      ? 'Прямой путь: <b style="color:#8fd18f">движок АПК (KomaLens)</b> — сайт не открывается.'
+      : tr.includes('relay')
+        ? 'Прямой путь: <b style="color:#8fd18f">свой релей</b> — сайт не открывается.'
+        : 'Прямой путь не настроен: в браузере Google не отдаёт ответ чужой странице. '
+          + 'В АПК подключится движок сам. Пока — «Открыть сайт» или вставка текста.';
   }
   const hint2 = $('#engineHint2');
   if (hint2) {
