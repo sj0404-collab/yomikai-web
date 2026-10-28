@@ -64,14 +64,17 @@ for (const sp of ['lightning', 'fast', 'smart', 'normal', 'thorough']) {
 const sm = api.sanitizeRules({ speed: 'smart' });
 ok(sm.decodeVariants === true && sm.extCrop === true,
   '«Умно»: перебор вариантов и расширения кропа включены (это и даёт верные слова)');
-ok(sm.autoDepth === true && sm.maxVariants >= 1 && sm.maxVariants < 6,
-  '«Умно»: перебор идёт по гейту и не больше ' + sm.maxVariants + ' подготовок на строку');
+ok(sm.variantStopShare > 0.5 && sm.variantStopShare < 1,
+  '«Умно»: перебор останавливается на мягком пороге ' + sm.variantStopShare
+  + ' — не гоняет все варианты ради одного имени');
+ok(sm.decodeVariants === true,
+  '«Умно»: перебор вариантов включён (он и приносит верные слова)');
 ok(sm.maxDeepVariants > 0 && sm.maxDeepVariants <= 10,
   '«Умно»: потолок дорогих подготовок на строку = ' + sm.maxDeepVariants);
 ok(api.SPEED_NAMES.smart === 'Умно', 'у профиля есть человеческое имя');
 // профиль перебивает сохранённые числа — иначе «Умно» молча станет «Обычно»
 const sm2 = api.sanitizeRules({ speed: 'smart', pageSide: 1600, autoDepth: false });
-ok(sm2.pageSide === 1600 && sm2.autoDepth === true,
+ok(sm2.pageSide === 1600 && sm2.variantStopShare === 0.85,
   '«Умно» не перебивается старыми сохранёнными значениями');
 
 
