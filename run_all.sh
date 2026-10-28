@@ -20,7 +20,9 @@ done
 # Живой прогон Google Lens (вкладка, отправка, приём текста) — если в этом
 # окружении есть playwright. Без него — честно пропускаем, а не делаем вид.
 if python3 -c "import playwright" 2>/dev/null; then
-  for t in e2e_lens.py e2e_lens_read.py; do
+  # Прямой Lens (без сайта): релей, мост АПК и честный отказ. Playwright нужен,
+  # поэтому внутри той же ветки, что и остальные браузерные проверки.
+  for t in e2e_lens.py e2e_lens_read.py lab/lens_direct_check.py; do
     out=$(timeout 900 python3 "$t" 2>&1 | tail -1)
     printf '%-24s %s\n' "$t" "$out"
     case "$out" in *"ВСЁ ПРОШЛО"*) ;; *) fail=1;; esac
