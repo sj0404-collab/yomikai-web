@@ -1,10 +1,14 @@
 name: сборка АПК
 
 # Зачем: АПК-обёртка собирается здесь, на ранере, потому что в песочнице нет
-# Android SDK. Результат — устанавливаемый app-debug.apk в артефактах запуска и,
-# если тег вида v*, ещё и в Releases.
+# Android SDK. Результат — устанавливаемый APK в артефактах запуска, а по тегу
+# ещё и релиз, из которого приложение само себя обновляет.
 #
-# Запуск: вкладка Actions → «сборка АПК» → Run workflow (или push в apk/).
+# Запуск: Actions → «сборка АПК» → Run workflow. Автоматически — на правки в apk/.
+#
+# Два вида установки:
+#  • artifact koma-apk-debug — APK для установки руками;
+#  • релиз (по тегу) — оттуда приложение тянет свежий koma-web.html само.
 
 on:
   workflow_dispatch:
@@ -12,7 +16,6 @@ on:
     paths:
       - 'apk/**'
       - '.github/workflows/apk.yml'
-      - 'koma-web.html'
 
 jobs:
   build:
@@ -26,22 +29,23 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Читалка — один html, собранный из частей. В git не лежит: собираем здесь,
+      # чтобы в APK попала ровно та сборка, что соответствует исходникам.
+      - name: Собрать читалку из частей
+        run: |
+          cat part1.html part0-ort.js part0-wasm.js part0-dict.js part2.js part3.js part4.js part5.js > koma-web.html
+          grep -o "VERSION = 'v[0-9.]*'" koma-web.html | head -1
+          SZ=$(stat -c%s koma-web.html)
+          echo "читалка: $SZ Б" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Заглушка вместо сборки = пустое приложение. Лучше упасть здесь.
+          test "$SZ" -gt 5000000
+          mkdir -p apk/app/src/main/assets
+          cp koma-web.html apk/app/src/main/assets/koma-web.html
+
       - name: Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'
-
-      # Читалка — один html. Чтобы в APK попала именно свежая сборка,
-      # кладём её в assets перед сборкой (gradle-таск copyWeb делает то же
-      # самое локально).
-      - name: Положить читалку в assets
-        run: |
-          ls -l koma-web.html
-          mkdir -p apk/app/src/main/assets
-          cp koma-web.html apk/app/src/main/assets/koma-web.html
-          # Проверяем, что это наша сборка, а не заглушка: иначе АПК выйдет пустым.
-          grep -q "VERSION = 'v" apk/app/src/main/assets/koma-web.html
-          test "$(stat -c%s apk/app/src/main/assets/koma-web.html)" -gt 5000000
 
       - name: Собрать APK
         working-directory: apk
@@ -61,9 +65,20 @@ jobs:
           path: koma-reader-debug.apk
           if-no-files-found: error
 
-      - name: В Releases (если это тег)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: koma-reader-debug.apk
-          generate_release_notes: true
+      # ── Автообновление: откуда приложение берёт новую читалку ──────────────
+      # Тег вида page-v1.9.31 (или v1.9.31) → релиз с koma-web.html и APK.
+      # Приложение видит тег `page-vX`, сравнивает с местной версией и, если
+      # новее, скачивает вложение — без Play Market.
+      - name: Опубликовать релиз
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VER=$(grep -o "VERSION = 'v[0-9.]*'" koma-web.html | head -1 | grep -o "v[0-9.]*")
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "KOMA $VER ($TAG)" \
+            --notes "Читалка $VER. APK ставится руками; приложение само подтягивает koma-web.html из этого релиза." \
+            koma-web.html koma-reader-debug.apk \
+          || gh release upload "$TAG" koma-web.html koma-reader-debug.apk --clobber --repo "$GITHUB_REPOSITORY"
