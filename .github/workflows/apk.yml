@@ -20,6 +20,10 @@ on:
       - 'part*.js'
       - 'part1.html'
 
+# Токену нужны права на запись в релизы — иначе «Resource not accessible by integration»
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
