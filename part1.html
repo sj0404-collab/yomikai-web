@@ -87,6 +87,14 @@
   /* Крупный текст (титул, каллиграфия) — другим цветом, чтобы не путать с репликой */
   #strip .frame.large{border-color:#6fa8ff;border-style:dashed}
   #strip .frame.large.cur{background:#6fa8ff26;border-color:#6fa8ff}
+  /* Текст из Google Lens приходит БЕЗ координат: рамки делят страницу на равные
+     полосы по порядку реплик. Поэтому они пунктирные и с номером — чтобы было
+     видно, что это «строка №3 сверху», а не точное место на картинке. */
+  #strip .frame.approx{border-style:dashed;border-color:#8a7be0a0}
+  #strip .frame.approx.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
+  #strip .frame.approx.done{border-color:#8a7be055}
+  #strip .frame .fnum{position:absolute;left:1px;top:-13px;font-size:9px;line-height:11px;
+    color:#fff;background:#6c5ce7cc;border-radius:4px;padding:0 3px;font-weight:600}
   .lineitem.large{color:#9dc0ff}
   .lineitem.large b{color:#6fa8ff}
   /* постраничный режим */
