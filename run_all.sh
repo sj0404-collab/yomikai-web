@@ -12,6 +12,7 @@ if [ -f tools/selftest.py ]; then
   python3 tools/selftest.py | tail -1
   python3 tools/selftest.py >/dev/null 2>&1 || fail=1
 fi
+# test-apk-bridge.cjs попадает сюда же по маске test-*.cjs.
 for t in test-*.cjs; do
   out=$(timeout 900 node "$t" 2>&1 | tail -1)
   printf '%-24s %s\n' "$t" "$out"

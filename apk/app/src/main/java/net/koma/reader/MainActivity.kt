@@ -141,7 +141,7 @@ class MainActivity : android.app.Activity() {
             }
         }
 
-        web.addJavascriptInterface(KomaLensBridge(engine, appVersion), "KomaLens")
+        web.addJavascriptInterface(KomaLensBridge(engine, appVersion) { web }, "KomaLens")
         web.addJavascriptInterface(
             KomaAppBridge(updater, engine, appVersion) { reason -> runOnUiThread { reload(reason) } },
             "KomaApp"

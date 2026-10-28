@@ -630,7 +630,8 @@ function syncEngineUI() {
   }
   const relay = $('#lensRelayState');
   if (relay) {
-    const native = typeof window !== 'undefined' && window.KomaLens && typeof window.KomaLens.recognize === 'function';
+    const kl = (typeof window !== 'undefined') ? window.KomaLens : null;
+    const native = !!(kl && (typeof kl.recognizeAsync === 'function' || typeof kl.recognize === 'function'));
     const tr = (typeof LENS !== 'undefined' && LENS.transports) ? LENS.transports() : [];
     relay.innerHTML = native
       ? 'Прямой путь: <b style="color:#8fd18f">движок АПК (KomaLens)</b> — сайт не открывается.'

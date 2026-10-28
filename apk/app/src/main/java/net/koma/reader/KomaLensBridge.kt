@@ -1,9 +1,11 @@
 package net.koma.reader
 
+import android.util.Base64
 import android.webkit.JavascriptInterface
+import android.webkit.WebView
 import org.json.JSONArray
 import org.json.JSONObject
-import android.util.Base64
+import java.util.concurrent.Executors
 
 /**
  * Мост «Lens напрямую» для читалки. Именно его ждёт koma-web.html:
@@ -13,7 +15,13 @@ import android.util.Base64
  * сеть и разбор идут в [GlensEngine] на своём потоке. Поэтому бейдж
  * «Lens: распознаю без сайта…» рисуется, пока идёт распознавание.
  */
-class KomaLensBridge(private val engine: GlensEngine, private val appVersion: String) {
+class KomaLensBridge(
+    private val engine: GlensEngine,
+    private val appVersion: String,
+    private val web: () -> WebView?,
+) {
+
+    private val pool = Executors.newSingleThreadExecutor()
 
     @JavascriptInterface
     fun recognize(base64Jpeg: String, optsJson: String): String {
@@ -31,6 +39,30 @@ class KomaLensBridge(private val engine: GlensEngine, private val appVersion: St
         } catch (e: Throwable) {
             GlensEngine.log("recognize: ${e.message}")
             out.put("error", e.message ?: e.javaClass.simpleName).toString()
+        }
+    }
+
+    /**
+     * То же распознавание, но НЕ блокирует JS: ответ придёт в
+     * `window.__komaLensResolve[cbId](jsonString)`.
+     *
+     * Зачем: синхронный вызов держит поток JavaScript, пока идёт сеть, и на
+     * медленном ответе Google интерфейс замирает. Здесь страница получает
+     * управление сразу и продолжает рисовать бейдж, а текст приходит, когда
+     * движок закончил.
+     */
+    @JavascriptInterface
+    fun recognizeAsync(base64Jpeg: String, optsJson: String, cbId: String) {
+        pool.execute {
+            val json = recognize(base64Jpeg, optsJson)
+            web()?.post {
+                val id = JSONObject.quote(cbId)
+                val arg = JSONObject.quote(json)
+                web()?.evaluateJavascript(
+                    "window.__komaLensResolve&&window.__komaLensResolve[$id]&&window.__komaLensResolve[$id]($arg)",
+                    null
+                )
+            }
         }
     }
 

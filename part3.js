@@ -2846,7 +2846,10 @@ const LENS = {
      и оставляем прежнюю кнопку «Открыть в Lens» как ЯВНЫЙ выбор человека. */
   transports() {
     const list = [];
-    if (typeof window !== 'undefined' && window.KomaLens && typeof window.KomaLens.recognize === 'function') {
+    // Достаточно ЛЮБОГО из двух вызовов моста: асинхронный (предпочтительный)
+    // или синхронный. Иначе мост есть, а страница считает, что движка нет.
+    const kl = (typeof window !== 'undefined') ? window.KomaLens : null;
+    if (kl && (typeof kl.recognizeAsync === 'function' || typeof kl.recognize === 'function')) {
       list.push('native');
     }
     if (RULES && RULES.lensRelay) list.push('relay');
@@ -2928,8 +2931,34 @@ const LENS = {
     try {
       let lines = null;
       if (via === 'native') {
+        // Мост в АПК. Предпочитаем асинхронный вызов: он не держит поток JS,
+        // поэтому бейдж «распознаю…» рисуется, пока идёт запрос к Google.
+        const opts = { lang: (RULES && RULES.lang) || 'ru' };
+        const res = (typeof window.KomaLens.recognizeAsync === 'function')
+          ? await new Promise((resolve) => {
+              const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+              const reg = (window.__komaLensResolve = window.__komaLensResolve || {});
+              const timer = setTimeout(() => {
+                delete reg[id];
+                resolve(JSON.stringify({ error: 'движок АПК не ответил за 60 с' }));
+              }, 60000);
+              reg[id] = (json) => { clearTimeout(timer); delete reg[id]; resolve(json); };
+              try {
+                window.KomaLens.recognizeAsync(b64, JSON.stringify(opts), id);
+              } catch (e) {
+                clearTimeout(timer); delete reg[id];
+                resolve(JSON.stringify({ error: String((e && e.message) || e) }));
+              }
+            })
+          : await window.KomaLens.recognize(b64, opts);
+        // Ошибку моста показываем как есть: «ответ пустой» тут соврёт.
+        let obj = null;
+        if (res && typeof res === 'object') obj = res;
+        else {
+          try { obj = JSON.parse(String(res || '')); } catch (e) { obj = null; }
+        }
+        if (obj && obj.error) return { ok: false, via, reason: String(obj.error) };
         // Мост в АПК: сюда приходит либо строка, либо массив, либо объект.
-        const res = await window.KomaLens.recognize(b64, { lang: (RULES && RULES.lang) || 'ru' });
         lines = Array.isArray(res) ? res : this.parseResponse(
           typeof res === 'string' ? res : JSON.stringify(res || ''), 'application/json');
       } else {
