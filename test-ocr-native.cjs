@@ -102,7 +102,7 @@ function makePage(w = 1000, h = 2000) {
       ],
     })), 5);
   };
-  const res = await api.recognizePage(page, realRules, (msg) => progress.push(msg), band);
+  const res = await api.recognizePage(page, realRules, (done, total, phase) => progress.push({ done, total, phase }), band);
   ok(askedB64 === 'AAAA', 'кадр уходит нативно как base64 без префикса');
   ok(res && res.pass === 'native', 'вернулся нативный результат');
   ok(res.regions.length === 2, 'две реплики прошли, мусор по уверенности отброшен (0.01)');
@@ -111,7 +111,7 @@ function makePage(w = 1000, h = 2000) {
   ok(Math.abs(res.regions[0].bottom - 0.375) < 1e-6, 'низ пересчитан (0.375)');
   ok(Math.abs(res.regions[0].left - 0.1) < 1e-6, 'левая граница осталась долей ширины');
   ok(res.regions[0].text === 'УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ', 'текст не тронут');
-  ok(progress.some(m => /детектор/.test(m)), 'прогресс движка доходит до интерфейса: ' + JSON.stringify(progress.slice(0, 2)));
+  ok(progress.some(p => /детектор/.test(String((p && p.phase) || p))), 'прогресс движка доходит до интерфейса фазой: ' + JSON.stringify(progress.slice(0, 2)));
   ok(OCR.engine === 'native', 'состояние движка переключилось на нативный');
 
   // 6. Нативный движок упал — страница не ломается и пробует WASM
@@ -183,6 +183,21 @@ function makePage(w = 1000, h = 2000) {
   ok(/· 3\.0 с/.test(String(onlyMs.ms / 1000).replace('.', '.')) || true, 'общий замер печатается как 3.0 с');
   const p4 = fs.readFileSync(__dirname + '/part4.js', 'utf8');
   ok(/Number\.isFinite\(v\)/.test(p4) && /secTxt/.test(p4), 'в тосте итога NaN невозможен: значения проверяются');
+
+  // 12. Полоса с запасом (edge>0): строки не должны «пропадать» из-за единиц.
+  global.window.KomaOcr.recognizeAsync = (b64, rulesJson, id) => {
+    setTimeout(() => global.window.__komaOcrEvent(id, 'done', JSON.stringify({
+      ok: true, ms: 2500, via: 'native',
+      items: [{ text: 'В БУДУЩЕМ,', left: 0.2, right: 0.8, top: 0.1, bottom: 0.2, confidence: 0.9 }],
+    })), 0);
+  };
+  // Полоса 900…1900 с запасом: видимый экран 1000…1800.
+  const padded = { y0: 900, y1: 1900, vy0: 1000, vy1: 1800, key: 'k' };
+  const res2 = await api.recognizePage(page, realRules, () => {}, padded);
+  ok(res2 && res2.regions.length === 1,
+    'нативная строка проходит фильтр полосы с запасом (раньше отбрасывались ВСЕ: единицы px vs доли)');
+  ok(res2.boxes === 1, 'шторка получает число блоков, а не undefined');
+  ok(res2.pass === 'native', 'и это именно нативный проход, без отката в WASM');
 
   console.log(process.exitCode ? 'ЕСТЬ ПАДЕНИЯ' : 'ALL PASSED');
   process.exit(process.exitCode || 0);

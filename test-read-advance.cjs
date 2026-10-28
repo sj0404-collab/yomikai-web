@@ -88,7 +88,10 @@ const { Reader, VOICE, State, OCR, bandsOf, TTS } = api;
   TTS.stopped = false;
   // Полоса 1 — пустая (сканируется, текста нет), полоса 2 — с текстом.
   Reader.scanPage = async (i, opts) => { calls.push('scan:' + (opts && opts.bandPx ? 'px' : 'vis')); return null; };
-  Reader.scrollToBand = (i, ni) => { calls.push('scroll:' + ni); return true; };
+  // Прокрутка теперь не дёргает ленту каждый переход, а проверяет, видно ли
+  // реплику. Считаем вызовы отдельно: сколько раз лента реально поехала.
+  const realScrollToLine = Reader.scrollToLineIfNeeded;
+  Reader.scrollToLineIfNeeded = (i, line) => { calls.push('scroll'); return true; };
   TTS.readQueue = (un) => { calls.push('read:' + un.length); };
   TTS.stop = () => { calls.push('stop'); };
   TTS.queue = []; TTS.idx = 0;
@@ -105,7 +108,7 @@ const { Reader, VOICE, State, OCR, bandsOf, TTS } = api;
   ok(scrolls === 1, 'лента прокрутилась РОВНО один раз, а не прыгала по пустым полосам: ' + calls.join(' → '));
   ok(lastScroll >= 0 && firstRead > lastScroll, 'прокрутка стоит перед чтением найденной полосы: ' + calls.join(' → '));
   ok(calls.filter(c => c === 'scan:px').length >= 1, 'полоса распознаётся ДО прокрутки (явная полоса, а не «что видно»)');
-  ok(calls.indexOf('scan:px') < calls.indexOf('scroll:2'), 'порядок именно «распознать → прокрутить», иначе экран прыгает в пустоту');
+  ok(calls.indexOf('scan:px') < calls.indexOf('scroll'), 'порядок именно «распознать → прокрутить», иначе экран прыгает в пустоту');
 
   // ── 5. Откат на WASM без сессий — человеческая ошибка, а не падение
   const p3 = fs.readFileSync(__dirname + '/part3.js', 'utf8');
@@ -117,6 +120,36 @@ const { Reader, VOICE, State, OCR, bandsOf, TTS } = api;
   // ── 6. Предраспознавание следующей полосы во время речи
   ok(/prefetchBandAhead/.test(p4) && /Reader\.prefetchBandAhead\(\)/.test(p4),
     'следующая полоса распознаётся, пока звучит текущая реплика');
+
+  // ── 7. Явное нажатие ▶ читает С НАЧАЛА, а не с «места, где закончил»
+  const RW = Reader;
+  RW.spoken = new Set([RW.spokenKey(RW.page, 'ПЕРВАЯ РЕПЛИКА')]);
+  RW.regions.set(RW.page, { lines: [
+    { text: 'ПЕРВАЯ РЕПЛИКА', top: 0.05, bottom: 0.15 },
+    { text: 'ВТОРАЯ РЕПЛИКА', top: 0.06, bottom: 0.16 },
+  ] });
+  RW.band = { index: 0, top: 0, bottom: 0.5 };
+  TTS.queue = []; TTS.idx = 0; TTS.stopped = true;
+  let queued = null;
+  const saveStep = TTS.step; TTS.step = () => { queued = TTS.queue.map(l => l.text); };
+  const savePause = TTS.speakLine; TTS.speakLine = () => {};
+  RW.prefetchNext = () => {};
+  await TTS.readVisible({ fromStart: true });
+  ok(queued && queued.includes('ПЕРВАЯ РЕПЛИКА'),
+    'по нажатию ▶ читается и уже прочитанная реплика: ' + JSON.stringify(queued));
+  TTS.step = saveStep; TTS.speakLine = savePause;
+
+  // ── 8. Прокрутка не дёргается, если реплика уже на экране
+  const scroller = { clientHeight: 800, scrollTop: 100, _to: null,
+    scrollTo(o) { this._to = o.top; }, addEventListener() {} };
+  const wrap = { offsetTop: 0, getBoundingClientRect: () => ({ height: 3000, top: 0 }) };
+  global.document.getElementById = (id) => (id === 'strip' ? scroller : el());
+  global.document.querySelector = (sel) => (String(sel).includes('strip') ? scroller : wrap);
+  RW.mode = 'vertical';
+  RW.pageRect = () => ({ height: 3000 });
+  RW.scrollToLineIfNeeded = realScrollToLine;      // вернуть настоящую логику
+  ok(RW.scrollToLineIfNeeded(0, { top: 0.1 }) === false, 'реплика уже видна — лента не двигается (нет «ерзания»)');
+  ok(RW.scrollToLineIfNeeded(0, { top: 0.9 }) === true, 'реплика за экраном — лента переезжает один раз');
 
   console.log(process.exitCode ? 'ЕСТЬ ПАДЕНИЯ' : 'ALL PASSED');
   process.exit(process.exitCode || 0);

@@ -531,12 +531,20 @@ const Reader = {
     try {
       const label = band ? `полосу ${i + 1}` : `страницу ${i + 1}`;
       const res = await recognizePage(c, RULES, (done, total, phase) => {
-        const n = Math.max(1, Math.ceil(done));
-        const t = phase
-          ? `Распознаём… ${phase} ${n}/${total}`
-          : `Распознаём… ${Math.min(total, n)}/${total}`;
+        // Числа проверяем: раньше сюда мог прийти текст фазы вместо числа, и в
+        // бейдже висело «Распознаём… NaN/0» (телефон 22:41).
+        const okDone = Number.isFinite(done), okTotal = Number.isFinite(total) && total > 0;
+        const t = (phase && !okTotal)
+          ? `Распознаём… ${phase}`
+          : (phase
+            ? `Распознаём… ${phase} ${Math.max(1, Math.ceil(done))}/${total}`
+            : (okTotal ? `Распознаём… ${Math.min(total, Math.max(1, Math.ceil(done)))}/${total}` : 'Распознаём…'));
         $('#scanBadge').textContent = t;
-        if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
+        if (keepSheet) {
+          $('#textStats').textContent = (okDone && okTotal)
+            ? `Распознаю ${label} заново… ${done}/${total}`
+            : `Распознаю ${label} заново…` + (phase ? ' ' + phase : '');
+        }
       }, band, opts.det || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
@@ -576,7 +584,8 @@ const Reader = {
         || secTxt((Number(res.detMs) || 0) + (Number(res.recMs) || 0)) || '?';
       const how = nativePass
         ? `нативно, ${res.crops} строк`
-        : `детектор ${secTxt(res.detMs) || '0.0'} с, распознавание ${secTxt(res.recMs) || '0.0'} с, ${res.crops} строк`;
+        : `детектор ${secTxt(res.detMs) || '0.0'} с, распознавание ${secTxt(res.recMs) || '0.0'} с, ${res.crops} строк`
+          + (OCR.nativeNote ? `, нативно не вышло: ${String(OCR.nativeNote).slice(0, 80)}` : '');
       toast(`${band ? 'Полоса' : 'Страница'} ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${fresh.length} реплик`
         + (parts.length > 1 ? `, всего ${lines.length} на странице` : '')
         + ` · ${totalSec} с (${how})`, 6000);
@@ -715,6 +724,30 @@ const Reader = {
     this.band = b;
     return this.unspokenInBand();
   },
+  /**
+   * Прокрутить к реплике, ТОЛЬКО если её не видно (или видно у самого края).
+   * Спокойное чтение вместо дёрганья: если строка уже на экране — не трогаем
+   * ленту вовсе.
+   */
+  scrollToLineIfNeeded(i, line) {
+    try {
+      const sc = $('#strip');
+      const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+      if (!sc || !wrap || !line || this.mode !== 'vertical') return false;
+      const h = wrap.getBoundingClientRect().height || ((this.pageRect(i) || {}).height || 0);
+      if (!h) return false;
+      const viewH = sc.clientHeight || window.innerHeight;
+      const abs = (wrap.offsetTop || 0) + clamp(line.top, 0, 1) * h;   // строка в ленте
+      const rel = abs - sc.scrollTop;                                  // где она на экране
+      // Уже хорошо видно: от 8 % до 80 % экрана — ничего не делаем.
+      if (rel > viewH * 0.08 && rel < viewH * 0.8) return false;
+      const target = Math.max(0, abs - viewH * 0.22);
+      if (Math.abs(target - sc.scrollTop) < 24) return false;
+      sc.scrollTo({ top: target, behavior: 'smooth' });
+      return true;
+    } catch (e) { return false; }
+  },
+
   /** Прокрутить ленту ровно к началу полосы (без накопления сдвига). */
   scrollToBand(i, ni, animate = true) {
     const b = (this.bands || [])[ni];
@@ -923,6 +956,26 @@ const VOICE = {
     const sw = this.synth();
     if (!sw) return [];
     try { return (sw.getVoices() || []).slice(); } catch (e) { return []; }
+  },
+
+  /** Короткая причина состояния голоса — для честных сообщений человеку. */
+  statusText() {
+    if (!this.native()) {
+      const sw = this.synth();
+      if (!sw) return 'синтеза речи нет';
+      return 'Web Speech: голосов ' + (sw.getVoices() || []).length;
+    }
+    try {
+      const raw = window.KomaSpeech.status();
+      const o = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || {}));
+      const bits = [];
+      if (o.engine) bits.push(String(o.engine).split('.').pop());
+      bits.push(o.ready ? 'готов' : 'не готов');
+      if (o.ru === false) bits.push('нет русского голоса');
+      if (o.voices) bits.push('голосов ' + o.voices);
+      if (o.error) bits.push(o.error);
+      return bits.join(', ');
+    } catch (e) { return ''; }
   },
 
   /** Скажет ли нативный движок по-русски; null — не знаем (браузер). */
@@ -1201,17 +1254,39 @@ const TTS = {
     // Если синтез не начал говорить и не сообщил ошибку — молчать нельзя:
     // именно это выглядело как «голос по умолчанию молчит».
     clearTimeout(this._watch);
-    this._watch = setTimeout(() => {
-      if (started || this.stopped) return;
-      if (VOICE.native()) {
-        if (VOICE.nativeReady() === false) toast('Android TTS не готов: Настройки → Синтез речи', 6000);
-        return;
-      }
-      const sw = VOICE.synth();
-      if (sw && !sw.speaking && !sw.pending) {
-        toast('Синтез не ответил. Нажмите ⚙ → «Проверить голос»', 6000);
-      }
-    }, 1200);
+    const watchdog = (ms) => {
+      clearTimeout(this._watch);
+      this._watch = setTimeout(() => {
+        if (started || this.stopped) return;
+        if (VOICE.native()) {
+          // Не заговорил — пробуем ещё раз системным голосом БЕЗ выбора
+          // конкретного голоса и без скорости. Раньше при «движок молчит»
+          // страница просто останавливалась, и это выглядело как «голос умер».
+          if ((this._softAgain || 0) < 1) {
+            this._softAgain = (this._softAgain || 0) + 1;
+            try {
+              VOICE.speak(line.text, {
+                lang: 'ru-RU', rate: 1, voice: null,
+                onstart: () => { started = true; },
+                onend: () => { if (then) then(); },
+                onerror: (e) => { console.warn('голос: повтор не удался', e); },
+              });
+            } catch (e) { console.warn('голос: повтор не запустился', e); }
+            watchdog(2200);
+            return;
+          }
+          const st = VOICE.statusText ? VOICE.statusText() : '';
+          toast('Голос не заговорил. ⚙ → «Проверить голос»' + (st ? ': ' + st : ''), 7000);
+          return;
+        }
+        // Браузер: молчание Web Speech видно по speaking/pending.
+        const sw = VOICE.synth();
+        if (sw && !sw.speaking && !sw.pending) {
+          toast('Синтез не ответил. Нажмите ⚙ → «Проверить голос»', 6000);
+        }
+      }, ms);
+    };
+    watchdog(1500);
     // Прокрутка — ПОСЛЕ запуска речи и в try: ошибка геометрии не должна съедать звук.
     try { this.followLine(line); } catch (e) { console.warn('не прокрутил к реплике', e); }
     // Пока звучит эта реплика — тихо распознаём следующую полосу. Так переход
@@ -1236,7 +1311,12 @@ const TTS = {
     }
     return VOICE.resume();
   },
-  async readVisible() {
+  async readVisible(opts = {}) {
+    // fromStart — человек нажал ▶ сам. Тогда читаем С ВЕРХА видимой полосы,
+    // включая то, что уже было прочитано раньше. Раньше отметки «прочитано»
+    // соблюдались и при явном нажатии: страница молча ждала, пока дойдёшь до
+    // места, где остановился в прошлый раз (жалоба с телефона 22:41).
+    const fromStart = !!opts.fromStart;
     // Если страница ещё не распознана — сначала распознать, потом читать.
     // Раньше в этот момент вылезало «На этой полосе нет распознанного текста»
     // прямо во время сканирования, хотя текст вот он.
@@ -1263,7 +1343,7 @@ const TTS = {
         await Reader.scanCurrent(false, det);        // детекция уже есть — второй раз не гоняем
       }
     }
-    const lines = Reader.unspokenInBand();
+    const lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
     if (!lines.length && Reader.visibleLines().length) {
       // На этой полосе всё прочитано — переходим к следующему куску.
       return this.advanceReading();
@@ -1277,6 +1357,7 @@ const TTS = {
     }
     this.queue = lines.slice();          // только непрочитанное на этой полосе
     this.stopped = false; this.idx = 0;
+    this._softAgain = 0;                 // новый запуск — снова есть право на повтор
     Reader.prefetchNext();               // следующая страница — пока слушаем эту
     $('#playBar').style.display = 'flex';
     $('#btnRead').textContent = '⏸';
@@ -1387,8 +1468,11 @@ const TTS = {
           // полосе так же, заранее, и прокрутим один раз туда, где текст есть.
           continue;
         }
-        Reader.scrollToBand(i, ni);
-        await sleep(260);
+        // Прокручиваем ТОЛЬКО если реплика вне экрана, и ставим её в верхнюю
+        // треть. Раньше каждый переход дёргал ленту к началу полосы — отсюда
+        // «ерзает непонятно куда» (телефон 22:41).
+        Reader.scrollToLineIfNeeded(i, un[0]);
+        await sleep(200);
         Reader.page = i;
         return this.readQueue(un);
       }
@@ -1617,9 +1701,14 @@ async function renderTextSheet(i) {
       + (data.lensPlaced === 'det' ? 'рамки по облачкам (найдены локально, порядок из Lens)' : 'рамки примерные — полосы')
     : data.cached
     ? `${data.lines.length} реплик · из буфера (без повторного распознавания)`
-    : `${raw.length} строк · ${data.boxes} блоков · ${data.crops} кропов · `
-      + `итого ${(data.ms / 1000).toFixed(1)} с = детектор ${(data.detMs / 1000).toFixed(1)} с `
-      + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с`
+    : `${raw.length} строк · ${Number.isFinite(data.boxes) ? data.boxes : raw.length} блоков · ${data.crops || 0} кропов · `
+      // Нативный проход неделим (детектор и распознавание — один вызов), поэтому
+      // вместо двух чисел печатаем одно и слово «нативно». Раньше здесь были
+      // подстановки undefined → «NaN с» и «0.0 с» (телефон 22:42).
+      + ((data.detPass === 'native' || data.via === 'native')
+        ? `итого ${(Number(data.ms) || 0) / 1000 < 0.05 ? '?' : ((Number(data.ms) || 0) / 1000).toFixed(1)} с нативно (одним проходом)`
+        : `итого ${((Number(data.ms) || 0) / 1000).toFixed(1)} с = детектор ${((Number(data.detMs) || 0) / 1000).toFixed(1)} с `
+          + `+ распознавание ${((Number(data.recMs) || 0) / 1000).toFixed(1)} с`)
       + (data.bands > 1 ? ` · полос: ${data.bands}` : '')
       + (data.detPass && data.detPass !== 'normal'
         ? ' · детектор нашёл со 2-й попытки: ' + ({

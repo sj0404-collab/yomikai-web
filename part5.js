@@ -597,7 +597,9 @@ function bindUI() {
     const i = (Reader.textPage ?? Reader.page);
     await Reader.scanPage(i, { keepSheet: false });
     closeSheets();
-    TTS.readVisible();
+    // Человек нажал сам — читаем с начала того, что на экране, а не с того
+    // места, где остановились в прошлый раз.
+    TTS.readVisible({ fromStart: true });
   };
   $('#btnFrames').onclick = () => {
     Reader.frames = !Reader.frames;
@@ -612,7 +614,9 @@ function bindUI() {
   $('#btnRead').onclick = () => {
     if (TTS.stopped) {
       TTS.prime();                       // разблокировать голос в жесте
-      Reader.scanCurrent(false).then(() => TTS.readVisible());
+      // Явное нажатие ▶ = «читай отсюда и с начала», а не «продолжай с того
+      // места, где я остановился в прошлый раз» (жалоба 28.10 22:41).
+      Reader.scanCurrent(false).then(() => TTS.readVisible({ fromStart: true }));
     } else { TTS.stop(); }
   };
   // Стартовая карточка: страница сама ничего не запускает.

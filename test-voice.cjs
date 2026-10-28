@@ -94,7 +94,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   const u6 = spoken[0];
   ok(typeof u6.onstart === 'function', 'у озвучки есть отметка «начал говорить»');
   els.get('toast').textContent = '';
-  await new Promise(r => setTimeout(r, 1400));
+  await new Promise(r => setTimeout(r, 1900));
   ok(/не ответил|Проверить голос/.test(el('toast').textContent), 'молчание синтеза объясняется: «' + el('toast').textContent + '»');
 
   // 8. cancel() не вызывается зря: очередь не убиваем, если ничего не звучит

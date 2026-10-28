@@ -1943,13 +1943,16 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // координаты совпадают. Если нативный вызов не удался — не ломаем чтение:
   // говорим причину в состояние и идём прежним, проверенным путём.
   if (!preDet && NativeOcr.chosen() === 'native') {
-    if (onProgress) onProgress('нативный движок', 0, 0);
-    let got = await NativeOcr.scan(src, R, (msg) => { if (onProgress) onProgress(msg, 0, 0); });
+    // Порядок аргументов ровно как у остальных вызовов: (сделано, всего, фаза).
+    // Раньше текст фазы уходил первым аргументом, страница считала
+    // Math.ceil('нативный движок') и в бейдже появлялось «Распознаём… NaN/0».
+    if (onProgress) onProgress(0, 0, 'нативный движок');
+    let got = await NativeOcr.scan(src, R, (msg) => { if (onProgress) onProgress(0, 0, msg); });
     // Ноль строк на нативном проходе — не приговор: порог уверенности движка
     // (0.25) на бледном или мелком кадре отрезает всё подряд. Один повтор с
     // мягким порогом стоит те же ~3 с, но страница не остаётся «пустой».
     if (got && got.ok && !(got.items || []).length) {
-      if (onProgress) onProgress('нативный движок: повтор с мягким порогом', 0, 0);
+      if (onProgress) onProgress(0, 0, 'нативный движок: повтор с мягким порогом');
       const soft = { ...R, minConfidence: 0.05, detRetry: true };
       const again = await NativeOcr.scan(src, soft, null);
       if (again && again.ok && (again.items || []).length) got = again;
@@ -1970,7 +1973,12 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           confidence: +it.confidence || 0,
         };
         if (!item.text || item.bottom <= item.top) continue;
-        if (band && !visible(item)) continue;
+        // ВАЖНО: lineInBand ждёт координаты В ПИКСЕЛЯХ ПОЛОСЫ (внутри неё он сам
+        // прибавляет y0), а item.top/bottom — доли ВСЕЙ страницы. Раньше сюда
+        // отдавались доли, сравнение шло с пикселями, и КАЖДАЯ нативная строка
+        // считалась «вне экрана»: нативный проход возвращал 0 строк, страница
+        // уходила в WASM и читала полосу 20 секунд вместо 3 (телефон 22:41).
+        if (band && !visible({ top: it.top * H, bottom: it.bottom * H, left: item.left, right: item.right })) continue;
         if (item.confidence <= R.minConfidence) continue;
         regions.push(item);
       }
@@ -1984,6 +1992,9 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         // а сумма есть, поэтому страница печатает один замер, а не два.
         return {
           regions,
+          // boxes/regions нужны шторке «Текст страницы»: без них она печатала
+          // «8 строк · undefined блоков» (телефон 22:42).
+          boxes: regions.length, regionsCount: regions.length,
           det: { boxes: regions.length, pass: 'native' },
           ms: got.ms || Math.round(performance.now() - t0),
           detMs: null, recMs: null,
@@ -2572,7 +2583,28 @@ function bubblesOf(group, rtl, R) {
   };
   const flatBlocks = blocks.flatMap(splitTall);
   const lines = flatBlocks.map(block => {
-    const ordered = block.slice().sort((a, b) => rtl ? b.left - a.left : a.left - b.left);
+    // Строки облачка читаются СВЕРХУ ВНИЗ. Раньше они сортировались по X
+    // (справа налево для манги), и в облачке из четырёх строк порядок получался
+    // «снизу вверх»: обрывки склеивались не с теми соседями, слова выходили
+    // корявыми, часть пропадала, а часть читалась дважды (телефон 22:42).
+    // Внутри ОДНОЙ строки (несколько кусков на одной высоте) — по-прежнему
+    // справа налево: так читается сама строка.
+    const rows = [];
+    for (const part of block.slice().sort((a, b) => a.top - b.top)) {
+      const h = Math.max(part.bottom - part.top, 1e-6);
+      const row = rows.find(r => Math.min(r.bottom, part.bottom) - Math.max(r.top, part.top)
+        > Math.min(h, r.height) * 0.5);
+      if (row) {
+        row.parts.push(part);
+        row.top = Math.min(row.top, part.top);
+        row.bottom = Math.max(row.bottom, part.bottom);
+        row.height = row.bottom - row.top;
+      } else {
+        rows.push({ top: part.top, bottom: part.bottom, height: h, parts: [part] });
+      }
+    }
+    rows.sort((a, b) => a.top - b.top);
+    const ordered = rows.flatMap(r => r.parts.sort((a, b) => rtl ? b.left - a.left : a.left - b.left));
     // Склейка частей одной строки ровно как в KomaAutoRead:
     //   «ВЫСО-» + «ЧЕСТВО» → без пробела и без дефиса;
     //   обрывок в 1-2 буквы после буквы → тоже без пробела.
