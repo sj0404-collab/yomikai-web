@@ -15,6 +15,7 @@ const DEFAULT_RULES = {
   decodeVariants: true,    // перебор всех подготовок кропа ради верных слов
   autoDepth: false,        // перебор вариантов сразу прекращать на лёгких строках
   autoDepthMin: 0.34,      // «трудная» строка: незнакомых слов ≥ трети и ≥ 3 слов
+  maxDeepVariants: 5,      // сколько ДОРОГИХ подготовок кропа пробовать на строку
   uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
@@ -51,14 +52,26 @@ const SPEED_PRESETS = {
   // именно этот путь: текст верный («жизнь, будучи старшей сестрой тирана»).
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
+  // «Умно» — то, ради чего всё делалось: скорость «Быстро» с точностью, близкой
+  // к «Обычно». Устроено так: те же дешёвые настройки детектора и один вариант
+  // кропа для всех строк, а дорогие подготовки (перебор расширений и наложений)
+  // включаются ТОЛЬКО на строках, где словарь не узнал треть слов и больше, и
+  // не больше maxDeepVariants штук на строку. Замер 28.10 на ранере GitHub:
+  // «Обычно» 29,6 с / 464 вызова / 85,3 % словаря против «Умно» — см. журнал,
+  // часть 14. Ниже «Быстро» по словарю не опускается: базовый проход тот же.
+  smart:     { pageSide: 1280, detRetry: true, largeText: true, decodeVariants: false,
+               uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true,
+               autoDepth: true, maxDeepVariants: 5 },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 3, bandOverlap: 0.25,
                extCrop: true, breakWords: true },
 };
-const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', normal: 'Обычно', thorough: 'Тщательно' };
-const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', normal: '≈80 с', thorough: '≈70 с' };
+const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', smart: 'Умно',
+  normal: 'Обычно', thorough: 'Тщательно' };
+const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', smart: '≈30–60 с',
+  normal: '≈80 с', thorough: '≈70 с' };
 
 let RULES = { ...DEFAULT_RULES };
 function sanitizeRules(r) {
@@ -82,6 +95,7 @@ function sanitizeRules(r) {
   R.decodeVariants = R.decodeVariants !== false;
   R.autoDepth = R.autoDepth === true;          // по умолчанию — полный перебор, без потери слов
   num('autoDepthMin', 0, 1);
+  num('maxDeepVariants', 0, 40);
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
@@ -1863,7 +1877,14 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
       // соберём все словарные слова. autoDepth=true — экономим вызовы модели
       // и лезем в перебор только на трудных строках (на замере 28.10: «Обычно»
       // 50,5 с → 37,6 с при словаре 83,8 % вместо 85,3 %).
-      const deepOn = () => R.autoDepth !== true || hardLine(text);
+      // Потолок дорогих подготовок на строку: даже на трудной строке дальше
+      // пяти вариантов прирост был нулевой, а время росло линейно.
+      let deepUsed = 0;
+      const deepOn = () => {
+        if (R.autoDepth !== true) return true;              // профиль без экономии
+        if (deepUsed >= R.maxDeepVariants) return false;
+        return hardLine(text);
+      };
       ladder:
       for (const mk of makers) {
         let e = null;
@@ -1874,7 +1895,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           try { pc = fn(e); } catch (err) { continue; }
           if (!pc) continue;
           crops++;
-          if (deep) DECODE_STATS.deepCalls = (DECODE_STATS.deepCalls || 0) + 1;
+          if (deep) { DECODE_STATS.deepCalls = (DECODE_STATS.deepCalls || 0) + 1; deepUsed++; }
           let t2, c2;
           try { [t2, c2] = await decodeCrop(pc); } catch (err) { pc = null; continue; }
           const s = textScore(t2, c2);
