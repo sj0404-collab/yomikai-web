@@ -487,7 +487,10 @@ function bindUI() {
   $('#btnStartScan').onclick = async () => {
     Reader.hideStart();
     await Reader.scanCurrent(false);
-    await renderTextSheet(null).catch(() => {});
+    // renderTextSheet — не промис в общем случае: вызываем через Promise.resolve,
+    // иначе `.catch` падал с «Cannot read properties of undefined (reading 'catch')»
+    // (это и был тост с телефона 28.10).
+    try { await Promise.resolve(renderTextSheet(null)); } catch (e) { console.warn(e); }
   };
   $('#btnStartRead').onclick = async () => {
     TTS.prime();                        // голос разрешён только из жеста
