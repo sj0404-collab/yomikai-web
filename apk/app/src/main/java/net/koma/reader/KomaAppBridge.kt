@@ -20,7 +20,7 @@ class KomaAppBridge(
     fun version(): String = JSONObject()
         .put("app", appVersion)
         .put("page", updater.localVersion())
-        .put("url", Updater.URL_HTML)
+        .put("source", "GitHub Releases · sj0404-collab/yomikai-web")
         .toString()
 
     /** Проверить обновление по кнопке. Возвращает JSON, читалка показывает итог. */
