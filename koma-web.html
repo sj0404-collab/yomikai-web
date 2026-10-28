@@ -363,6 +363,14 @@
       <button class="btn" id="btnLensSend2">🔍 Открыть эту страницу в Lens</button>
       <button class="btn" id="btnLensPaste2">Вставить текст из Lens</button>
     </div>
+    <div class="hint" style="margin-top:10px">
+      <b>Прямое распознавание без сайта.</b> В АПК это делает встроенный движок
+      (мост <code>KomaLens</code>). В браузере Google не отдаёт ответ чужой
+      странице, поэтому нужен свой релей — укажите его адрес:
+    </div>
+    <input type="text" id="lensRelayUrl" placeholder="https://ваш-релей.example/lens"
+           style="margin-top:6px" autocomplete="off" spellcheck="false">
+    <div class="hint" id="lensRelayState" style="margin-top:4px"></div>
     <div class="lbl">АВТОЧТЕНИЕ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">
       <span>Читать вслух</span>
@@ -427,15 +435,20 @@
   <div class="body">
     <div class="kv" id="lensState"></div>
     <div class="hint" style="margin-top:8px">
-      1. Нажмите «Открыть в Lens» — страница уйдёт в Google <b>новой вкладкой</b>.<br>
-      2. На странице Lens откройте вкладку «Текст», выделите и скопируйте текст.<br>
-      3. Вернитесь сюда и нажмите «Вставить из буфера» (или вставьте в поле).<br>
+      <b>Распознать без сайта</b> — как в АПК: страница сама отправляет кадр и сама
+      забирает текст, никаких вкладок и сайтов. Работает, если в сборке есть движок
+      АПК (мост <code>KomaLens</code>) или указан свой релей в «Голос и чтение».<br><br>
+      Запасной путь, если прямого нет: откройте Lens в новой вкладке, вкладка
+      «Текст», скопируйте текст, вернитесь и нажмите «Вставить из буфера».<br>
       Дальше это обычные реплики страницы: рамки, порядок сверху вниз, озвучка.
     </div>
     <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
-      <button class="btn primary" id="btnLensOpen">Открыть в Lens</button>
+      <button class="btn primary" id="btnLensDirect">Распознать без сайта</button>
       <button class="btn" id="btnLensClip">Вставить из буфера</button>
     </div>
+    <div class="hint" id="lensDirectWhy" style="margin-top:6px"></div>
+    <div class="lbl">ЕСЛИ ПРЯМОЙ ПУТЬ НЕДОСТУПЕН</div>
+    <button class="btn" id="btnLensOpen">Открыть сайт Google Lens (новая вкладка)</button>
     <div class="lbl">ТЕКСТ ИЗ LENS</div>
     <textarea id="lensBox" rows="8" placeholder="Вставьте сюда текст со страницы Lens — по одной реплике в строке"></textarea>
     <div class="row" style="gap:8px;margin-top:10px">
@@ -2675,6 +2688,7 @@ const DEFAULT_RULES = {
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
+  lensRelay: '',           // свой релей для прямого Lens — без открытия сайта
 };
 /**
  * Профили скорости. Замерено на настоящей странице (720×2960, полосы 412×800,
@@ -2766,6 +2780,7 @@ function sanitizeRules(r) {
   R.inkLevels = Math.round(R.inkLevels); R.semiManualSettleMs = Math.round(R.semiManualSettleMs);
   R.semiManual = !!R.semiManual;
   if (typeof R.wordFixes !== 'object' || !R.wordFixes) R.wordFixes = {};
+  R.lensRelay = String(R.lensRelay || '').trim().slice(0, 500);
   return R;
 }
 
@@ -5473,6 +5488,142 @@ const LENS = {
    * координаты нам), зато порядок сверху вниз сохраняется, рамки показывают
    * номера реплик, и озвучка работает тем же путём, что всегда.
    */
+  /* ── ПРЯМОЕ РАСПОЗНАВАНИЕ: как в АПК, без открытия сайта ──────────────────
+     В АПК Lens — это не «открыть сайт», а движок: приложение само отправляет
+     картинку и само забирает текст (GlensOcrEngine, protobuf). В обычной вкладке
+     браузера так нельзя: Google не отдаёт CORS-заголовки, и прочитать ответ
+     чужой странице он не даёт. Поэтому прямой путь идёт по одному из двух
+     транспортов, и оба не открывают никаких сайтов:
+
+       native  — window.KomaLens.recognize(base64jpeg): мост в АПК. WebView зовёт
+                 тот самый GlensOcrEngine, что уже работает в приложении;
+       relay   — свой адрес (RULES.lensRelay): страница шлёт картинку туда, а
+                 релей возвращает текст (Cloudflare Worker / Node / VPS, 20 строк;
+                 готовый файл — lab/lens_relay.js). Тоже без сайта.
+
+     Если ни одного транспорта нет — честно говорим, что прямой путь недоступен,
+     и оставляем прежнюю кнопку «Открыть в Lens» как ЯВНЫЙ выбор человека. */
+  transports() {
+    const list = [];
+    if (typeof window !== 'undefined' && window.KomaLens && typeof window.KomaLens.recognize === 'function') {
+      list.push('native');
+    }
+    if (RULES && RULES.lensRelay) list.push('relay');
+    return list;
+  },
+  hasDirect() { return this.transports().length > 0; },
+
+  /** Кадр → JPEG base64. Прямой путь не требует жеста, поэтому можно сжимать:
+   *  на глаз для распознавания хватает 78 % и стороны 1500 px. */
+  toJpegBase64(canvas, maxSide = 1500, quality = 0.78) {
+    if (!canvas || !canvas.width) return '';
+    const k = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+    let src = canvas;
+    if (k < 1) {
+      src = makeCanvas(Math.round(canvas.width * k), Math.round(canvas.height * k));
+      const g = src.getContext('2d', { willReadFrequently: true });
+      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+      g.drawImage(canvas, 0, 0, src.width, src.height);
+    }
+    const url = src.toDataURL('image/jpeg', quality);
+    return url.slice(url.indexOf(',') + 1);
+  },
+
+  /** Разобрать ответ релея: принимаем и голый текст, и JSON, и HTML от Google. */
+  parseResponse(body, contentType) {
+    const raw = String(body || '');
+    const ct = String(contentType || '');
+    // 1) JSON — самый удобный формат для своего релея.
+    if (/json/i.test(ct) || /^\s*[[{]/.test(raw)) {
+      try {
+        const data = JSON.parse(raw);
+        const fromObj = (o) => {
+          if (!o) return null;
+          if (typeof o === 'string') return o.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+          if (Array.isArray(o)) return o.map(x => (typeof x === 'string' ? x : (x && (x.text || x.words)))).filter(Boolean);
+          for (const k of ['lines', 'text', 'regions', 'result', 'ocr']) {
+            if (o[k] != null) return fromObj(o[k]);
+          }
+          return null;
+        };
+        const lines = fromObj(data);
+        if (lines && lines.length) return lines;
+      } catch (e) { /* не JSON — идём дальше */ }
+    }
+    // 2) HTML от Lens: текст лежит внутри AF_initDataCallback. Достаём из него
+    //    строки, которые состоят из букв, и склеиваем по одной реплике в строку.
+    const html = raw;
+    const looksHtml = /<html|<!doctype|AF_initDataCallback/i.test(html);
+    if (looksHtml) {
+      let best = [];
+      const chunks = html.split('AF_initDataCallback');
+      for (const ch of chunks) {
+        // В данных Lens строка реплики — это JSON-строка с текстом.
+        // В данных Lens текст бывает с \uXXXX-экранированием, поэтому обратный
+        // слэш в строке разрешён (иначе «\u041c» рвал совпадение).
+        const strs = [...ch.matchAll(/"((?:\\.|[^"\\]){2,160})"/g)]
+          .map(m => m[1].replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))));
+        // Раскодировали \uXXXX ДО проверки: иначе строка «\u041c\u0430…» выглядит
+        // как латиница с обратными слэшами и отбрасывается как не-текст.
+        const cyr = strs.filter(t => (t.match(/[А-Яа-яЁё]/g) || []).length >= 3
+          && (t.match(/\p{L}/gu) || []).length / t.length > 0.55);
+        if (cyr.length > best.length) best = cyr;
+      }
+      if (best.length) return best.filter(t => (t.match(/\p{L}/gu) || []).length >= 2);
+    }
+    // 3) Голый текст: по строке на реплику.
+    return raw.split(/\r?\n/).map(s => s.trim())
+      .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
+  },
+
+  /** Прямое распознавание кадра. Возвращает { ok, lines, via, reason }. */
+  async recognizeDirect(canvas, opts = {}) {
+    if (!this.isLens() && !opts.force) return { ok: false, reason: 'движок «в файле» — ничего не отправлял', via: null };
+    const via = this.transports()[0];
+    if (!via) return { ok: false, reason: 'прямой путь недоступен', via: null };
+    const b64 = this.toJpegBase64(canvas, opts.maxSide || 1500, opts.quality || 0.78);
+    if (!b64) return { ok: false, reason: 'страница ещё не загрузилась', via };
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    try {
+      let lines = null;
+      if (via === 'native') {
+        // Мост в АПК: сюда приходит либо строка, либо массив, либо объект.
+        const res = await window.KomaLens.recognize(b64, { lang: (RULES && RULES.lang) || 'ru' });
+        lines = Array.isArray(res) ? res : this.parseResponse(
+          typeof res === 'string' ? res : JSON.stringify(res || ''), 'application/json');
+      } else {
+        const form = new FormData();
+        form.append('encoded_image', new Blob([this._b64bytes(b64)], { type: 'image/jpeg' }), 'page.jpg');
+        const r = await fetch(RULES.lensRelay, { method: 'POST', body: form, mode: 'cors' });
+        const text = await r.text();
+        if (!r.ok) return { ok: false, via, reason: 'релей ответил ' + r.status + ': ' + text.slice(0, 160) };
+        lines = this.parseResponse(text, r.headers.get('content-type') || '');
+      }
+      lines = (lines || []).filter(s => s && (s.match(/\p{L}/gu) || []).length >= 2);
+      if (!lines.length) return { ok: false, via, reason: 'ответ пустой — текста в нём нет' };
+      const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
+      this.lastSentAt = Date.now();
+      this.lastDirect = { via, ms, lines: lines.length };
+      return { ok: true, lines, via, ms };
+    } catch (e) {
+      // Для релея самая частая причина — CORS: браузер не дал прочитать ответ.
+      const msg = String((e && e.message) || e);
+      const cors = /Failed to fetch|NetworkError|CORS/i.test(msg);
+      return {
+        ok: false, via,
+        reason: cors
+          ? 'релей не отдал CORS-заголовки (Access-Control-Allow-Origin) — браузер не дал прочитать ответ'
+          : msg.slice(0, 200),
+      };
+    }
+  },
+  _b64bytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  },
+
   textToLines(text) {
     // Принимаем и строку, и массив строк (массив удобнее вызывать из тестов и
     // из кода: String([...]) склеил бы всё через запятую в одну «строку»).
@@ -5935,6 +6086,28 @@ const Reader = {
       if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
       const band = opts.full ? null : this.visibleBandPx(i);
       const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+      // СНАЧАЛА прямой путь — как в АПК: сами отправили, сами забрали текст,
+      // никаких сайтов и новых вкладок. Вкладка — только если прямого пути нет
+      // и человек сам нажмёт «Открыть в Lens».
+      if (LENS.hasDirect()) {
+        const badge = $('#scanBadge');
+        if (badge) { badge.classList.add('on'); badge.textContent = 'Lens: распознаю без сайта…'; }
+        let got;
+        try { got = await LENS.recognizeDirect(crop, { page: i }); }
+        finally { if (badge) badge.classList.remove('on'); }
+        if (got.ok) {
+          const res = await applyLensText(i, got.lines.join('\n'), { fromDirect: true });
+          toast('Lens напрямую — ' + (got.via === 'native' ? 'движок АПК' : 'свой релей') + '): '
+                + got.lines.length + ' реплик за ' + got.ms + ' мс', 6000);
+          return this.regions.get(i) || (res && res.ok ? this.regions.get(i) : null);
+        }
+        // Прямой путь не получился — говорим причину и НЕ открываем сайт молча.
+        openSheet('sheetLens');
+        LENS.pendingPage = i;
+        renderLensSheet(i);
+        toast('Прямое распознавание не вышло: ' + got.reason, 9000);
+        return this.regions.get(i) || null;
+      }
       const sent = LENS.send(crop, { page: i });
       if (sent.ok) {
         toast('Страница ' + (i + 1) + ' ушла в Google Lens — откройте новую вкладку', 6000);
@@ -6739,10 +6912,26 @@ function renderLensSheet(pageIndex) {
   const st = $('#lensState');
   if (st) {
     const own = Reader.regions.get(i);
+    const tr = LENS.transports();
+    const howDirect = tr.includes('native') ? 'движок АПК (без сайта)'
+      : tr.includes('relay') ? 'через свой релей (без сайта)' : '';
     st.innerHTML = `Движок: <b>${LENS.isLens() ? 'Google Lens' : 'в файле (офлайн)'}</b>`
       + ` · страница ${i + 1}`
+      + (howDirect ? ` · прямой путь: <b style="color:#8fd18f">${howDirect}</b>` : ' · прямой путь не настроен')
       + (own && own.fromLens ? ` · в странице уже ${own.lines.length} реплик из Lens` : '')
-      + (LENS.lastSentAt ? ' · отправлено ' + new Date(LENS.lastSentAt).toLocaleTimeString('ru-RU') : '');
+      + (LENS.lastSentAt ? ' · отправлено ' + new Date(LENS.lastSentAt).toLocaleTimeString('ru-RU') : '')
+      + (LENS.lastDirect ? ` · прямой ответ ${LENS.lastDirect.ms} мс` : '');
+  }
+  // Почему прямой путь доступен или нет — прямо в шторке, до нажатия кнопок.
+  const why = $('#lensDirectWhy');
+  if (why) {
+    const tr = LENS.transports();
+    why.innerHTML = tr.length
+      ? 'Прямой путь: <b style="color:#8fd18f">'
+        + (tr.includes('native') ? 'движок АПК (KomaLens)' : 'свой релей')
+        + '</b> — сайт не открывается, текст вернётся сюда сам.'
+      : 'Прямой путь не настроен: в браузере Google не отдаёт ответ чужой странице, '
+        + 'а в АПК подключится встроенный движок. Пока работает сайт и вставка текста.';
   }
   const box = $('#lensBox');
   if (box && !box.value) {
@@ -7492,7 +7681,45 @@ function bindUI() {
     renderLensSheet(i);
     toast('Открываю Google Lens — страница ' + (i + 1) + ' ушла в новую вкладку', 6000);
   };
+  // Прямое распознавание: без сайта и без новой вкладки (как в АПК).
+  const lensDirect = async (speak) => {
+    const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
+    const cv = Reader.canvases[i];
+    if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась', 4000); return; }
+    if (!LENS.hasDirect()) {
+      // Не делаем вид, что распознали: говорим, чего не хватает, и куда идти.
+      toast('Прямой путь недоступен: нет моста KomaLens из АПК и не задан свой релей', 9000);
+      renderLensSheet(i);
+      return;
+    }
+    const band = Reader.visibleBandPx(i);
+    const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+    toast('Отправляю кадр в Lens напрямую…', 4000);
+    const got = await LENS.recognizeDirect(crop, { page: i });
+    if (!got.ok) { toast('Прямое распознавание не вышло: ' + got.reason, 10000); renderLensSheet(i); return; }
+    const res = await applyLensText(i, got.lines.join('\n'), { fromDirect: true });
+    if (!res || !res.ok) { toast('Текст пришёл, но строк не нашлось', 6000); return; }
+    toast('Lens напрямую (' + (got.via === 'native' ? 'движок АПК' : 'свой релей') + '): '
+          + res.lines + ' реплик за ' + got.ms + ' мс', 6000);
+    renderLensSheet(i);
+    if (speak) Reader.readPage?.(i);
+  };
+  $('#btnLensDirect').onclick = () => lensDirect(false);
   $('#btnLensOpen').onclick = () => lensSend(LENS.pendingPage);
+
+  // Свой релей: адрес сохраняется в правила, чтобы не вводить заново.
+  const relayBox = $('#lensRelayUrl');
+  if (relayBox) {
+    relayBox.value = RULES.lensRelay || '';
+    relayBox.onchange = async () => {
+      RULES.lensRelay = String(relayBox.value || '').trim();
+      await saveRules();
+      syncSettingsUI();
+      toast(RULES.lensRelay
+        ? 'Релей сохранён — Lens будет распознавать напрямую, без сайта'
+        : 'Релей убран — прямой путь отключён', 5000);
+    };
+  }
   // Из читалки в один тап: 🔍 в шапке открывает шторку Lens, а кнопки в
   // настройках сразу отправляют текущую страницу / открывают вставку.
   const openLensSheet = () => {
@@ -7679,6 +7906,17 @@ function syncEngineUI() {
   if (hdr) {
     hdr.classList.toggle('hot', LENS.isLens());
     hdr.title = LENS.isLens() ? 'Google Lens включён' : 'Google Lens';
+  }
+  const relay = $('#lensRelayState');
+  if (relay) {
+    const native = typeof window !== 'undefined' && window.KomaLens && typeof window.KomaLens.recognize === 'function';
+    const tr = (typeof LENS !== 'undefined' && LENS.transports) ? LENS.transports() : [];
+    relay.innerHTML = native
+      ? 'Прямой путь: <b style="color:#8fd18f">движок АПК (KomaLens)</b> — сайт не открывается.'
+      : tr.includes('relay')
+        ? 'Прямой путь: <b style="color:#8fd18f">свой релей</b> — сайт не открывается.'
+        : 'Прямой путь не настроен: в браузере Google не отдаёт ответ чужой странице. '
+          + 'В АПК подключится движок сам. Пока — «Открыть сайт» или вставка текста.';
   }
   const hint2 = $('#engineHint2');
   if (hint2) {
