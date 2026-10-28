@@ -13,6 +13,8 @@ const DEFAULT_RULES = {
   detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
   largeText: true,         // второй проход по трудному тексту (каллиграфия, крупный шрифт)
   decodeVariants: true,    // перебор всех подготовок кропа ради верных слов
+  autoDepth: false,        // перебор вариантов сразу прекращать на лёгких строках
+  autoDepthMin: 0.34,      // «трудная» строка: незнакомых слов ≥ трети и ≥ 3 слов
   uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
@@ -78,6 +80,8 @@ function sanitizeRules(r) {
   R.detRetry = R.detRetry !== false;                       // повтор детектора при 0 боксов
   R.largeText = R.largeText !== false;
   R.decodeVariants = R.decodeVariants !== false;
+  R.autoDepth = R.autoDepth === true;          // по умолчанию — полный перебор, без потери слов
+  num('autoDepthMin', 0, 1);
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
@@ -889,7 +893,7 @@ let _probsCache = { canvas: null, res: null };
  * настройки, влияющие на чтение. При смене модели кэш забывается (OCR.stamp).
  */
 const _textCache = new Map();
-const TEXT_CACHE_MAX = 128;
+const TEXT_CACHE_MAX = 512;
 function _cropKey(cv, wide, R) {
   // Отпечаток берём с МАЛЕНЬКОЙ копии (8×8): getImageData по всему кропу стоил
   // дороже самого чтения (замер: 5,4 с → 18,1 с на страницу), а 64 пикселя —
@@ -1816,41 +1820,72 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           .drawImage(canvas, ln.left, t, w, b - t, 0, 0, w, b - t);
         return e;
       };
-      // Подготовки из перебора: без них расширенный кроп даёт «будучь», а не «будучи».
-      const preps = (e) => [
-        ['orig', e], ['pad10', padCanvas(e, 0.10)], ['pad15', padCanvas(e, 0.15)],
-        ['up15', upscaleCanvas(e, 1.5)], ['contrast', contrastCanvas(e)],
-        ['gamma13', (() => { const src = e; const w2 = src.width, h2 = src.height;
-          const ctx = src.getContext('2d', { willReadFrequently: true });
-          const img = ctx.getImageData(0, 0, w2, h2), d = img.data;
-          for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++)
-            d[i + k] = clamp(Math.round(255 * Math.pow(d[i + k] / 255, 1.3)), 0, 255);
-          const out = makeCanvas(w2, h2); out.getContext('2d').putImageData(img, 0, 0); return out; })()],
-      ];
-      // Режим 'light' — один дешёвый вариант (захват вверх 30 % + поля 15 %):
-      // именно он даёт «будучи», но стоит 1–2 вызова модели вместо 18.
+      // ЛЕСТНИЦА ВАРИАНТОВ. Раньше было «всё или ничего»: профиль «Быстро»
+      // читал один вариант, профиль «Обычно» — до 18 подготовок подряд для
+      // каждой строки с незнакомым словом (замер 28.10 по плотной манге:
+      // 465 вызовов модели на страницу). Здесь ступень 1 — один дешёвый
+      // вариант, ступень 2 — остальные, и только для строк, где словарь не
+      // узнал треть слов и больше (R.autoDepthMin) и слов в строке ≥ 3.
+      // Пик памяти держим низким: кропы делаются по одному и сразу отпускаются.
+      const gamma = (src) => {
+        const w2 = src.width, h2 = src.height;
+        const ctx = src.getContext('2d', { willReadFrequently: true });
+        const img = ctx.getImageData(0, 0, w2, h2), d = img.data;
+        for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++)
+          d[i + k] = clamp(Math.round(255 * Math.pow(d[i + k] / 255, 1.3)), 0, 255);
+        const out = makeCanvas(w2, h2);
+        out.getContext('2d', { willReadFrequently: true }).putImageData(img, 0, 0);
+        return out;
+      };
+      const prepsOf = (R.extCrop === 'light')
+        ? [['pad15', (e) => padCanvas(e, 0.15), false]]
+        : [
+            ['pad15', (e) => padCanvas(e, 0.15), false],      // ступень 1
+            ['orig', (e) => e, true],
+            ['pad10', (e) => padCanvas(e, 0.10), true],
+            ['up15', (e) => upscaleCanvas(e, 1.5), true],
+            ['contrast', (e) => contrastCanvas(e), true],
+            ['gamma13', (e) => gamma(e), true],
+          ];
       const makers = (R.extCrop === 'light')
-        ? [ext(0.30, 0)]
-        : [ext(0.30, 0), ext(0.15, 0), ext(0, 0.15)];
-      const prepList = (R.extCrop === 'light')
-        ? null                        // ниже берём только pad15
-        : null;
-      outer:
-      for (const maker of makers) {
-        if (!maker) continue;
-        const list = (R.extCrop === 'light')
-          ? [['pad15', padCanvas(maker, 0.15)]]
-          : preps(maker);
-        for (const [name, pc] of list) {
+        ? [() => ext(0.30, 0)]
+        : [() => ext(0.30, 0), () => ext(0.15, 0), () => ext(0, 0.15)];
+      // Сколько слов строки не знает словарь — этим решаем, лезть ли на
+      // вторую ступень. Звуки и обрывки («ААА», «!?») дожимать бессмысленно:
+      // у них меньше трёх слов.
+      const hardLine = (t) => {
+        const ws = (t.match(/[А-Яа-яЁё]{2,}/g) || []).map(x => x.toLowerCase());
+        if (ws.length < 3) return false;                 // звук или обрывок
+        const bad = ws.filter(x => !Words.isKnown(x)).length;
+        return bad / ws.length >= (R.autoDepthMin ?? 0.34);
+      };
+      // autoDepth=false — прежнее поведение: перебираем варианты, пока не
+      // соберём все словарные слова. autoDepth=true — экономим вызовы модели
+      // и лезем в перебор только на трудных строках (на замере 28.10: «Обычно»
+      // 50,5 с → 37,6 с при словаре 83,8 % вместо 85,3 %).
+      const deepOn = () => R.autoDepth !== true || hardLine(text);
+      ladder:
+      for (const mk of makers) {
+        let e = null;
+        try { e = mk(); } catch (err) { e = null; }
+        for (const [name, fn, deep] of prepsOf) {
+          if (deep && !deepOn()) break ladder;           // дальше не платим
+          let pc = null;
+          try { pc = fn(e); } catch (err) { continue; }
+          if (!pc) continue;
           crops++;
+          if (deep) DECODE_STATS.deepCalls = (DECODE_STATS.deepCalls || 0) + 1;
           let t2, c2;
-          try { [t2, c2] = await decodeCrop(pc); } catch (e) { continue; }
+          try { [t2, c2] = await decodeCrop(pc); } catch (err) { pc = null; continue; }
           const s = textScore(t2, c2);
           if (s > bestScore) { bestScore = s; text = t2; conf = c2; }
-          if (allWordsKnown(text)) break outer;   // все слова словарные — хватит
+          pc = null;                                     // отпускаем кадр
+          if (allWordsKnown(text)) break ladder;         // все слова словарные — хватит
           await yieldUI();
         }
+        e = null;
       }
+      if (deepOn()) DECODE_STATS.lastDeep = true;
     }
     const out = { text, conf };
     textCachePut(ckey, out);
