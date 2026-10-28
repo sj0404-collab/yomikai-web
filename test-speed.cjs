@@ -18,8 +18,11 @@ const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 // 1. Четыре профиля, все на месте
-ok(Object.keys(api.SPEED_PRESETS).length === 4, 'четыре профиля скорости');
-ok(Object.keys(api.SPEED_NAMES).length === 4, 'у всех профилей есть русские названия');
+// Пять профилей: к четырём прежним добавился «Умно» (28.10).
+ok(Object.keys(api.SPEED_PRESETS).length === 5, 'пять профилей скорости');
+ok(Object.keys(api.SPEED_NAMES).length === 5, 'у всех профилей есть русские названия');
+ok(Object.keys(api.SPEED_NAMES).every(k => api.SPEED_PRESETS[k]),
+  'у каждого профиля есть и пресет, и название — списки не разъехались');
 
 // 2. По умолчанию — не самый медленный и без самозапуска
 const def = api.sanitizeRules({});
@@ -51,9 +54,25 @@ const html = fs.readFileSync('/home/user/koma-web/part1.html', 'utf8');
 for (const id of ['startCard', 'btnStartScan', 'btnStartRead', 'btnStartClose', 'cbAutoScan', 'speedChips', 'speedHint']) {
   ok(html.includes('id="' + id + '"'), 'в разметке есть #' + id);
 }
-for (const sp of ['lightning', 'fast', 'normal', 'thorough']) {
+for (const sp of ['lightning', 'fast', 'smart', 'normal', 'thorough']) {
   ok(html.includes('data-speed="' + sp + '"'), 'чип скорости ' + sp);
 }
+
+// 7b. Профиль «Умно»: скорость «Быстро», а дорогой перебор — только на трудных
+// строках. Проверяем контракт, а не цифры: дешёвый детектор, дожим включён,
+// потолок вариантов есть, и профиль не превращается в «Обычно».
+const sm = api.sanitizeRules({ speed: 'smart' });
+ok(sm.pageSide === 1280 && sm.decodeVariants === false,
+  '«Умно»: те же дешёвые настройки, что у «Быстро» (1280, без перебора)');
+ok(sm.autoDepth === true && sm.extCrop === true,
+  '«Умно»: дожим включён и включается вместе с расширением кропа');
+ok(sm.maxDeepVariants > 0 && sm.maxDeepVariants <= 10,
+  '«Умно»: потолок дорогих подготовок на строку = ' + sm.maxDeepVariants);
+ok(api.SPEED_NAMES.smart === 'Умно', 'у профиля есть человеческое имя');
+// профиль перебивает сохранённые числа — иначе «Умно» молча станет «Обычно»
+const sm2 = api.sanitizeRules({ speed: 'smart', pageSide: 1600, autoDepth: false });
+ok(sm2.pageSide === 1280 && sm2.autoDepth === true,
+  '«Умно» не перебивается старыми сохранёнными значениями');
 
 
 // 8. Чистая установка: правила обязаны пройти sanitize, иначе профиль не работает
