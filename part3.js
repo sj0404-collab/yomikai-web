@@ -2687,7 +2687,10 @@ const LENS = {
    * номера реплик, и озвучка работает тем же путём, что всегда.
    */
   textToLines(text) {
-    const rows = String(text || '')
+    // Принимаем и строку, и массив строк (массив удобнее вызывать из тестов и
+    // из кода: String([...]) склеил бы всё через запятую в одну «строку»).
+    const src = Array.isArray(text) ? text.join('\n') : String(text || '');
+    const rows = src
       .split(/\r?\n/)
       .map(s => s.replace(/\s+/g, ' ').trim())
       .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
