@@ -2376,7 +2376,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.27';
+const VERSION = 'v1.9.28';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3140,6 +3140,17 @@ const Words = {
     const capsAll = raw.match(/[А-ЯЁ]{3,}/g) || [];
     if (caps.length >= 1 && caps.length === capsAll.length
         && caps.length === wordsLong.length && caps.length <= 4) return fixed;
+
+    // ДЛИННЫЙ текст (абзац книги, журнала, старого скана) — отдельное правило.
+    // Замер 28.10 на «Весёлых картинках» 1988: распознавание нашло 100 строк,
+    // из них 87 русских, а в реплики вышло 10 — остальное выбрасывалось именно
+    // здесь, потому что в слитом абзаце на 100+ слов неизбежно 10–20 % ошибок,
+    // и доля «настоящих» падала ниже 0.5. Терять целый абзац из-за этого нельзя:
+    // это ровно то «верные строки не трогать», только наоборот.
+    // Опора — не доля, а число настоящих слов: если их хотя бы 4 и строка не
+    // короче 12 слов, это текст, а мусорные строки такими не бывают (у мусора
+    // из «ол кослл алмчлс» максимум 2–3 слова).
+    if (words.length >= 12 && known.length >= 4) return fixed;
 
     // Длинная строка, где настоящих слов меньшинство, — это не реплика:
     // «то н оо о оно», «ол кослл алмчлс».
@@ -4868,11 +4879,39 @@ function bubblesOf(group, rtl, R) {
       const limit = (shortHead && shortRg && overlap >= lineHeight * 0.7) ? lineHeight * 2.5 : lineHeight * R.bubbleGap;
       if (gap > limit) continue;
       if (gap < -lineHeight * 0.9) continue;
+      // Потолок высоты: облачко не бывает выше 22 % страницы. Без этого проза
+      // (две колонки журнала) склеивалась в один блок на полстраницы — «одна
+      // реплика» на 75 слов (замер 28.10).
+      const mergedTop = Math.min(...block.map(r => r.top), rg.top);
+      const mergedBottom = Math.max(...block.map(r => r.bottom), rg.bottom);
+      if (mergedBottom - mergedTop > 0.22) continue;
       if (gap < bestGap) { bestGap = gap; target = block; }
     }
     if (target) target.push(rg); else blocks.push([rg]);
   }
-  const lines = blocks.map(block => {
+  // Слишком высокий блок — это не облачко, а АБЗАЦ или целая колонка: так
+  // выглядит проза (журнал, книга). Замер 28.10 на странице «Весёлых картинок»:
+  // две газетные колонки склеивались в блок высотой 0,34 страницы, и это была
+  // одна «реплика» на 75 слов. Для манги правило безвредно: облачко редко выше
+  // четверти страницы, а если и выше — его строки идут плотно, и разрез по
+  // самому большому пробелу всё равно придётся на пустое место.
+  const MAX_BLOCK = 0.22;                      // доля высоты страницы
+  const splitTall = (block) => {
+    if (block.length < 4) return [block];
+    const span = (b) => Math.max(...b.map(r => r.bottom)) - Math.min(...b.map(r => r.top));
+    if (span(block) <= MAX_BLOCK) return [block];
+    const sortedB = block.slice().sort((a, b) => a.top - b.top);
+    let cut = -1, bestGap = 0;
+    for (let i = 1; i < sortedB.length; i++) {
+      const gap = sortedB[i].top - sortedB[i - 1].bottom;
+      if (gap > bestGap) { bestGap = gap; cut = i; }
+    }
+    if (cut < 0) return [block];
+    const a = sortedB.slice(0, cut), b = sortedB.slice(cut);
+    return [...splitTall(a), ...splitTall(b)];
+  };
+  const flatBlocks = blocks.flatMap(splitTall);
+  const lines = flatBlocks.map(block => {
     const ordered = block.slice().sort((a, b) => rtl ? b.left - a.left : a.left - b.left);
     // Склейка частей одной строки ровно как в KomaAutoRead:
     //   «ВЫСО-» + «ЧЕСТВО» → без пробела и без дефиса;
@@ -4936,6 +4975,10 @@ function sameBubble(a, b, bubbleGap, mergeHeightRatio) {
   // («УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ,» / «ТАК ЧТО ЕЁ ВЫСОЧЕСТВО, ДОЛЖНО» / «БЫТЬ, ПРИБЫЛА.»).
   const aLine = a.lh || aH, bLine = b.lh || bH;
   if (Math.max(aLine, bLine) / Math.min(aLine, bLine) > mergeHeightRatio) return false;
+  // Тот же потолок высоты, что и в bubblesOf: иначе вторая склейка
+  // (mergeBubbles) снова собирала абзацы в блок на полстраницы.
+  const mergedTop = Math.min(a.top, b.top), mergedBottom = Math.max(a.bottom, b.bottom);
+  if (mergedBottom - mergedTop > 0.22) return false;
   return true;
 }
 function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
@@ -6904,9 +6947,18 @@ function mergeBandLines(parts, canvas) {
       // Разный текст на одном месте: оставляем тот, что осмысленнее. Ничего не
       // выбрасываем «по диапазону полосы» — так терялись реплики, которые
       // соседняя полоса просто не распознала.
+      // «Одно и то же место» — это совпадение И по вертикали, И по горизонтали.
+      // Раньше хватало вертикали, и две реплики на одной высоте (две колонки
+      // газеты; два облачка рядом в манге) считались дублем друг друга: одна
+      // молча выбрасывалась. Замер 28.10 на странице-прозе: 58 распознанных
+      // строк → 2 реплики, потому что правая и левая колонки «перекрывались».
+      const overlapH = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left);
       const same = out.findIndex(o => {
         const oh = Math.max(1e-6, o.bottom - o.top);
-        return overlapV(o, ln) > Math.min(h, oh) * 0.6;
+        const ow = Math.max(1e-6, o.right - o.left);
+        const w = Math.max(1e-6, ln.right - ln.left);
+        return overlapV(o, ln) > Math.min(h, oh) * 0.6
+          && overlapH(o, ln) > Math.min(w, ow) * 0.5;
       });
       if (same >= 0) {
         const q1 = qualityOf([out[same].text]) + Math.min(ln.text.length, 60) * 0.3;
