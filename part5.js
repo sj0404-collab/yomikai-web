@@ -380,11 +380,18 @@ function bindUI() {
       const box = $('#lensBox'); if (box) box.focus();
     }
   };
-  const lensApply = (speak) => {
+  const lensApply = async (speak) => {
     const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
-    const res = applyLensText(i, $('#lensBox').value);
+    const btn = $('#btnLensApply');
+    if (btn) { btn.disabled = true; btn.textContent = 'Ставлю рамки…'; }
+    let res;
+    try { res = await applyLensText(i, $('#lensBox').value); }
+    finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'В текст страницы'; }
+    }
     if (!res.ok) { toast('Нечего применять: ' + res.reason, 6000); return; }
-    toast('Текст из Lens принят: ' + res.lines + ' реплик на странице ' + (i + 1), 5000);
+    toast('Текст из Lens принят: ' + res.lines + ' реплик на странице ' + (i + 1)
+      + (res.placed === 'det' ? ' · рамки по облачкам' : ' · рамки примерные (полосы)'), 6000);
     renderLensSheet(i);
     if (speak) { TTS.prime(); closeSheets(); TTS.readVisible(); }
   };
