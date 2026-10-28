@@ -1521,7 +1521,20 @@ async function decodeBetter(cropCanvas, R, opts = {}) {
   // Широкие строки — это реплики и подписи: ради верных слов перебираем все
   // подготовки кропа. Узкие (звуковые эффекты) не перебираем: там всё равно
   // не слова, и на телефоне это лишние секунды.
-  if (R.decodeVariants !== false && (opts.wide || letters(first[0]) >= 3)) {
+  // «Умно»: в перебор идём не из-за ОДНОГО незнакомого слова, а когда словарь
+  // не узнаёт треть строки (или больше). Имена («Салли», «Черничный») и звуки
+  // словарю неизвестны всегда, и раньше из-за них перебирались все шесть
+  // подготовок на каждой строке: на прозе это 1 897 вызовов модели и 168 с при
+  // приросте словаря 1,1 п.п. (замер 28.10). «Обычно» и «Тщательно» работают
+  // как раньше — гейт включается только профилем «Умно» (autoDepth).
+  const worthVariants = () => {
+    if (R.autoDepth !== true) return true;
+    const ws = (String(first[0]).match(/[А-Яа-яЁё]{2,}/g) || []).map(w => w.toLowerCase());
+    if (ws.length < 3) return false;                 // звук или обрывок
+    const bad = ws.filter(w => !Words.isKnown(w)).length;
+    return bad / ws.length >= (R.autoDepthMin ?? 0.34);
+  };
+  if (R.decodeVariants !== false && (opts.wide || letters(first[0]) >= 3) && worthVariants()) {
     const best = await decodeAllVariants(cropCanvas, R, first);
     return [best.text, best.conf];
   }
