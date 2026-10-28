@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Своя тема без ActionBar: читалка рисует свой интерфейс целиком. -->
+    <style name="Theme.Koma" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#171a17</item>
+        <item name="android:statusBarColor">#101310</item>
+        <item name="android:navigationBarColor">#101310</item>
+    </style>
+</resources>
