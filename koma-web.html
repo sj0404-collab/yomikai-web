@@ -2663,6 +2663,7 @@ const DEFAULT_RULES = {
   autoDepthMin: 0.34,      // «трудная» строка: незнакомых слов ≥ трети и ≥ 3 слов
   maxDeepVariants: 5,      // сколько ДОРОГИХ подготовок кропа пробовать на строку
   maxVariants: 3,          // сколько подготовок кропа перебирать в режиме «Умно»
+  variantStopShare: 1,     // «хватит перебирать»: доля словарных слов в чтении
   uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
@@ -2709,7 +2710,7 @@ const SPEED_PRESETS = {
   // Числа — в журнале «Доработки», часть 14.
   smart:     { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true,
-               autoDepth: true, maxDeepVariants: 3, maxVariants: 3 },
+               autoDepth: false, maxDeepVariants: 5, maxVariants: 6, variantStopShare: 0.85 },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
@@ -2745,6 +2746,7 @@ function sanitizeRules(r) {
   num('autoDepthMin', 0, 1);
   num('maxDeepVariants', 0, 40);
   num('maxVariants', 1, 8);
+  num('variantStopShare', 0.5, 1);
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
@@ -4126,6 +4128,17 @@ function padCanvas(src, frac) {
   return out;
 }
 
+/** «Достаточно хорошо» для остановки перебора: доля словарных слов ≥ порога
+ * профиля (у «Обычно» порог 1, то есть останавливается только на всех словах). */
+function goodEnough(text, R) {
+  const need = Number(R && R.variantStopShare);
+  if (!(need > 0) || need >= 1) return false;
+  const ws = (String(text).match(/[А-Яа-яЁё]{2,}/g) || []).map(w => w.toLowerCase());
+  if (ws.length < 3) return false;
+  const bad = ws.filter(w => !Words.isKnown(w)).length;
+  return bad / ws.length <= (1 - need) + 1e-9;
+}
+
 async function decodeAllVariants(crop, R, first) {
   // Порядок по замеренной пользе на реальной странице: увеличение и контраст
   // дают верные слова чаще, бинаризация — редко и дорого.
@@ -4156,7 +4169,11 @@ async function decodeAllVariants(crop, R, first) {
       if (best && best.variant !== 'orig') DECODE_STATS.variantsPicked++;
       best = { text, conf, score, variant: name };
     }
-    if (allWordsKnown(best.text)) break;
+    // Мягкая остановка: профиль «Умно» не требует 100 % словарных слов (имена
+    // и звуки словарю неизвестны всегда), а останавливается, когда строка уже
+    // читается на variantStopShare. Это и есть «и быстро, и верно»: перебор
+    // прекращается там, где дальше он уже ничего не даёт.
+    if (allWordsKnown(best.text) || goodEnough(best.text, R)) break;
     await yieldUI();
   }
   // Какой вариант в итоге выбран — по этим числам решаем, какие подготовки
