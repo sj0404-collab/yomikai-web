@@ -1430,6 +1430,14 @@ function wordColumns(crop, R) {
  * чтобы не тратить время на телефоне.
  */
 /** Кроп с белыми полями: модель видит целые буквы, а не обрезанные края. */
+/** Вырезать прямоугольник страницы в отдельный canvas (для отправки в Lens). */
+function cropCanvas(src, x, y, w, h) {
+  const out = makeCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+  out.getContext('2d', { willReadFrequently: true })
+    .drawImage(src, Math.round(x), Math.round(y), Math.round(w), Math.round(h), 0, 0, out.width, out.height);
+  return out;
+}
+
 function padCanvas(src, frac) {
   const pad = Math.max(1, Math.round(src.height * frac));
   const out = makeCanvas(src.width + pad * 2, src.height + pad * 2);
@@ -2567,3 +2575,128 @@ function cutAtBandBottom(line, band, cutMargin) {
   if (!t) return false;
   return !/[.!?…"»)]$/.test(t);
 }
+
+/**
+ * ─── Google Lens как ОТДЕЛЬНЫЙ движок ────────────────────────────────────────
+ *
+ * Зачем. Своя модель на манге даёт 4,8 % CER против 2,7 % у штатной, а на
+ * чужих страницах (журналы 1988–2001 из archive.org) читалка находит меньше
+ * трети строк — шрифт, вёрстка и печать другие. Lens читает такое заметно
+ * лучше, но НЕ умеет работать офлайн и отправляет картинку в Google.
+ *
+ * Как устроено и почему именно так:
+ *  • Модели и текст по-прежнему обрабатываются локально, а Lens — это ЯВНО
+ *    включаемый второй движок. Пока режим «локально» (по умолчанию), ни один
+ *    байт картинки никуда не уходит: send() в этом режиме даже не строит форму.
+ *  • Отправка — обычная отправка ФОРМЫ в новую вкладку (`enctype=multipart`,
+ *    поле `encoded_image`), а не fetch: навигацию окна CORS не ограничивает,
+ *    поэтому это работает и из файла `file://`, где XHR к чужому домену
+ *    невозможен. Проверено 28.10 в Chromium: Lens принимает файл и отвечает
+ *    страницей результатов (из песочницы IP попал под проверку на робота, но
+ *    сам аплоад прошёл — в обычном браузере открывается страница «Текст»).
+ *  • Прочитать результат из другой вкладки нельзя (чужой домен). Поэтому
+ *    текст возвращается ЧЕРЕЗ ЧЕЛОВЕКА: «Вставить из буфера» одной кнопкой
+ *    (navigator.clipboard.readText в жесте) или вставкой в поле. Дальше эти
+ *    строки живут как обычные реплики страницы: рамки, порядок, озвучка.
+ *  • Никаких confirm()/prompt() — только тост и шторка.
+ */
+const LENS = {
+  mode: 'local',                     // local | lens
+  action: 'https://lens.google.com/v3/upload?hl=ru&ep=ccm',
+  lastSentAt: 0, lastSentPage: null,
+  pendingPage: null,                 // страница, для которой ждём текст от Lens
+
+  isLens() { return this.mode === 'lens'; },
+
+  /** Прочитать сохранённый выбор движка. */
+  async load() {
+    try {
+      const row = await DB.get('kv', 'engine:mode');
+      this.mode = (row && row.v === 'lens') ? 'lens' : 'local';
+    } catch (e) { this.mode = 'local'; }
+    return this.mode;
+  },
+
+  /** Сохранить выбор. Кнопка «Движок: …» работает без confirm(). */
+  async setMode(mode) {
+    this.mode = mode === 'lens' ? 'lens' : 'local';
+    try { await DB.put('kv', { k: 'engine:mode', v: this.mode }); } catch (e) { /* некуда сохранить — не беда */ }
+    return this.mode;
+  },
+
+  /**
+   * Картинка страницы (или видимой полосы) → файл для формы.
+   * Синхронно через toDataURL: отправка идёт из жеста пользователя, и ждать
+   * промис toBlob нельзя — браузер уже считает жест «законченным» и может
+   * заблокировать открытие вкладки.
+   */
+  toFile(canvas, name) {
+    const url = canvas.toDataURL('image/png');
+    const b64 = url.slice(url.indexOf(',') + 1);
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], name || 'page.png', { type: 'image/png' });
+  },
+
+  /**
+   * Отправить страницу в Lens новой вкладкой. Возвращает { ok, reason }.
+   * В режиме «локально» ничего не отправляет — это и есть защита от случайной
+   * утечки картинки в сеть.
+   */
+  send(canvas, opts = {}) {
+    if (!this.isLens() && !opts.force) {
+      return { ok: false, reason: 'движок «локально» — картинка никуда не отправлялась' };
+    }
+    if (!canvas || !canvas.width) return { ok: false, reason: 'страница ещё не загрузилась' };
+    try {
+      const file = this.toFile(canvas, 'koma-page.png');
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.enctype = 'multipart/form-data';
+      form.target = '_blank';                 // новая вкладка, читалка остаётся
+      form.action = this.action;
+      form.style.display = 'none';
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.name = 'encoded_image';
+      input.id = 'lensFile';
+      input.files = dt.files;                 // так файл и передаётся без выбора вручную
+      form.appendChild(input);
+      const dim = document.createElement('input');
+      dim.type = 'hidden';
+      dim.name = 'processed_image_dimensions';
+      dim.value = canvas.width + ',' + canvas.height;
+      form.appendChild(dim);
+      document.body.appendChild(form);
+      form.submit();
+      setTimeout(() => form.remove(), 4000);  // разметку за собой убираем
+      this.lastSentAt = Date.now();
+      this.pendingPage = opts.page ?? null;
+      return { ok: true, page: this.pendingPage, size: [canvas.width, canvas.height] };
+    } catch (e) {
+      return { ok: false, reason: String((e && e.message) || e) };
+    }
+  },
+
+  /**
+   * Текст из Lens → реплики страницы. Геометрия приблизительная (Lens не отдаёт
+   * координаты нам), зато порядок сверху вниз сохраняется, рамки показывают
+   * номера реплик, и озвучка работает тем же путём, что всегда.
+   */
+  textToLines(text) {
+    const rows = String(text || '')
+      .split(/\r?\n/)
+      .map(s => s.replace(/\s+/g, ' ').trim())
+      .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
+    const n = rows.length || 1;
+    return rows.map((t, i) => ({
+      text: t,
+      left: 0.04, right: 0.96,
+      top: +(i / n).toFixed(4), bottom: +(((i + 1) / n) - 0.002).toFixed(4),
+      confidence: 1, large: false, bandTop: 0, fromLens: true,
+    }));
+  },
+};
