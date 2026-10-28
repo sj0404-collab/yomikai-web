@@ -2698,16 +2698,17 @@ const SPEED_PRESETS = {
   // именно этот путь: текст верный («жизнь, будучи старшей сестрой тирана»).
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
-  // «Умно» — то, ради чего всё делалось: скорость «Быстро» с точностью, близкой
-  // к «Обычно». Устроено так: те же дешёвые настройки детектора и один вариант
-  // кропа для всех строк, а дорогие подготовки (перебор расширений и наложений)
-  // включаются ТОЛЬКО на строках, где словарь не узнал треть слов и больше, и
-  // не больше maxDeepVariants штук на строку. Замер 28.10 на ранере GitHub:
-  // «Обычно» 29,6 с / 464 вызова / 85,3 % словаря против «Умно» — см. журнал,
-  // часть 14. Ниже «Быстро» по словарю не опускается: базовый проход тот же.
-  smart:     { pageSide: 1280, detRetry: true, largeText: true, decodeVariants: false,
-               uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true,
-               autoDepth: true, maxDeepVariants: 5 },
+  // «Умно» — то, ради чего всё делалось: точность «Обычно» без его цены.
+  // Что дорого в «Обычно»: полный перебор расширений кропа (до 18 подготовок на
+  // строку) плюс дочинка слов. Что реально приносит верные слова (замер 28.10 по
+  // плотной манге): перебор подготовок САМОГО кропа (pad20, up2, contrast,
+  // pad20up2, bin0) — он и оставлен. Расширения кропа (extCrop) урезаны до
+  // одного дешёвого варианта, а дорогие ступени включаются только на строках,
+  // где словарь не узнал треть слов (autoDepth), и не больше трёх на строку.
+  // Числа — в журнале «Доработки», часть 14.
+  smart:     { pageSide: 1280, detRetry: true, largeText: true, decodeVariants: true,
+               uncoveredPass: true, decodeRetryBelow: 1, extCrop: 'light', breakWords: true,
+               autoDepth: true, maxDeepVariants: 3 },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
