@@ -5784,6 +5784,7 @@ const Reader = {
 
   /** Сохранить в буфер все реплики страницы (собранные из полос). */
   async savePageBuffer(i) {
+    if (!this.book || !this.book.id) return;       // некуда сохранять — не ошибка
     const data = this.regions.get(i);
     if (data && data.lines) await Buffer.put(i, data.lines);
   },
@@ -6021,6 +6022,11 @@ const Reader = {
 /* ───────────────────────── 9. Буфер строк ───────────────────────── */
 const Buffer = {
   async put(page, lines) {
+    // Буфер живёт в книге. Если книга не из библиотеки (страница открыта сама
+    // по себе), сохранять некуда — и падать из-за этого нельзя: раньше отсюда
+    // прилетал тост «Ошибка распознавания: Cannot read properties of null»,
+    // хотя распознавание прошло нормально (замечено 28.10 на прозе).
+    if (!Reader.book || !Reader.book.id) return;
     const key = 'buf:' + Reader.book.id + ':' + page;
     await DB.put('kv', { k: key, v: { page, at: Date.now(), rules: RULES.version, lines } });
   },
