@@ -33,7 +33,7 @@ PAGES = {
     'prose': os.path.join(ROOT, 'data', 'real', 'prose-15.jpg'),
 }
 
-JS_PAGE = r"""async ([b64img, speed, autoDepth, twice]) => {
+JS_PAGE = r"""async ([b64img, speed, autoDepth, twice, variantCap, gate]) => {
   const img = new Image(); img.src = 'data:image/jpeg;base64,' + b64img; await img.decode();
   const full = makeCanvas(img.naturalWidth, img.naturalHeight);
   full.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
@@ -41,6 +41,11 @@ JS_PAGE = r"""async ([b64img, speed, autoDepth, twice]) => {
   // и перебивать его снаружи нельзя, иначе замеряем не тот режим.
   const base = { ...RULES, speed };
   if (autoDepth === 0 || autoDepth === 1) base.autoDepth = autoDepth === 1;
+  // Ручные ручки поверх профиля — чтобы одним прогоном сравнить «сколько
+  // вариантов на строку» и «включён ли гейт», не пересобирая файл.
+  if (variantCap > 0) base.maxVariants = variantCap;
+  if (gate === 1) base.autoDepth = true;
+  if (gate === 0) base.autoDepth = false;
   const R = sanitizeRules(base);
   // МЕЖДУ ЗАМЕРАМИ КЭШ НАДО ЧИСТИТЬ. Ключ кэша — пиксели кропа и настройки
   // чтения, но НЕ профиль: если гнать «Быстро» и «Обычно» подряд в одной
@@ -74,6 +79,7 @@ JS_PAGE = r"""async ([b64img, speed, autoDepth, twice]) => {
   return {
     ms, calls: calls1, regions: texts.length, words: ws.length,
     known: ws.filter(w => Words.isKnown(w)).length,
+    cap: R.maxVariants, gate: !!R.autoDepth,
     ms2, calls2, same,
     ext: R.extCrop, side: R.pageSide, ad: !!R.autoDepth,
     texts: texts.map(x => x.slice(0, 80)),
@@ -93,11 +99,20 @@ def main():
     ap.add_argument('--autodepth', type=int, default=-1,
                     help='0/1 — включить/выключить дожим, 2 или -1 — как в профиле')
     ap.add_argument('--twice', type=int, default=0, help='второй проход ради кэша')
+    ap.add_argument('--variantcap', type=int, default=0, help='потолок вариантов кропа (0 — из профиля)')
+    ap.add_argument('--gate', type=int, default=-1, help='1 — включить гейт дожима, 0 — выключить, -1 — из профиля')
+    ap.add_argument('--exp', type=int, default=0, help='1 — прогон экспериментов «Умно» (cap/gate)')
     ap.add_argument('--all', action='store_true', help='все страницы × {fast,normal} × {0,1}')
     ap.add_argument('--out', default=os.path.join(ROOT, 'bench-result.json'))
     a = ap.parse_args()
 
     combos = []
+    if a.exp:
+        # Эксперименты «Умно»: сколько вариантов на строку оставить и нужен ли
+        # гейт. Мерим одно и то же на одних и тех же страницах.
+        for page in ('dense', 'prose'):
+            for cap, gate in ((0, 1), (4, 0), (5, 0)):
+                combos.append((page, 'normal', gate if gate else 0, cap))
     if a.all:
         for page in ('dense', 'prose'):
             for speed, ad in (('fast', 0), ('smart', 2), ('normal', 0), ('normal', 1)):
@@ -125,13 +140,17 @@ def main():
                 if(!w)continue;if(!rank.has(w))rank.set(w,n);n++;}
                 Words.rank=rank;Words.ready=rank.size>0;}""", f.read())
 
-        for i, (pname, speed, ad) in enumerate(combos):
+        for i, combo in enumerate(combos):
+            pname, speed, ad = combo[0], combo[1], combo[2]
+            vcap = combo[3] if len(combo) > 3 else a.variantcap
             twice = 1 if (a.twice or (a.all and i == 0)) else 0
-            r = page.evaluate(JS_PAGE, [b64(PAGES[pname]), speed, ad, twice])
+            r = page.evaluate(JS_PAGE, [b64(PAGES[pname]), speed, ad, twice,
+                                        vcap, a.gate])
             share = 100.0 * r['known'] / max(1, r['words'])
             r.update(page=pname, speed=speed, autoDepth=ad, dict=round(share, 1))
             results.append(r)
-            line = (f"RESULT page={pname} speed={speed} autoDepth={ad} ms={r['ms']} "
+            line = (f"RESULT page={pname} speed={speed} autoDepth={ad} cap={r.get('cap')} "
+                    f"gate={r.get('gate')} known={r['known']} ms={r['ms']} "
                     f"calls={r['calls']} regions={r['regions']} words={r['words']} "
                     f"dict={share:.1f}")
             if r['ms2'] is not None:
