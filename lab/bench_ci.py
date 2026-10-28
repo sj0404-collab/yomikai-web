@@ -37,7 +37,11 @@ JS_PAGE = r"""async ([b64img, speed, autoDepth, twice]) => {
   const img = new Image(); img.src = 'data:image/jpeg;base64,' + b64img; await img.decode();
   const full = makeCanvas(img.naturalWidth, img.naturalHeight);
   full.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
-  const R = sanitizeRules({ ...RULES, speed, autoDepth: autoDepth === 1 });
+  // autoDepth === 2 — «как в профиле»: у профиля «Умно» дожим включён сам,
+  // и перебивать его снаружи нельзя, иначе замеряем не тот режим.
+  const base = { ...RULES, speed };
+  if (autoDepth === 0 || autoDepth === 1) base.autoDepth = autoDepth === 1;
+  const R = sanitizeRules(base);
   // МЕЖДУ ЗАМЕРАМИ КЭШ НАДО ЧИСТИТЬ. Ключ кэша — пиксели кропа и настройки
   // чтения, но НЕ профиль: если гнать «Быстро» и «Обычно» подряд в одной
   // вкладке, второй замер попадает в кэш первого и показывает 0 вызовов
@@ -86,7 +90,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--page', default='dense', choices=sorted(PAGES))
     ap.add_argument('--speed', default='fast')
-    ap.add_argument('--autodepth', type=int, default=0)
+    ap.add_argument('--autodepth', type=int, default=-1,
+                    help='0/1 — включить/выключить дожим, 2 или -1 — как в профиле')
     ap.add_argument('--twice', type=int, default=0, help='второй проход ради кэша')
     ap.add_argument('--all', action='store_true', help='все страницы × {fast,normal} × {0,1}')
     ap.add_argument('--out', default=os.path.join(ROOT, 'bench-result.json'))
@@ -95,9 +100,8 @@ def main():
     combos = []
     if a.all:
         for page in ('dense', 'prose'):
-            for speed in ('fast', 'normal'):
-                for ad in (0, 1):
-                    combos.append((page, speed, ad))
+            for speed, ad in (('fast', 0), ('smart', 2), ('normal', 0), ('normal', 1)):
+                combos.append((page, speed, ad))
     else:
         combos.append((a.page, a.speed, a.autodepth))
 
