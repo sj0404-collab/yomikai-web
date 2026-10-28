@@ -48,5 +48,8 @@ jobs:
         run: |
           for m in models/*.onnx koma_models/*.onnx; do
             [ -f "$m" ] || continue
+            case "$(basename "$m")" in
+              koma_det*|*detection*) echo "== $m — детектор, контракт распознавателя к нему не относится"; continue;;
+            esac
             echo "== $m"; python3 tools/check_onnx_contract.py "$m" || exit 1
           done
