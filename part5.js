@@ -289,19 +289,54 @@ function bindUI() {
       const info = JSON.parse(window.KomaApp.version() || '{}');
       $('#appState').innerHTML = 'Оболочка: <b>' + (info.app || '—') + '</b> · читалка: <b>'
         + (info.page || '—') + '</b><br><span class="hint">Обновление качает koma-web.html из '
-        + 'релиза на GitHub и перезагружает страницу. Модели, книги и настройки остаются на месте.</span>';
+        + 'из единственного релиза на GitHub и перезагружает страницу. Модели, книги и настройки остаются '
+        + 'на месте, а новая версия приложения (АПК) ставится поверх старой — удалять ничего не нужно.</span>';
     } catch (e) { console.warn('KomaApp.version', e); }
   };
   if ($('#btnAppUpdate')) $('#btnAppUpdate').onclick = () => {
     if (!appReady()) { toast('Обновление есть только в приложении: в браузере страница не обновляется сама', 7000); return; }
+    // Обновление асинхронное: мост считает в своём потоке и присылает сообщения
+    // в window.__komaAppEvent. Поэтому первое, что видит человек, — «Проверяю…»
+    // сразу по нажатию, а дальше каждый шаг. Раньше кнопка молчала: синхронный
+    // вызов держал поток JS всё время проверки и скачивания.
+    const id = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    let settled = false;
+    const finish = (json) => {
+      if (settled) return;
+      settled = true;
+      let res = {};
+      try { res = JSON.parse(json || '{}'); } catch (e) { res = { updated: false, reason: String(json) }; }
+      if (res.updated) toast('Обновлено до ' + res.version + ' — перезагружаю…', 5000);
+      else if (res.reason) toast(String(res.reason).startsWith('уже свежая')
+        ? 'Обновлений нет: ' + res.reason
+        : 'Обновление не удалось: ' + res.reason, 7000);
+      else toast('Обновление: без ответа', 6000);
+      // Если оболочка старая и перезагрузку не сделает — сделаем сами.
+      if (res.updated && (!window.KomaApp.reloadNow || res.reload === false)) {
+        setTimeout(() => { try { window.KomaApp.reloadNow('обновление'); } catch (e) {} }, 1600);
+      }
+    };
+    window.__komaAppEvent = (eid, type, data) => {
+      if (eid !== id) return;
+      if (type === 'state') { toast(data, 5000); return; }
+      if (type === 'done') finish(data);
+    };
+    toast('Проверяю обновление…', 4000);
     try {
-      const res = JSON.parse(window.KomaApp.checkUpdate() || '{}');
-      if (res.updated) toast('Скачано обновление: ' + res.version + '. Перезагружаю…', 4000);
-      else toast('Обновлений нет: ' + (res.reason || 'уже свежая'), 4000);
-    } catch (e) { toast('Обновление не удалось: ' + ((e && e.message) || e), 6000); }
+      const ret = window.KomaApp.checkUpdate(id);
+      // Старая оболочка отвечала синхронно строкой JSON — поддерживаем и её.
+      if (typeof ret === 'string' && ret) finish(ret);
+    } catch (e) {
+      finish(JSON.stringify({ updated: false, reason: String((e && e.message) || e) }));
+    }
+    // Страховка: мост мог умереть молча — тогда через 3 минуты скажем прямо.
+    setTimeout(() => finish(JSON.stringify({ updated: false, reason: 'мост обновления не ответил' })), 180000);
   };
   if ($('#btnAppLens')) $('#btnAppLens').onclick = () => {
     if (!appReady()) { toast('Движок АПК есть только в приложении', 7000); return; }
+    // sync-вызов: нативный движок отвечает сетевым запросом, но здесь это одна
+    // явная проверка по нажатию, и человек ждёт именно её результата.
+    toast('Проверяю нативный Lens…', 4000);
     try {
       const r = JSON.parse(window.KomaApp.lensSelfTest() || '{}');
       toast(r.ok

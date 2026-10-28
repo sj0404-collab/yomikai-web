@@ -7,29 +7,32 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Автообновление читалки прямо с GitHub.
+ * Автообновление читалки с GitHub — из ОДНОГО релиза.
  *
- * Читалка — один html-файл, поэтому «обновление приложения» без Play Market
- * сводится к замене этого файла: скачали со страницы Releases, положили в
- * filesDir, WebView перезагрузили. Модели, книги и настройки при этом целы:
- * они живут в IndexedDB на постоянном адресе страницы
- * https://appassets.androidplatform.net/web/koma-web.html.
+ * Раньше на каждый выпуск создавался новый релиз, и в приложении это выглядело
+ * бестолково: обновление скачивало ту же версию, что уже стоит, и перезагружало
+ * страницу без всякого уведомления — «он обновляется на ту же версию и молчит».
  *
- * Источник — последний релиз репозитория, в котором лежит файл koma-web.html
- * (его кладёт туда сборка по тегу). Тег релиза имеет вид `page-v1.9.31`, и это
- * даёт бесплатную проверку без скачивания: сравнили тег с местной версией —
- * и всё. Экономия 11 МБ на каждом запуске.
+ * Теперь так:
+ *  • в репозитории **один** релиз с фиксированным тегом [RELEASE_TAG], файлы в
+ *    нём просто перезаписываются каждой сборкой (а не плодятся релизы);
+ *  • в релизе лежит крошечный `version.json` — сначала читаем только его
+ *    (сотня байт) и сравниваем версию. Совпала — **ничего не скачиваем**;
+ *  • качаем `koma-web.html` (11 МБ) только когда версия действительно новее,
+ *    и на каждом шаге сообщаем, что происходит.
  *
- * Защита от порчи: скачивание принимается, только если это действительно наша
- * сборка (>= 5 МБ и есть строка `VERSION = 'v…'`), и только после записи во
- * временный файл с атомарной заменой. Старая копия остаётся до успеха.
+ * Установка самого APK не нужна: обновляется страница, а данные (модели, книги,
+ * настройки) лежат в IndexedDB на постоянном адресе и остаются целыми.
  */
 class Updater(private val ctx: Context, private val assetsVersion: String) {
 
     companion object {
         private const val REPO = "sj0404-collab/yomikai-web"
-        private const val API_LATEST = "https://api.github.com/repos/$REPO/releases/latest"
+        /** Один релиз на всё: файлы в нём перезаписываются, тег не меняется. */
+        const val RELEASE_TAG = "page"
+        const val API_RELEASE = "https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG"
         const val FILE_NAME = "koma-web.html"
+        private const val VERSION_NAME = "version.json"
         private const val MIN_SIZE = 5_000_000L
         private const val UA = "KOMA-Android"
     }
@@ -41,49 +44,67 @@ class Updater(private val ctx: Context, private val assetsVersion: String) {
     /** Файл обновления, если он есть и выглядит целым. */
     fun currentFile(): File? = target.takeIf { it.exists() && it.length() > MIN_SIZE }
 
-    /** Какая версия страницы сейчас реально откроется. */
+    /**
+     * Версия страницы, которая реально откроется.
+     * Встроенная в АПК или уже скачанная — что там лежит, то и верно.
+     */
     fun localVersion(): String =
         if (currentFile() != null) prefs.getString("htmlVersion", null) ?: assetsVersion else assetsVersion
 
     /**
-     * Проверить и, если есть новее, скачать.
-     * Возвращает JSON для моста: {updated, version, reason}.
+     * Проверить и при необходимости скачать.
+     * [progress] получает человеческие сообщения — их показываем тостами.
+     * Возвращает JSON: {updated, version, reason}.
      */
-    fun check(): JSONObject {
+    fun check(progress: (String) -> Unit = {}): JSONObject {
         val out = JSONObject().put("updated", false)
         try {
-            val rel = JSONObject(get(API_LATEST, null))
-            val tag = rel.optString("tag_name").trim()
-            val tagVersion = tag.removePrefix("page-").trim()
-            if (tagVersion.isNotEmpty() && tagVersion == localVersion() && currentFile() != null) {
-                return out.put("reason", "уже свежая ($tagVersion)").put("version", tagVersion)
-            }
+            progress("Проверяю обновление на GitHub…")
+            val assetUrls = releaseAssets(get(API_RELEASE) { _, s -> s.readBytes().toString(Charsets.UTF_8) })
+                ?: return out.put("reason", "в релизе «$RELEASE_TAG» нет файлов")
 
-            // Ищем файл читалки среди вложений релиза.
-            var url: String? = null
-            val assets = rel.optJSONArray("assets")
-            if (assets != null) {
-                for (i in 0 until assets.length()) {
-                    val a = assets.getJSONObject(i)
-                    val name = a.optString("name")
-                    if (name == FILE_NAME || name.endsWith("/$FILE_NAME")) {
-                        url = a.optString("browser_download_url")
-                        break
-                    }
+            // 1. Сначала только версия — сотня байт вместо 11 МБ.
+            val remote = assetUrls[VERSION_NAME]
+            var remoteVersion = ""
+            if (remote != null) {
+                try {
+                    val vj = JSONObject(get(remote) { _, s -> s.readBytes().toString(Charsets.UTF_8) })
+                    remoteVersion = vj.optString("page").trim()
+                } catch (e: Throwable) {
+                    GlensEngine.log("version.json: ${e.message}")
                 }
             }
-            if (url == null || url.isEmpty()) {
-                return out.put("reason", "в релизе ${tag.ifEmpty { "?" }} нет файла $FILE_NAME — обновление не из чего брать")
+            val local = localVersion()
+            if (remoteVersion.isNotEmpty()) {
+                val cmp = compare(remoteVersion, local)
+                if (cmp <= 0) {
+                    return out.put("reason", "уже свежая ($local)")
+                        .put("version", local)
+                        .put("remote", remoteVersion)
+                }
+                progress("Найдена версия $remoteVersion — скачиваю…")
+            } else {
+                progress("Версии в релизе нет — проверяю страницу целиком")
             }
 
-            val bytes = get(url, null) { _, stream -> stream.readBytes() }
+            // 2. Качаем страницу.
+            val pageUrl = assetUrls[FILE_NAME]
+                ?: return out.put("reason", "в релизе нет файла $FILE_NAME")
+            val bytes = get(pageUrl) { conn, s ->
+                val total = conn.contentLengthLong
+                if (total > MIN_SIZE) progress("Скачиваю $remoteVersion (${total / 1024 / 1024} МБ)…")
+                s.readBytes()
+            }
             if (bytes.size < MIN_SIZE) return out.put("reason", "скачано подозрительно мало: ${bytes.size} Б")
             val text = String(bytes, Charsets.UTF_8)
             val ver = versionIn(text) ?: return out.put("reason", "в файле нет строки версии — не наша сборка")
-
-            // Уже эта версия (например, релиз без смены тега) — не трогаем файл.
-            if (ver == localVersion() && currentFile() != null) {
-                return out.put("reason", "уже свежая ($ver)").put("version", ver)
+            if (remoteVersion.isNotEmpty() && ver != remoteVersion) {
+                // Файл и version.json разъехались — доверия нет, старое не трогаем.
+                return out.put("reason", "версия в файле ($ver) не совпала с заявленной ($remoteVersion)")
+            }
+            // Та же версия, что уже стоит, — не перезаписываем и НЕ перезагружаем.
+            if (compare(ver, local) <= 0) {
+                return out.put("reason", "уже свежая ($local)").put("version", local)
             }
 
             tmp.writeBytes(bytes)
@@ -91,26 +112,37 @@ class Updater(private val ctx: Context, private val assetsVersion: String) {
                 target.delete()
                 if (!tmp.renameTo(target)) return out.put("reason", "не удалось записать файл")
             }
-            prefs.edit().putString("htmlVersion", ver).putString("etag", tag).apply()
-            GlensEngine.log("обновлено до $ver (${bytes.size} Б из $tag)")
-            out.put("updated", true).put("version", ver).put("bytes", bytes.size)
+            prefs.edit().putString("htmlVersion", ver).apply()
+            GlensEngine.log("обновлено до $ver (${bytes.size} Б)")
+            progress("Готово: $ver")
+            return out.put("updated", true).put("version", ver).put("bytes", bytes.size)
         } catch (e: Throwable) {
-            out.put("reason", (e.message ?: e.javaClass.simpleName))
+            return out.put("reason", (e.message ?: e.javaClass.simpleName))
         }
-        return out
     }
 
     // ── сеть ────────────────────────────────────────────────────────────────
-    private fun get(url: String, etag: String?): String = get(url, etag) { _, s -> s.readBytes() }.toString(Charsets.UTF_8)
 
-    private fun <T> get(url: String, etag: String?, read: (HttpURLConnection, java.io.InputStream) -> T): T {
+    private fun releaseAssets(json: String): Map<String, String>? {
+        val rel = JSONObject(json)
+        val assets = rel.optJSONArray("assets") ?: return null
+        val map = HashMap<String, String>()
+        for (i in 0 until assets.length()) {
+            val a = assets.getJSONObject(i)
+            val name = a.optString("name")
+            val url = a.optString("browser_download_url")
+            if (name.isNotEmpty() && url.isNotEmpty()) map[name] = url
+        }
+        return map.ifEmpty { null }
+    }
+
+    private fun <T> get(url: String, read: (HttpURLConnection, java.io.InputStream) -> T): T {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 12000
-            readTimeout = 60000
+            readTimeout = 120000
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", UA)
             setRequestProperty("Accept", "application/vnd.github+json")
-            if (etag != null) setRequestProperty("If-None-Match", etag)
         }
         val code = conn.responseCode
         if (code !in 200..299) throw IllegalStateException("GitHub ответил HTTP $code")
@@ -119,4 +151,15 @@ class Updater(private val ctx: Context, private val assetsVersion: String) {
 
     private fun versionIn(text: String): String? =
         Regex("VERSION = '(v[0-9.]+)'").find(text)?.groupValues?.get(1)
+
+    /** Сравнение версий вида v1.9.34: >0 — первая новее. */
+    private fun compare(a: String, b: String): Int {
+        fun parts(v: String) = v.removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
+        val x = parts(a); val y = parts(b)
+        for (i in 0 until maxOf(x.size, y.size)) {
+            val d = (x.getOrNull(i) ?: 0) - (y.getOrNull(i) ?: 0)
+            if (d != 0) return d
+        }
+        return 0
+    }
 }

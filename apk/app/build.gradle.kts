@@ -11,8 +11,10 @@ android {
         applicationId = "net.koma.reader"
         minSdk = 24            // WebViewAssetLoader + современный WebView есть с 21, но 24 безопаснее
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // versionCode растёт с каждой сборкой: иначе установка «поверх» может
+        // быть отвергнута как «та же версия».
+        versionCode = 34
+        versionName = "1.9.34"
 
         // Версию читалки знает только сам html. Читаем её при сборке и зашиваем
         // в BuildConfig — чтобы при старте не перечитывать 11 МБ ради сравнения
@@ -24,12 +26,32 @@ android {
         buildConfigField("String", "PAGE_VERSION", "\"$pageVer\"")
     }
 
+    /**
+     * ОДИН постоянный ключ на все сборки.
+     *
+     * Почему это важно: раньше подпись бралась из отладочного хранилища, а оно на
+     * каждом ранере GitHub создаётся заново с другим ключом. Из-за этого каждая
+     * новая сборка была «другим приложением»: Android отказывался ставить её
+     * поверх («Приложение не установлено»), и приходилось каждый раз удалять
+     * старое. Теперь ключ лежит в репозитории и одинаков для всех сборок, поэтому
+     * обновления встают поверх, а данные (модели, книги, настройки) остаются.
+     */
+    signingConfigs {
+        create("koma") {
+            storeFile = rootProject.file("keys/koma.jks")
+            storePassword = "koma-reader-2026"
+            keyAlias = "koma"
+            keyPassword = "koma-reader-2026"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("koma")
+        }
         release {
             isMinifyEnabled = false
-            // Подпись отладочным ключом: АПК ставится и работает. Для публикации
-            // в Play нужен свой keystore — см. README, шаг «Своя подпись».
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("koma")
         }
     }
 

@@ -148,18 +148,39 @@ class MainActivity : android.app.Activity() {
         web.addJavascriptInterface(KomaLensBridge(engine, appVersion) { web }, "KomaLens")
         web.addJavascriptInterface(speech, "KomaSpeech")
         web.addJavascriptInterface(
-            KomaAppBridge(updater, engine, appVersion) { reason -> runOnUiThread { reload(reason) } },
+            KomaAppBridge(updater, engine, appVersion, { web }) { reason -> runOnUiThread { reload(reason) } },
             "KomaApp"
         )
 
         web.loadUrl(START_URL)
 
-        // Автообновление: тихо, в фоне, после старта. Если скачалось новее —
-        // один раз перезагружаем и говорим об этом тостом.
+        // Автообновление при старте. «Тихо» — это про то, что не мешаем читать,
+        // а не про молчание: как только нашлась версия новее, человек видит
+        // «Найдена версия…», «Скачиваю…» и «Обновлено до …».
+        // Если версия та же (обычный случай) — ни одного сообщения и ни одной
+        // перезагрузки: ровно этого не хватало раньше.
         Thread {
-            val res = updater.check()
-            if (res.optBoolean("updated")) {
-                runOnUiThread { reload("Читалка обновлена до " + res.optString("version")) }
+            var announced = false
+            val res = updater.check { msg ->
+                // «Проверяю обновление…» на старте не показываем: это шум.
+                if (msg.startsWith("Найдена") || msg.startsWith("Скачиваю")) announced = true
+                if (announced) runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+            }
+            val updated = res.optBoolean("updated")
+            val reason = res.optString("reason")
+            runOnUiThread {
+                when {
+                    updated -> {
+                        Toast.makeText(this, "Обновлено до " + res.optString("version") + " — перезагружаю…",
+                            Toast.LENGTH_LONG).show()
+                        // Пауза перед перезагрузкой: иначе тост не успевают прочитать.
+                        web.postDelayed({ web.loadUrl(START_URL) }, 1500)
+                    }
+                    // Ошибку проверки видно, только если она настоящая (сеть, GitHub).
+                    // «уже свежая» — не ошибка и не повод для тоста.
+                    reason.isNotEmpty() && !reason.startsWith("уже свежая") ->
+                        Toast.makeText(this, "Обновление не проверено: $reason", Toast.LENGTH_LONG).show()
+                }
             }
         }.start()
     }

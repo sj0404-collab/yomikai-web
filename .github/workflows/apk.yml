@@ -1,14 +1,15 @@
 name: сборка АПК
 
 # Зачем: АПК-обёртка собирается здесь, на ранере, потому что в песочнице нет
-# Android SDK. Результат — устанавливаемый APK в артефактах запуска, а по тегу
-# ещё и релиз, из которого приложение само себя обновляет.
+# Android SDK.
 #
-# Запуск: Actions → «сборка АПК» → Run workflow. Автоматически — на правки в apk/.
+# Важное про обновления (28.10): релиз в репозитории ОДИН — тег `page`. Файлы в
+# нём (koma-web.html, version.json, APK) перезаписываются каждой сборкой, а не
+# плодятся новые релизы. Приложение читает version.json (сотня байт), сравнивает
+# версию и качает страницу только если она новее.
 #
-# Два вида установки:
-#  • artifact koma-apk-debug — APK для установки руками;
-#  • релиз (по тегу) — оттуда приложение тянет свежий koma-web.html само.
+# APK подписывается постоянным ключом apk/keys/koma.jks, поэтому новые сборки
+# ставятся ПОВЕРХ старых, без удаления (и без потери книг, моделей и настроек).
 
 on:
   workflow_dispatch:
@@ -16,6 +17,8 @@ on:
     paths:
       - 'apk/**'
       - '.github/workflows/apk.yml'
+      - 'part*.js'
+      - 'part1.html'
 
 jobs:
   build:
@@ -34,13 +37,18 @@ jobs:
       - name: Собрать читалку из частей
         run: |
           cat part1.html part0-ort.js part0-wasm.js part0-dict.js part2.js part3.js part4.js part5.js > koma-web.html
-          grep -o "VERSION = 'v[0-9.]*'" koma-web.html | head -1
+          VER=$(grep -o "VERSION = 'v[0-9.]*'" koma-web.html | head -1 | grep -o "v[0-9.]*")
+          echo "версия читалки: $VER" | tee -a "$GITHUB_STEP_SUMMARY"
           SZ=$(stat -c%s koma-web.html)
-          echo "читалка: $SZ Б" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "размер: $SZ Б" | tee -a "$GITHUB_STEP_SUMMARY"
           # Заглушка вместо сборки = пустое приложение. Лучше упасть здесь.
           test "$SZ" -gt 5000000
           mkdir -p apk/app/src/main/assets
           cp koma-web.html apk/app/src/main/assets/koma-web.html
+          # version.json — по нему приложение узнаёт о новой версии, не качая 11 МБ.
+          APP=$(grep -o 'versionName = "[0-9.]*"' apk/app/build.gradle.kts | head -1 | grep -o '[0-9.]*')
+          printf '{"page":"%s","app":"%s","built":"%s"}\n' "$VER" "$APP" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > version.json
+          cat version.json
 
       - name: Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -51,13 +59,15 @@ jobs:
         working-directory: apk
         run: gradle --no-daemon assembleDebug
 
-      - name: Итог сборки
+      - name: Подпись и итог
         run: |
           APK=$(find apk -name '*.apk' | head -1)
-          echo "APK: $APK" >> "$GITHUB_STEP_SUMMARY"
-          ls -l "$APK" >> "$GITHUB_STEP_SUMMARY"
-          md5sum "$APK" >> "$GITHUB_STEP_SUMMARY"
           cp "$APK" koma-reader-debug.apk
+          ls -l koma-reader-debug.apk >> "$GITHUB_STEP_SUMMARY"
+          md5sum koma-reader-debug.apk >> "$GITHUB_STEP_SUMMARY"
+          # Отпечаток ключа виден в логе: по нему проверяем, что ключ не сменился
+          # (сменился — обновление поверх не встанет).
+          keytool -printcert -jarfile koma-reader-debug.apk | grep -E "Owner|SHA256" | head -2
 
       - uses: actions/upload-artifact@v4
         with:
@@ -65,20 +75,18 @@ jobs:
           path: koma-reader-debug.apk
           if-no-files-found: error
 
-      # ── Автообновление: откуда приложение берёт новую читалку ──────────────
-      # Тег вида page-v1.9.31 (или v1.9.31) → релиз с koma-web.html и APK.
-      # Приложение видит тег `page-vX`, сравнивает с местной версией и, если
-      # новее, скачивает вложение — без Play Market.
-      - name: Опубликовать релиз
-        if: startsWith(github.ref, 'refs/tags/')
+      # ── Один релиз на всё ─────────────────────────────────────────────────
+      # Тег не меняется: `page`. Тело релиза тоже. Меняются только файлы.
+      - name: Выложить в единственный релиз «page»
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VER=$(grep -o "VERSION = 'v[0-9.]*'" koma-web.html | head -1 | grep -o "v[0-9.]*")
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "KOMA $VER ($TAG)" \
-            --notes "Читалка $VER. APK ставится руками; приложение само подтягивает koma-web.html из этого релиза." \
-            koma-web.html koma-reader-debug.apk \
-          || gh release upload "$TAG" koma-web.html koma-reader-debug.apk --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view page --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create page --repo "$GITHUB_REPOSITORY" \
+              --title "KOMA — обновления" \
+              --notes "Один релиз на все обновления: здесь всегда лежат последняя читалка (koma-web.html), её версия (version.json) и APK. Приложение само проверяет version.json и скачивает новую страницу; APK ставится поверх старого, без удаления." \
+              || true
+          gh release upload page version.json koma-web.html koma-reader-debug.apk \
+            --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view page --repo "$GITHUB_REPOSITORY" --json tagName,assets \
+            | tee -a "$GITHUB_STEP_SUMMARY"
