@@ -273,6 +273,41 @@ function bindUI() {
   };
 
   // правила
+  // ── Блок «Приложение (АПК)»: обновление читалки и проверка нативного Lens ──
+  // Показывается только если страница открыта внутри АПК: там есть мосты
+  // KomaApp и KomaLens. В браузере блока нет — и это честно, а не «кнопка есть,
+  // но ничего не делает».
+  const syncAppBlock = async () => {
+    const block = $('#appBlock');
+    if (!block) return;
+    const has = typeof window !== 'undefined' && window.KomaApp && typeof window.KomaApp.version === 'function';
+    block.style.display = has ? 'block' : 'none';
+    if (!has) return;
+    try {
+      const info = JSON.parse(window.KomaApp.version() || '{}');
+      $('#appState').innerHTML = 'Оболочка: <b>' + (info.app || '—') + '</b> · читалка: <b>'
+        + (info.page || '—') + '</b><br><span class="hint">Обновление качает koma-web.html с GitHub '
+        + 'и перезагружает страницу. Модели, книги и настройки остаются на месте.</span>';
+    } catch (e) { console.warn('KomaApp.version', e); }
+  };
+  document.addEventListener('koma-app', syncAppBlock);
+  setTimeout(syncAppBlock, 0);
+  if ($('#btnAppUpdate')) $('#btnAppUpdate').onclick = () => {
+    try {
+      const res = JSON.parse(window.KomaApp.checkUpdate() || '{}');
+      if (res.updated) toast('Скачано обновление: ' + res.version + '. Перезагружаю…', 4000);
+      else toast('Обновлений нет: ' + (res.reason || 'уже свежая'), 4000);
+    } catch (e) { toast('Обновление не удалось: ' + ((e && e.message) || e), 6000); }
+  };
+  if ($('#btnAppLens')) $('#btnAppLens').onclick = () => {
+    try {
+      const r = JSON.parse(window.KomaApp.lensSelfTest() || '{}');
+      toast(r.ok
+        ? 'Lens отвечает: ' + r.lines.length + ' строк(и) за ' + r.ms + ' мс'
+        : 'Lens не ответил: ' + (r.error || (r.antiBot ? 'антибот Google' : 'нет текста')), 9000);
+    } catch (e) { toast('Проверка Lens не удалась: ' + ((e && e.message) || e), 6000); }
+  };
+
   $('#btnRulesImport').onclick = () => {
     const inp = rulesInput;
     inp.onchange = async () => {
