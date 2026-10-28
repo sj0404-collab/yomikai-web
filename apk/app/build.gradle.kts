@@ -13,6 +13,15 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        // Версию читалки знает только сам html. Читаем её при сборке и зашиваем
+        // в BuildConfig — чтобы при старте не перечитывать 11 МБ ради сравнения
+        // с тегом релиза на GitHub.
+        val pageHtml = rootProject.file("../koma-web.html")
+        val pageVer = if (pageHtml.exists())
+            Regex("VERSION = '(v[0-9.]+)'").find(pageHtml.readText())?.groupValues?.get(1) ?: "unknown"
+        else "unknown"
+        buildConfigField("String", "PAGE_VERSION", "\"$pageVer\"")
     }
 
     buildTypes {
@@ -29,6 +38,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+
+    buildFeatures { buildConfig = true }
 }
 
 dependencies {
