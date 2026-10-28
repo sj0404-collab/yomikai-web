@@ -363,6 +363,14 @@
       <button class="btn" id="btnLensSend2">🔍 Открыть эту страницу в Lens</button>
       <button class="btn" id="btnLensPaste2">Вставить текст из Lens</button>
     </div>
+    <div class="hint" style="margin-top:10px">
+      <b>Прямое распознавание без сайта.</b> В АПК это делает встроенный движок
+      (мост <code>KomaLens</code>). В браузере Google не отдаёт ответ чужой
+      странице, поэтому нужен свой релей — укажите его адрес:
+    </div>
+    <input type="text" id="lensRelayUrl" placeholder="https://ваш-релей.example/lens"
+           style="margin-top:6px" autocomplete="off" spellcheck="false">
+    <div class="hint" id="lensRelayState" style="margin-top:4px"></div>
     <div class="lbl">АВТОЧТЕНИЕ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">
       <span>Читать вслух</span>
@@ -427,15 +435,20 @@
   <div class="body">
     <div class="kv" id="lensState"></div>
     <div class="hint" style="margin-top:8px">
-      1. Нажмите «Открыть в Lens» — страница уйдёт в Google <b>новой вкладкой</b>.<br>
-      2. На странице Lens откройте вкладку «Текст», выделите и скопируйте текст.<br>
-      3. Вернитесь сюда и нажмите «Вставить из буфера» (или вставьте в поле).<br>
+      <b>Распознать без сайта</b> — как в АПК: страница сама отправляет кадр и сама
+      забирает текст, никаких вкладок и сайтов. Работает, если в сборке есть движок
+      АПК (мост <code>KomaLens</code>) или указан свой релей в «Голос и чтение».<br><br>
+      Запасной путь, если прямого нет: откройте Lens в новой вкладке, вкладка
+      «Текст», скопируйте текст, вернитесь и нажмите «Вставить из буфера».<br>
       Дальше это обычные реплики страницы: рамки, порядок сверху вниз, озвучка.
     </div>
     <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
-      <button class="btn primary" id="btnLensOpen">Открыть в Lens</button>
+      <button class="btn primary" id="btnLensDirect">Распознать без сайта</button>
       <button class="btn" id="btnLensClip">Вставить из буфера</button>
     </div>
+    <div class="hint" id="lensDirectWhy" style="margin-top:6px"></div>
+    <div class="lbl">ЕСЛИ ПРЯМОЙ ПУТЬ НЕДОСТУПЕН</div>
+    <button class="btn" id="btnLensOpen">Открыть сайт Google Lens (новая вкладка)</button>
     <div class="lbl">ТЕКСТ ИЗ LENS</div>
     <textarea id="lensBox" rows="8" placeholder="Вставьте сюда текст со страницы Lens — по одной реплике в строке"></textarea>
     <div class="row" style="gap:8px;margin-top:10px">
