@@ -24,6 +24,11 @@ from playwright.sync_api import sync_playwright
 
 HTML = os.environ.get('HTML', '/home/user/koma-web.html')
 IMG = '/home/user/uploads/Screenshot_20261023-131019.jpg'
+MODELS = '/home/user/koma_models'
+
+
+def b64(path):
+    return base64.b64encode(open(path, 'rb').read()).decode()
 
 LENS_TEXT = [
     'ДА, ПОЧЕМУ И НЕТ?',
@@ -112,14 +117,16 @@ def main():
         }""", base64.b64encode(open(IMG, 'rb').read()).decode())
         page.evaluate(SPEECH_STUB)
 
-        n = page.evaluate("(t) => applyLensText(0, t).lines", '\n'.join(LENS_TEXT))
+        n = page.evaluate("async (t) => (await applyLensText(0, t)).lines", '\n'.join(LENS_TEXT))
         chk('текст из Lens принят в страницу', n == 4, n)
 
         frames = page.evaluate("""() => Array.from(document.querySelectorAll('.frame')).map(f => ({
             approx: f.classList.contains('approx'),
             num: (f.querySelector('.fnum') || {}).textContent || null }))""")
         chk('рамок столько же, сколько реплик', len(frames) == 4, len(frames))
-        chk('рамки помечены как приблизительные', all(f['approx'] for f in frames), frames)
+        # Без моделей детектор недоступен — рамки обязаны быть «примерными»
+        # (пунктир + номер), чтобы не притворяться точным местом на картинке.
+        chk('без моделей рамки помечены как примерные', all(f['approx'] for f in frames), frames)
         chk('на рамках есть номера по порядку', [f['num'] for f in frames] == ['1', '2', '3', '4'],
             [f['num'] for f in frames])
 
@@ -161,6 +168,30 @@ def main():
         again = page.evaluate("window.__said.slice()")
         chk('те же строки второй раз не зачитываются', all(t not in LENS_TEXT for t in again) or not again,
             again)
+
+        # 6. Когда модели есть, рамки ставятся по облачкам, найденным локальным
+        #    детектором, а не равными полосами на всю ширину.
+        print('· с моделями: рамки по облачкам')
+        page.evaluate("""async ([det, rec, dict]) => {
+            const t = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+            await DB.put('kv', { k: 'model:det', v: t(det).buffer });
+            await DB.put('kv', { k: 'model:rec', v: t(rec).buffer });
+            await DB.put('kv', { k: 'model:dict', v: new TextDecoder().decode(t(dict)) });
+            return await OCR.loadModels();
+        }""", [b64(os.path.join(MODELS, 'koma_det.onnx')), b64(os.path.join(MODELS, 'koma_rec.onnx')),
+               b64(os.path.join(MODELS, 'koma_dict.txt'))])
+        res = page.evaluate("async (t) => await applyLensText(0, t)", '\n'.join(LENS_TEXT))
+        chk('детектор расставил рамки', res.get('placed') == 'det', res)
+        geo = page.evaluate("""() => Array.from(document.querySelectorAll('.frame')).map(f => ({
+            approx: f.classList.contains('approx'),
+            w: parseFloat(f.style.width), top: parseFloat(f.style.top) }))""")
+        chk('рамки всё равно помечены как примерные', all(g['approx'] for g in geo), geo)
+        chk('рамки стоят на облачках, а не на всю ширину',
+            all(g['w'] < 95 for g in geo), [g['w'] for g in geo])
+        chk('рамки не совпадают с равными полосами',
+            len({round(g['top'], 2) for g in geo}) > 1 and
+            any(abs(g['top'] - i * 0.25) > 0.02 for i, g in enumerate(geo)),
+            [round(g['top'], 3) for g in geo])
 
         chk('ошибок JS нет', not errs, errs[:2])
         browser.close()
