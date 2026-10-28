@@ -348,6 +348,10 @@ function bindUI() {
   };
   $('#engineLocal').onclick = () => setEngine('local');
   $('#engineLens').onclick = () => setEngine('lens');
+  // То же переключение, но из шторки «Голос и чтение» — там человек настраивает
+  // чтение и не должен искать движок в другом месте.
+  $('#engineLocal2').onclick = () => setEngine('local');
+  $('#engineLens2').onclick = () => setEngine('lens');
   const lensSend = (pageIndex) => {
     const i = pageIndex ?? (Reader.textPage ?? Reader.page);
     const cv = Reader.canvases[i];
@@ -361,6 +365,15 @@ function bindUI() {
     toast('Открываю Google Lens — страница ' + (i + 1) + ' ушла в новую вкладку', 6000);
   };
   $('#btnLensOpen').onclick = () => lensSend(LENS.pendingPage);
+  // Из читалки в один тап: 🔍 в шапке открывает шторку Lens, а кнопки в
+  // настройках сразу отправляют текущую страницу / открывают вставку.
+  const openLensSheet = () => {
+    openSheet('sheetLens');
+    renderLensSheet(Reader.textPage ?? Reader.page);
+  };
+  $('#btnLensHdr').onclick = openLensSheet;
+  $('#btnLensSend2').onclick = () => lensSend(Reader.textPage ?? Reader.page);
+  $('#btnLensPaste2').onclick = openLensSheet;
   $('#btnLensSend').onclick = () => lensSend(Reader.textPage ?? Reader.page);
   $('#btnLensPaste').onclick = () => {
     openSheet('sheetLens');
@@ -520,12 +533,27 @@ function bindUI() {
  * и при каждом переключении — иначе кнопка «В файле» выглядела бы выбранной
  * всегда, даже когда человек уже переключился на Lens. */
 function syncEngineUI() {
-  for (const id of ['engineLocal', 'engineLens']) {
+  for (const id of ['engineLocal', 'engineLens', 'engineLocal2', 'engineLens2']) {
     const b = $('#' + id); if (!b) continue;
     b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
   }
   const note = $('#engineLensNote');
   if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
+  const hdr = $('#btnLensHdr');
+  if (hdr) {
+    hdr.classList.toggle('hot', LENS.isLens());
+    hdr.title = LENS.isLens() ? 'Google Lens включён' : 'Google Lens';
+  }
+  const hint2 = $('#engineHint2');
+  if (hint2) {
+    hint2.innerHTML = LENS.isLens()
+      ? '<b style="color:#ffd2d2">Сейчас включён Google Lens.</b> Кнопка «Распознать» отправит кадр страницы в Google и откроет Lens новой вкладкой. Текст вернётся через «Вставить текст из Lens».'
+      : '<b>В файле</b> — распознавание целиком на телефоне, ни один кадр никуда не уходит. <b>Google Lens</b> — отдельный движок для трудных страниц (чужой шрифт, старый скан): страница уходит в Google, текст возвращается кнопкой «Вставить текст из Lens» и дальше работает как обычный текст реплик.';
+  }
+  const sub = $('#rSub');
+  if (sub && Reader && Reader.pages && Reader.pages.length) {
+    sub.textContent = LENS.isLens() ? 'KOMA · Google Lens' : 'KOMA · в файле';
+  }
   const ort = $('#ortState');
   if (ort && LENS.isLens()) {
     ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
