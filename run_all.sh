@@ -20,11 +20,14 @@ done
 # Живой прогон Google Lens (вкладка, отправка, приём текста) — если в этом
 # окружении есть playwright. Без него — честно пропускаем, а не делаем вид.
 if python3 -c "import playwright" 2>/dev/null; then
-  out=$(timeout 900 python3 e2e_lens.py 2>&1 | tail -1)
-  printf '%-24s %s\n' "e2e_lens.py" "$out"
-  case "$out" in *"ВСЁ ПРОШЛО"*) ;; *) fail=1;; esac
+  for t in e2e_lens.py e2e_lens_read.py; do
+    out=$(timeout 900 python3 "$t" 2>&1 | tail -1)
+    printf '%-24s %s\n' "$t" "$out"
+    case "$out" in *"ВСЁ ПРОШЛО"*) ;; *) fail=1;; esac
+  done
 else
   printf '%-24s %s\n' "e2e_lens.py" "ПРОПУЩЕН: нет playwright"
+  printf '%-24s %s\n' "e2e_lens_read.py" "ПРОПУЩЕН: нет playwright"
 fi
 [ $fail -eq 0 ] && echo "ВСЁ ПРОШЛО" || echo "ЕСТЬ ПАДЕНИЯ"
 exit $fail
