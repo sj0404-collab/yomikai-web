@@ -309,6 +309,15 @@
       <button class="btn" id="btnRulesExport">Скачать</button>
       <button class="btn" id="btnRulesReset">Сброс</button>
     </div>
+    <!-- Блок виден ТОЛЬКО внутри АПК: в браузере обновлять и перезагружать нечего. -->
+    <div id="appBlock" style="display:none">
+      <div class="lbl">ПРИЛОЖЕНИЕ (АПК)</div>
+      <div class="kv" id="appState"></div>
+      <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn" id="btnAppUpdate">Проверить обновление</button>
+        <button class="btn" id="btnAppLens">Проверить Lens</button>
+      </div>
+    </div>
     <div class="lbl">БУФЕР СТРОК</div>
     <div class="kv" id="bufferInfo"></div>
     <div id="bufferList" style="max-height:190px;overflow:auto;margin-top:8px"></div>
