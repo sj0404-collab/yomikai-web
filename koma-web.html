@@ -177,6 +177,7 @@
     <button class="icon" id="btnBack">←</button>
     <div class="title"><b id="rTitle">…</b><span id="rSub">KOMA · лента</span></div>
     <button class="icon" id="btnScan" title="Распознать">▣</button>
+    <button class="icon" id="btnLensHdr" title="Google Lens">🔍</button>
     <button class="icon" id="btnSettings" title="Голос и чтение">🎙</button>
     <button class="icon" id="btnMore" title="Ещё">⋮</button>
   </header>
@@ -341,11 +342,27 @@
     <div class="lbl">СКОРОСТЬ РАСПОЗНАВАНИЯ</div>
     <div class="chips" id="speedChips">
       <button class="chip" data-speed="lightning">Молния</button>
+      <button class="chip" data-speed="smart">Умно</button>
       <button class="chip" data-speed="fast">Быстро</button>
       <button class="chip" data-speed="normal">Обычно</button>
       <button class="chip" data-speed="thorough">Тщательно</button>
     </div>
     <div class="hint" id="speedHint"></div>
+    <div class="lbl">ДВИЖОК РАСПОЗНАВАНИЯ</div>
+    <div class="chips" id="engineChips2">
+      <button class="chip" id="engineLocal2" data-engine="local">В файле (офлайн)</button>
+      <button class="chip" id="engineLens2" data-engine="lens">Google Lens · интернет</button>
+    </div>
+    <div class="hint" id="engineHint2" style="margin-top:6px">
+      <b>В файле</b> — распознавание целиком на телефоне, ни один кадр никуда не
+      уходит. <b>Google Lens</b> — отдельный движок для трудных страниц (чужой
+      шрифт, старый скан): страница уходит в Google, текст возвращается кнопкой
+      «Вставить текст из Lens» и дальше работает как обычный текст реплик.
+    </div>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" id="btnLensSend2">🔍 Открыть эту страницу в Lens</button>
+      <button class="btn" id="btnLensPaste2">Вставить текст из Lens</button>
+    </div>
     <div class="lbl">АВТОЧТЕНИЕ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">
       <span>Читать вслух</span>
@@ -2376,7 +2393,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.29';
+const VERSION = 'v1.9.30';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2644,6 +2661,7 @@ const DEFAULT_RULES = {
   decodeVariants: true,    // перебор всех подготовок кропа ради верных слов
   autoDepth: false,        // перебор вариантов сразу прекращать на лёгких строках
   autoDepthMin: 0.34,      // «трудная» строка: незнакомых слов ≥ трети и ≥ 3 слов
+  maxDeepVariants: 5,      // сколько ДОРОГИХ подготовок кропа пробовать на строку
   uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
@@ -2680,14 +2698,26 @@ const SPEED_PRESETS = {
   // именно этот путь: текст верный («жизнь, будучи старшей сестрой тирана»).
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
+  // «Умно» — то, ради чего всё делалось: скорость «Быстро» с точностью, близкой
+  // к «Обычно». Устроено так: те же дешёвые настройки детектора и один вариант
+  // кропа для всех строк, а дорогие подготовки (перебор расширений и наложений)
+  // включаются ТОЛЬКО на строках, где словарь не узнал треть слов и больше, и
+  // не больше maxDeepVariants штук на строку. Замер 28.10 на ранере GitHub:
+  // «Обычно» 29,6 с / 464 вызова / 85,3 % словаря против «Умно» — см. журнал,
+  // часть 14. Ниже «Быстро» по словарю не опускается: базовый проход тот же.
+  smart:     { pageSide: 1280, detRetry: true, largeText: true, decodeVariants: false,
+               uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true,
+               autoDepth: true, maxDeepVariants: 5 },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 3, bandOverlap: 0.25,
                extCrop: true, breakWords: true },
 };
-const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', normal: 'Обычно', thorough: 'Тщательно' };
-const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', normal: '≈80 с', thorough: '≈70 с' };
+const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', smart: 'Умно',
+  normal: 'Обычно', thorough: 'Тщательно' };
+const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', smart: '≈30–60 с',
+  normal: '≈80 с', thorough: '≈70 с' };
 
 let RULES = { ...DEFAULT_RULES };
 function sanitizeRules(r) {
@@ -2711,6 +2741,7 @@ function sanitizeRules(r) {
   R.decodeVariants = R.decodeVariants !== false;
   R.autoDepth = R.autoDepth === true;          // по умолчанию — полный перебор, без потери слов
   num('autoDepthMin', 0, 1);
+  num('maxDeepVariants', 0, 40);
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
@@ -4492,7 +4523,14 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
       // соберём все словарные слова. autoDepth=true — экономим вызовы модели
       // и лезем в перебор только на трудных строках (на замере 28.10: «Обычно»
       // 50,5 с → 37,6 с при словаре 83,8 % вместо 85,3 %).
-      const deepOn = () => R.autoDepth !== true || hardLine(text);
+      // Потолок дорогих подготовок на строку: даже на трудной строке дальше
+      // пяти вариантов прирост был нулевой, а время росло линейно.
+      let deepUsed = 0;
+      const deepOn = () => {
+        if (R.autoDepth !== true) return true;              // профиль без экономии
+        if (deepUsed >= R.maxDeepVariants) return false;
+        return hardLine(text);
+      };
       ladder:
       for (const mk of makers) {
         let e = null;
@@ -4503,7 +4541,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           try { pc = fn(e); } catch (err) { continue; }
           if (!pc) continue;
           crops++;
-          if (deep) DECODE_STATS.deepCalls = (DECODE_STATS.deepCalls || 0) + 1;
+          if (deep) { DECODE_STATS.deepCalls = (DECODE_STATS.deepCalls || 0) + 1; deepUsed++; }
           let t2, c2;
           try { [t2, c2] = await decodeCrop(pc); } catch (err) { pc = null; continue; }
           const s = textScore(t2, c2);
@@ -7396,6 +7434,10 @@ function bindUI() {
   };
   $('#engineLocal').onclick = () => setEngine('local');
   $('#engineLens').onclick = () => setEngine('lens');
+  // То же переключение, но из шторки «Голос и чтение» — там человек настраивает
+  // чтение и не должен искать движок в другом месте.
+  $('#engineLocal2').onclick = () => setEngine('local');
+  $('#engineLens2').onclick = () => setEngine('lens');
   const lensSend = (pageIndex) => {
     const i = pageIndex ?? (Reader.textPage ?? Reader.page);
     const cv = Reader.canvases[i];
@@ -7409,6 +7451,15 @@ function bindUI() {
     toast('Открываю Google Lens — страница ' + (i + 1) + ' ушла в новую вкладку', 6000);
   };
   $('#btnLensOpen').onclick = () => lensSend(LENS.pendingPage);
+  // Из читалки в один тап: 🔍 в шапке открывает шторку Lens, а кнопки в
+  // настройках сразу отправляют текущую страницу / открывают вставку.
+  const openLensSheet = () => {
+    openSheet('sheetLens');
+    renderLensSheet(Reader.textPage ?? Reader.page);
+  };
+  $('#btnLensHdr').onclick = openLensSheet;
+  $('#btnLensSend2').onclick = () => lensSend(Reader.textPage ?? Reader.page);
+  $('#btnLensPaste2').onclick = openLensSheet;
   $('#btnLensSend').onclick = () => lensSend(Reader.textPage ?? Reader.page);
   $('#btnLensPaste').onclick = () => {
     openSheet('sheetLens');
@@ -7568,12 +7619,27 @@ function bindUI() {
  * и при каждом переключении — иначе кнопка «В файле» выглядела бы выбранной
  * всегда, даже когда человек уже переключился на Lens. */
 function syncEngineUI() {
-  for (const id of ['engineLocal', 'engineLens']) {
+  for (const id of ['engineLocal', 'engineLens', 'engineLocal2', 'engineLens2']) {
     const b = $('#' + id); if (!b) continue;
     b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
   }
   const note = $('#engineLensNote');
   if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
+  const hdr = $('#btnLensHdr');
+  if (hdr) {
+    hdr.classList.toggle('hot', LENS.isLens());
+    hdr.title = LENS.isLens() ? 'Google Lens включён' : 'Google Lens';
+  }
+  const hint2 = $('#engineHint2');
+  if (hint2) {
+    hint2.innerHTML = LENS.isLens()
+      ? '<b style="color:#ffd2d2">Сейчас включён Google Lens.</b> Кнопка «Распознать» отправит кадр страницы в Google и откроет Lens новой вкладкой. Текст вернётся через «Вставить текст из Lens».'
+      : '<b>В файле</b> — распознавание целиком на телефоне, ни один кадр никуда не уходит. <b>Google Lens</b> — отдельный движок для трудных страниц (чужой шрифт, старый скан): страница уходит в Google, текст возвращается кнопкой «Вставить текст из Lens» и дальше работает как обычный текст реплик.';
+  }
+  const sub = $('#rSub');
+  if (sub && Reader && Reader.pages && Reader.pages.length) {
+    sub.textContent = LENS.isLens() ? 'KOMA · Google Lens' : 'KOMA · в файле';
+  }
   const ort = $('#ortState');
   if (ort && LENS.isLens()) {
     ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
