@@ -177,6 +177,7 @@
     <button class="icon" id="btnBack">←</button>
     <div class="title"><b id="rTitle">…</b><span id="rSub">KOMA · лента</span></div>
     <button class="icon" id="btnScan" title="Распознать">▣</button>
+    <button class="icon" id="btnLensHdr" title="Google Lens">🔍</button>
     <button class="icon" id="btnSettings" title="Голос и чтение">🎙</button>
     <button class="icon" id="btnMore" title="Ещё">⋮</button>
   </header>
@@ -341,11 +342,27 @@
     <div class="lbl">СКОРОСТЬ РАСПОЗНАВАНИЯ</div>
     <div class="chips" id="speedChips">
       <button class="chip" data-speed="lightning">Молния</button>
+      <button class="chip" data-speed="smart">Умно</button>
       <button class="chip" data-speed="fast">Быстро</button>
       <button class="chip" data-speed="normal">Обычно</button>
       <button class="chip" data-speed="thorough">Тщательно</button>
     </div>
     <div class="hint" id="speedHint"></div>
+    <div class="lbl">ДВИЖОК РАСПОЗНАВАНИЯ</div>
+    <div class="chips" id="engineChips2">
+      <button class="chip" id="engineLocal2" data-engine="local">В файле (офлайн)</button>
+      <button class="chip" id="engineLens2" data-engine="lens">Google Lens · интернет</button>
+    </div>
+    <div class="hint" id="engineHint2" style="margin-top:6px">
+      <b>В файле</b> — распознавание целиком на телефоне, ни один кадр никуда не
+      уходит. <b>Google Lens</b> — отдельный движок для трудных страниц (чужой
+      шрифт, старый скан): страница уходит в Google, текст возвращается кнопкой
+      «Вставить текст из Lens» и дальше работает как обычный текст реплик.
+    </div>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" id="btnLensSend2">🔍 Открыть эту страницу в Lens</button>
+      <button class="btn" id="btnLensPaste2">Вставить текст из Lens</button>
+    </div>
     <div class="lbl">АВТОЧТЕНИЕ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">
       <span>Читать вслух</span>
