@@ -1,0 +1,101 @@
+name: замер скорости
+
+# Зачем: локальная песочница на 1,9 ГБ памяти падала с «Target crashed» на
+# pageSide 1600, и длинные замеры скорости/качества не получались. Ранерам
+# GitHub это не мешает: 4 ядра, 16 ГБ, и matrix гоняет все сочетания страниц и
+# профилей ПАРАЛЛЕЛЬНО — таблица собирается за минуты, а не за полчаса.
+#
+# Запуск: кнопка Run workflow (или gh workflow run bench.yml).
+# Результат: строки RESULT в логе каждой задачи + общая таблица в Summary +
+# артефакт bench-result.json.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Что мерить: all | dense | prose'
+        default: all
+        type: choice
+        options: [all, dense, prose]
+  push:
+    paths:
+      - '.github/workflows/bench.yml'
+      - 'lab/bench_ci.py'
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        page: [dense, prose]
+        cfg:
+          - { speed: fast,   ad: 0 }
+          - { speed: fast,   ad: 1 }
+          - { speed: normal, ad: 0 }
+          - { speed: normal, ad: 1 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Зависимости
+        run: |
+          python3 -m pip install -q playwright
+          python3 -m playwright install --with-deps chromium
+      - name: Замер
+        env:
+          ONLY: ${{ github.event.inputs.only || 'all' }}
+        run: |
+          if [ "$ONLY" != "all" ] && [ "$ONLY" != "${{ matrix.page }}" ]; then
+            echo "пропуск: просили только $ONLY"; exit 0
+          fi
+          python3 lab/bench_ci.py --page ${{ matrix.page }} \
+            --speed ${{ matrix.cfg.speed }} --autodepth ${{ matrix.cfg.ad }} \
+            --twice 1 --out bench-${{ matrix.page }}-${{ matrix.cfg.speed }}-${{ matrix.cfg.ad }}.json \
+            | tee run.log
+      - name: Строки в Summary
+        if: always()
+        run: |
+          grep '^RESULT' run.log >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.page }}-${{ matrix.cfg.speed }}-${{ matrix.cfg.ad }}
+          path: |
+            bench-*.json
+            run.log
+          if-no-files-found: warn
+
+  summary:
+    needs: bench
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: arts
+      - name: Сводная таблица
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, json, os
+          rows = []
+          for f in glob.glob('arts/**/bench-*.json', recursive=True):
+              try:
+                  rows += json.load(open(f, encoding='utf-8'))
+              except Exception:
+                  pass
+          seen, uniq = set(), []
+          for r in rows:
+              k = (r['page'], r['speed'], r['autoDepth'])
+              if k in seen: continue
+              seen.add(k); uniq.append(r)
+          print('| страница | профиль | дожим | время, мс | вызовов | реплик | слов | словарь | повтор, мс |')
+          print('|---|---|---|---|---|---|---|---|---|')
+          for r in sorted(uniq, key=lambda x: (x['page'], x['speed'], x['autoDepth'])):
+              print(f"| {r['page']} | {r['speed']} | {r['autoDepth']} | {r['ms']} | {r['calls']} | "
+                    f"{r['regions']} | {r['words']} | {r['dict']} % | {r.get('ms2') or '—'} |")
+          print()
+          print(f"всего строк: {len(uniq)}")
+          PY
