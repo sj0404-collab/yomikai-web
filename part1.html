@@ -257,7 +257,18 @@
     <div class="row" style="margin-top:8px;gap:8px">
       <button class="btn" id="btnClearModels">Убрать модели</button>
     </div>
-    <div class="lbl">ДВИЖОК</div>
+    <div class="lbl">ДВИЖОК РАСПОЗНАВАНИЯ</div>
+    <div class="row" id="engineChips" style="gap:8px;flex-wrap:wrap">
+      <button class="btn hot" id="engineLocal" data-engine="local">В файле (офлайн)</button>
+      <button class="btn" id="engineLens" data-engine="lens">Google Lens (интернет)</button>
+    </div>
+    <div class="hint" id="engineLensNote" style="margin-top:8px">
+      <b>Google Lens</b> — отдельный движок для трудных страниц (чужой шрифт,
+      старый скан). Он <b>отправляет картинку в Google</b>: это единственное
+      место, где приложение выходит в сеть, и по умолчанию он выключен.
+      Текст из Lens возвращается в читалку кнопкой «Вставить из буфера» —
+      после этого работают рамки, порядок реплик и озвучка.
+    </div>
     <div id="ortState" class="kv hint"></div>
     <div id="engineNote" class="hint" style="display:none;color:#ffd2d2;margin-top:6px"></div>
     <div id="dictState" class="hint" style="margin-top:6px"></div>
@@ -368,7 +379,40 @@
       <button class="btn primary" id="btnRescan">Распознать заново</button>
       <button class="btn" id="btnSpeakPage">Прочитать</button>
     </div>
+    <div class="row" style="gap:8px;margin-top:8px">
+      <button class="btn" id="btnLensSend">🔍 Открыть в Google Lens</button>
+      <button class="btn" id="btnLensPaste">Вставить текст из Lens</button>
+    </div>
     <button class="btn" id="closeSheets4" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: текст из Google Lens ═══ -->
+<div class="sheet" id="sheetLens">
+  <div class="head">Google Lens</div>
+  <div class="body">
+    <div class="kv" id="lensState"></div>
+    <div class="hint" style="margin-top:8px">
+      1. Нажмите «Открыть в Lens» — страница уйдёт в Google <b>новой вкладкой</b>.<br>
+      2. На странице Lens откройте вкладку «Текст», выделите и скопируйте текст.<br>
+      3. Вернитесь сюда и нажмите «Вставить из буфера» (или вставьте в поле).<br>
+      Дальше это обычные реплики страницы: рамки, порядок сверху вниз, озвучка.
+    </div>
+    <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn primary" id="btnLensOpen">Открыть в Lens</button>
+      <button class="btn" id="btnLensClip">Вставить из буфера</button>
+    </div>
+    <div class="lbl">ТЕКСТ ИЗ LENS</div>
+    <textarea id="lensBox" rows="8" placeholder="Вставьте сюда текст со страницы Lens — по одной реплике в строке"></textarea>
+    <div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn primary" id="btnLensApply">В текст страницы</button>
+      <button class="btn" id="btnLensRead">Применить и прочитать</button>
+    </div>
+    <div class="hint" id="lensDanger" style="color:#ffd2d2;margin-top:10px">
+      Внимание: пока включён движок «Google Lens», кнопка «Распознать» отправляет
+      картинку страницы в интернет. Режим «В файле» ничего не отправляет.
+    </div>
+    <button class="btn" id="closeSheets5" style="margin-top:18px;width:100%">Закрыть</button>
   </div>
 </div>
 
