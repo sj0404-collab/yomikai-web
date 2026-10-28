@@ -79,6 +79,11 @@ api2.OCR.det = { inputNames: ['x'], outputNames: ['y'], run: async (f) => {
   const d = new Float32Array(f.x.dims[2] * f.x.dims[3]).fill(0);
   return { y: { dims: [1, 1, f.x.dims[2], f.x.dims[3]], data: d } };
 } };
+// Новый инвариант: запасной путь пускают только с ЖИВЫМИ обеими сессиями —
+// иначе на телефоне было падение «reading 'inputNames'» на пустой сессии.
+// Тест проверяет геометрию полосы, поэтому распознаватель здесь тоже заглушка.
+api2.OCR.rec = { inputNames: ['x'], outputNames: ['y'],
+  run: async () => ({ y: { dims: [1, 1, 1, 519], data: new Float32Array(519) } }) };
 const res = await api2.recognizePage(pageCanvas, api2.RULES, null, { y0: 4000, y1: 4800 });
 ok(res.band && res.band.y0 === 4000, 'в результате видно, что это полоса 4000…4800');
 

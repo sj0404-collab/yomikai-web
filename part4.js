@@ -2,7 +2,7 @@
 /* ───────────────────────── 8. Читалка ───────────────────────── */
 const Reader = {
   book: null, pages: [], urls: [], canvases: [], imgEls: [],
-  mode: 'vertical', dir: 'rtl', page: 0, frames: false, follow: true,
+  mode: 'vertical', dir: 'rtl', page: 0, frames: true, follow: true,
   regions: new Map(),          // page → {regions, boxes, ms}
   bandCache: new Map(),        // page → Map(ключ полосы → распознанное)
                                // (поле bands занято массивом полос из bandsOf)
@@ -483,7 +483,10 @@ const Reader = {
 
     // Полоса, которую сейчас видно: ключ нужен, чтобы при прокрутке
     // распознавать новые куски, а уже распознанные не гонять заново.
-    const band = opts.full ? null : this.visibleBandPx(i);
+    // opts.bandPx — явная полоса в пикселях кадра. Нужна, чтобы распознать
+    // следующую полосу ЗАРАНЕЕ, пока звучит речь, и не ждать 3 секунды после
+    // прокрутки (на телефоне 22:11 это выглядело как «прокрутил и молчит»).
+    const band = opts.full ? null : (opts.bandPx || this.visibleBandPx(i));
     const bandKey = band ? band.key : 'page';
     if (!(this.bandCache instanceof Map)) this.bandCache = new Map();
     const bandMap = this.bandCache.get(i) || new Map();
@@ -564,10 +567,19 @@ const Reader = {
       await this.savePageBuffer(i);
       this.paintPage(i);
       if (silent) return this.regions.get(i);      // молча: это фоновая загрузка
-      toast(`${band ? 'Полоса' : 'Страница'} ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${fresh.length} реплик на полосе`
+      // Числа берём только те, что есть. Нативный проход неделим (детектор и
+      // распознавание идут одним вызовом), поэтому для него печатаем один
+      // замер; раньше поля были пустыми и тост писал «NaN с».
+      const secTxt = (v) => (Number.isFinite(v) && v > 0 ? (v / 1000).toFixed(1) : null);
+      const nativePass = (res.via === 'native' || res.detPass === 'native');
+      const totalSec = secTxt(res.ms)
+        || secTxt((Number(res.detMs) || 0) + (Number(res.recMs) || 0)) || '?';
+      const how = nativePass
+        ? `нативно, ${res.crops} строк`
+        : `детектор ${secTxt(res.detMs) || '0.0'} с, распознавание ${secTxt(res.recMs) || '0.0'} с, ${res.crops} строк`;
+      toast(`${band ? 'Полоса' : 'Страница'} ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${fresh.length} реплик`
         + (parts.length > 1 ? `, всего ${lines.length} на странице` : '')
-        + ` · ${(res.ms / 1000).toFixed(1)} с (детектор ${(res.detMs / 1000).toFixed(1)} с, `
-        + `распознавание ${(res.recMs / 1000).toFixed(1)} с, ${res.crops} строк)`, 6000);
+        + ` · ${totalSec} с (${how})`, 6000);
       // Шторка остаётся открытой — и обязательно перерисовывается.
       if ($('#sheetText').classList.contains('on')) renderTextSheet(i);
       return this.regions.get(i);
@@ -656,6 +668,87 @@ const Reader = {
       try { await this.scanPage(i, { full: true, silent: true }); } catch (e) { /* фон — молча */ }
     }, 700);
   },
+  /* ── Полосы: распознать ВПЕРЁД, прокрутить ПОСЛЕ ──────────────────────── */
+
+  /** Полоса (доли страницы) → пиксели кадра + ключ для кэша полос. */
+  bandPx(i, b) {
+    const c = this.canvases[i];
+    if (!c || !b || b.whole) return null;
+    const y0 = clamp(Math.round(b.top * c.height), 0, c.height);
+    const y1 = clamp(Math.round(b.bottom * c.height), 0, c.height);
+    if (y1 - y0 < 32) return null;
+    return { y0, y1, vy0: y0, vy1: y1,
+      key: 'b' + (b.index || 0) + ':' + Math.round(y0 / 96) + '-' + Math.round(y1 / 96) };
+  },
+  /** Уже распознана ли эта полоса (в кэше полос или страница целиком). */
+  bandScanned(i, b) {
+    const data = this.regions.get(i);
+    const maps = this.bandCache && this.bandCache.get(i);
+    if (data && !maps) return true;                 // страница распознана целиком
+    if (!maps) return false;
+    const px = this.bandPx(i, b);
+    if (!px) return !!data;
+    const h = Math.max(1, px.y1 - px.y0);
+    for (const [, part] of maps) {
+      const r = part && part.res && part.res.band;
+      if (!r) return true;                          // этот кусок — вся страница
+      if (Math.min(r.y1, px.y1) - Math.max(r.y0, px.y0) > h * 0.6) return true;
+    }
+    return false;
+  },
+  /**
+   * Гарантировать текст полосы: при необходимости распознать её ЗДЕСЬ и сейчас.
+   * Возвращает непрочитанные реплики этой полосы.
+   */
+  async ensureBandLines(i, ni) {
+    const bands = this.bands || [];
+    const b = bands[ni];
+    if (!b) return [];
+    this.bandIndex = ni;
+    this.band = b;
+    if (b.whole) return this.unspokenInBand();
+    await this.waitIdle();
+    if (!this.bandScanned(i, b)) {
+      const px = this.bandPx(i, b);
+      if (px) await this.scanPage(i, { bandPx: px });
+    }
+    this.band = b;
+    return this.unspokenInBand();
+  },
+  /** Прокрутить ленту ровно к началу полосы (без накопления сдвига). */
+  scrollToBand(i, ni, animate = true) {
+    const b = (this.bands || [])[ni];
+    const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+    const sc = $('#strip');
+    if (!b || !wrap || !sc) return false;
+    const h = wrap.getBoundingClientRect().height || ((this.pageRect(i) || {}).height || 0);
+    if (!h) return false;
+    sc.scrollTo({ top: Math.max(0, (wrap.offsetTop || 0) + b.top * h), behavior: animate ? 'smooth' : 'auto' });
+    return true;
+  },
+  /**
+   * Пока человек слушает текущую полосу — тихо распознать следующую.
+   * Это и убирает «прокрутил и несколько секунд молчит»: к моменту перехода
+   * текст следующей полосы уже посчитан.
+   */
+  prefetchBandAhead() {
+    if (!OCR.ready || RULES.pipeline === false) return;
+    const i = this.page, bands = this.bands || [];
+    const ni = (this.bandIndex || 0) + 1;
+    if (ni >= bands.length) return;             // дальше страница — её prefetchNext
+    clearTimeout(this._bandTimer);
+    this._bandTimer = setTimeout(async () => {
+      try {
+        if (typeof TTS !== 'undefined' && TTS.stopped !== false) return;  // не читаем
+        if (State.scanning || State.prefetching) return;
+        if (Reader.bandScanned(i, bands[ni])) return;
+        const px = Reader.bandPx(i, bands[ni]);
+        if (!px) return;
+        await Reader.scanPage(i, { bandPx: px, silent: true });
+      } catch (e) { /* фон — молча */ }
+    }, 500);
+  },
+
   /** Дождаться конца фоновой загрузки, чтобы не запускать два распознавания. */
   async waitIdle(ms = 25000) {
     const t0 = Date.now();
@@ -812,7 +905,11 @@ const VOICE = {
   /** Список голосов в одном формате: {name, lang, voiceURI}. */
   voices() {
     if (this.native()) {
-      if (this._voices) return this._voices;
+      // Пустой ответ НЕ кэшируем: Android TTS инициализируется асинхронно, и
+      // первый вызов почти всегда приходит раньше, чем движок готов. Раньше
+      // пустой список запоминался навсегда — отсюда «Система не дала ни одного
+      // голоса» (телефон 22:12) при живом синтезе.
+      if (this._voices && this._voices.length) return this._voices;
       try {
         const raw = window.KomaSpeech.voices();
         const arr = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || []));
@@ -1028,8 +1125,26 @@ const TTS = {
     }
     const avail = VOICE.voices();
     if (!avail.length) {
-      // В АПК список голосов даёт Android; пустой список = в системе нет TTS-движка.
-      toast('Система не дала ни одного голоса: Настройки Android → Синтез речи', 7000);
+      if (VOICE.native()) {
+        // В АПК список голосов даёт Android. Пустой список ≠ «нет синтеза»:
+        //  • движок ещё поднимается — ждём и повторяем (до двух раз);
+        //  • движок готов, но список голосов не отдал — говорим системным
+        //    голосом по умолчанию, а не молчим.
+        if (VOICE.nativeReady() === false && (this._voiceTries || 0) < 2) {
+          this._voiceTries = (this._voiceTries || 0) + 1;
+          toast('Android TTS просыпается — повторю через секунду', 2500);
+          setTimeout(() => { if (!this.stopped) this.speakLine(line, then); }, 1100);
+          return;
+        }
+        if (!this._noVoiceHinted) {
+          this._noVoiceHinted = true;
+          console.warn('список голосов пуст, читаю системным голосом по умолчанию');
+        }
+      } else {
+        toast('Система не дала ни одного голоса: Настройки Android → Синтез речи', 7000);
+      }
+    } else {
+      this._voiceTries = 0;
     }
     const chosen = this.pickVoice();
     if (chosen && this.voice && chosen.voiceURI !== this.voice.voiceURI) {
@@ -1099,6 +1214,9 @@ const TTS = {
     }, 1200);
     // Прокрутка — ПОСЛЕ запуска речи и в try: ошибка геометрии не должна съедать звук.
     try { this.followLine(line); } catch (e) { console.warn('не прокрутил к реплике', e); }
+    // Пока звучит эта реплика — тихо распознаём следующую полосу. Так переход
+    // не упирается в ожидание: к моменту «дочитал» текст уже готов.
+    try { Reader.prefetchBandAhead(); } catch (e) { console.warn('предраспознавание полосы', e); }
   },
   /** Пауза: в браузере — настоящая, в АПК — остановка с продолжением реплики заново. */
   pauseRead() {
@@ -1258,39 +1376,40 @@ const TTS = {
       const bands = Reader.bands || [];
       const ni = (Reader.bandIndex || 0) + 1;
       if (ni < bands.length) {
-        Reader.bandIndex = ni;
-        Reader.band = bands[ni];
-        const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
-        const sc = $('#strip');
-        const h = wrap ? wrap.getBoundingClientRect().height : ((Reader.pageRect(i) || {}).height || 0);
-        if (sc && wrap && h) {
-          // Абсолютная позиция полосы внутри ленты — без накопления сдвига,
-          // иначе к третьей полосе лента уезжала на следующую страницу.
-          const top = (wrap.offsetTop || 0) + bands[ni].top * h;
-          sc.scrollTo({ top, behavior: 'smooth' });
-          await sleep(420);
+        // ПОРЯДОК ВАЖЕН: сначала распознаём полосу, потом прокручиваем к ней.
+        // Было наоборот — экран прыгал на ещё не распознанную полосу, голос
+        // молчал, полоса оказывалась пустой, экран прыгал дальше. С телефона
+        // это выглядело как «резко скролит и не читает, а читает спустя
+        // несколько прокруток» (скриншоты 22:11–22:12).
+        const un = await Reader.ensureBandLines(i, ni);
+        if (!un.length) {
+          // Читать нечего — НЕ прокручиваем экран впустую: идём к следующей
+          // полосе так же, заранее, и прокрутим один раз туда, где текст есть.
+          continue;
         }
+        Reader.scrollToBand(i, ni);
+        await sleep(260);
         Reader.page = i;
-        await Reader.waitIdle();
-        await Reader.scanCurrent(false);        // ключ полосы другой — распознаём её
-        const un = Reader.unspokenInBand();
-        if (un.length) return this.readQueue(un);
-        continue;                                // полоса пустая/уже прочитана
+        return this.readQueue(un);
       }
-      // Полосы кончились — следующая страница
+      // Полосы кончились — следующая страница. Тоже: распознать, потом листать.
       if (i < Reader.pages.length - 1) {
+        const next = i + 1;
+        await Reader.ensureLoaded(next);
         Reader.bandIndex = 0;
         // И «текущая полоса» тоже должна вернуться к первой: иначе на новой
         // странице читались реплики ПРОШЛОЙ полосы (пропускался верх страницы).
+        Reader.page = next;
         Reader.band = (Reader.bands || [])[0] || null;
-        Reader.scrollToPage(i + 1);
-        Reader.page = i + 1;
-        page = i + 1;                       // дальше читаем уже эту страницу
-        await sleep(320);
         await Reader.waitIdle();
-        await Reader.scanCurrent(false);
+        if (!Reader.regions.get(next)) await Reader.scanPage(next, { full: true, silent: true }).catch(() => {});
+        Reader.page = next;
+        Reader.bandIndex = 0;
+        Reader.band = (Reader.bands || [])[0] || null;
         const un = Reader.unspokenInBand();
-        if (un.length) return this.readQueue(un);
+        Reader.scrollToPage(next);
+        page = next;                        // дальше читаем уже эту страницу
+        if (un.length) { await sleep(200); return this.readQueue(un); }
         continue;
       }
       this.stop();

@@ -55,10 +55,20 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   R.regions.set(1, { lines: [{ text: 'ТРЕТЬЯ РЕПЛИКА', top: 0.1, bottom: 0.2 }] });
 
   let scanned = [];
-  // как в жизни: при переходе к новой полосе она ещё не распознана — сканируем
-  R.scanCurrent = async () => {
-    scanned.push(R.page);
-    R.regions.set(R.page, { lines: R.regions.get(R.page).allLines || R.regions.get(R.page).lines });
+  // как в жизни: первая полоса распознана (есть в кэше полос), вторая — нет.
+  R.bandCache.set(0, new Map([['b0', { res: { band: { y0: 0, y1: 1500 } }, lines: [] }]]));
+  // При переходе к новой полосе страница зовёт scanPage с ЯВНОЙ полосой
+  // (распознать до прокрутки), а не «что видно».
+  R.scanPage = async (i, opts) => {
+    scanned.push({ page: i, bandPx: !!(opts && opts.bandPx) });
+    const all = R.regions.get(i).allLines || R.regions.get(i).lines;
+    R.regions.set(i, { lines: all });
+    if (opts && opts.bandPx) {
+      const m = R.bandCache.get(i) || new Map();
+      m.set(opts.bandPx.key, { res: { band: { y0: opts.bandPx.y0, y1: opts.bandPx.y1 } }, lines: all });
+      R.bandCache.set(i, m);
+    }
+    return R.regions.get(i);
   };
   R.regions.get(0).allLines = R.regions.get(0).lines.slice();
   R.regions.get(0).lines = [R.regions.get(0).allLines[0]];   // пока видна только 1-я полоса

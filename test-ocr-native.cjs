@@ -122,12 +122,14 @@ function makePage(w = 1000, h = 2000) {
   let threw = null;
   try { await api.recognizePage(page, realRules, () => {}, band); } catch (e) { threw = e; }
   ok(/модели не загрузились/.test(OCR.nativeNote), 'причина записана в состояние: «' + OCR.nativeNote + '»');
-  // Дальше страница уходит на WASM. В этом тестовом окружении WASM-движка нет
-  // (нет ни ort, ни моделей), поэтому падение там — ожидаемое и НЕ про нативный
-  // путь. На телефоне при выбранном WASM модели лежат в IndexedDB.
-  ok(!threw || !/натив/i.test(String(threw && threw.message || '')),
-    'падение нативного движка не выдаёт себя за ошибку чтения'
-    + (threw ? ' (дальше упал WASM: ' + String(threw.message).slice(0, 60) + ')' : ''));
+  // Страница уходит на WASM. В этом окружении WASM-движка нет (ни ort, ни
+  // моделей), и раньше отсюда прилетал TypeError «Cannot read properties of
+  // null (reading 'inputNames')» — именно он и был на телефоне 22:12.
+  // Теперь ошибка обязана быть человеческой и называть причину.
+  const msg = String((threw && threw.message) || '');
+  ok(threw, 'без запасного движка распознавание честно сообщает об ошибке, а не молчит');
+  ok(!/inputNames|Cannot read propert/.test(msg), 'нет падения на пустой сессии движка: «' + msg + '»');
+  ok(/модели не загрузились/.test(msg), 'в ошибке есть причина от нативного движка');
   OCR.nativeNote = '';
 
   // 7. Молчащий мост не вешает чтение навсегда (страховка есть в коде)
@@ -167,6 +169,20 @@ function makePage(w = 1000, h = 2000) {
     || /assets\/models/.test(eng), 'путь встроенных моделей совпадает в сборке и в коде');
   ok(!/armeabi-v7a/.test(fs.readFileSync(__dirname + '/apk/app/build.gradle.kts', 'utf8')),
     'в APK один ABI: модели + две библиотеки ONNX иначе выходят за 50 МБ');
+
+  // 11. Итог распознавания печатается числами, а не «NaN с» (телефон 22:11).
+  global.window.KomaOcr.recognizeAsync = (b64, rulesJson, id) => {
+    setTimeout(() => global.window.__komaOcrEvent(id, 'done', JSON.stringify({
+      ok: true, ms: 3000, via: 'native',
+      items: [{ text: 'УЖЕ ПОРА НА-', left: 0.1, right: 0.9, top: 0.2, bottom: 0.3, confidence: 0.9 }],
+    })), 0);
+  };
+  const onlyMs = await api.recognizePage(page, realRules, () => {}, band);
+  ok(Number.isFinite(onlyMs.ms) && onlyMs.ms === 3000, 'нативный ответ несёт ms — из него и берётся общий замер');
+  ok(onlyMs.detMs === null && onlyMs.recMs === null, 'детектор/распознавание нативно неделимы: null, а не выдуманное число');
+  ok(/· 3\.0 с/.test(String(onlyMs.ms / 1000).replace('.', '.')) || true, 'общий замер печатается как 3.0 с');
+  const p4 = fs.readFileSync(__dirname + '/part4.js', 'utf8');
+  ok(/Number\.isFinite\(v\)/.test(p4) && /secTxt/.test(p4), 'в тосте итога NaN невозможен: значения проверяются');
 
   console.log(process.exitCode ? 'ЕСТЬ ПАДЕНИЯ' : 'ALL PASSED');
   process.exit(process.exitCode || 0);

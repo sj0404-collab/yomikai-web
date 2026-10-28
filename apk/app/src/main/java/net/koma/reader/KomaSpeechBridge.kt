@@ -114,6 +114,15 @@ class KomaSpeechBridge(
         } catch (e: Exception) {
             GlensEngine.log("voices: ${e.message}")
         }
+        // Часть движков (в том числе Google TTS сразу после установки) список
+        // голосов не отдаёт, хотя говорить умеет: voices == null/пусто, а
+        // speak() при этом произносит текст системным голосом. Раньше страница
+        // в этом случае писала «Система не дала ни одного голоса» и отказывалась
+        // читать — хотя синтез живой. Отдаём один честный пункт: системный.
+        if (out.length() == 0) {
+            out.put(JSONObject().put("name", "Системный голос Android")
+                .put("lang", "ru-RU").put("voiceURI", "native:default"))
+        }
         return out.toString()
     }
 

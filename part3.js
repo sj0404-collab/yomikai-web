@@ -32,6 +32,11 @@ const DEFAULT_RULES = {
   // По умолчанию 'auto': на телефоне это быстрее, а если нативный движок не
   // поднялся — страница сама возвращается к WASM и говорит об этом.
   ocrEngine: 'auto',
+  // Показывать рамки реплик на странице. Раньше это жило только в памяти
+  // Reader: после перезапуска рамки пропадали, и выглядело это как «рамки
+  // делись» (скриншот 22:11). Теперь настройка в правилах, по умолчанию
+  // включена — рамка и есть то, по чему видно, что́ распознано.
+  frames: true,
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
   lensRelay: '',           // свой релей для прямого Lens — без открытия сайта
@@ -128,6 +133,7 @@ function sanitizeRules(r) {
   if (typeof R.wordFixes !== 'object' || !R.wordFixes) R.wordFixes = {};
   R.lensRelay = String(R.lensRelay || '').trim().slice(0, 500);
   R.ocrEngine = (R.ocrEngine === 'native' || R.ocrEngine === 'wasm') ? R.ocrEngine : 'auto';
+  R.frames = R.frames !== false;
   return R;
 }
 
@@ -684,10 +690,12 @@ const OCR = {
     } catch (e) { return false; }
   },
 
-  async loadModels() {
+  async loadModels(opts) {
     // Нативный движок: ни WASM, ни 11 МБ вшитого бинаря не нужны — модели
     // лежат в приложении. Это и есть главный выигрыш по скорости запуска.
-    if (typeof NativeOcr !== 'undefined' && NativeOcr.ready() && RULES.ocrEngine !== 'wasm') {
+    // opts.wasm = true — «подними запасной путь, нативный не справился».
+    const forceWasm = !!(opts && opts.wasm);
+    if (!forceWasm && typeof NativeOcr !== 'undefined' && NativeOcr.ready() && RULES.ocrEngine !== 'wasm') {
       this.ready = true; this.engine = 'native'; this.reason = '';
       return true;
     }
@@ -1936,7 +1944,16 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // говорим причину в состояние и идём прежним, проверенным путём.
   if (!preDet && NativeOcr.chosen() === 'native') {
     if (onProgress) onProgress('нативный движок', 0, 0);
-    const got = await NativeOcr.scan(src, R, (msg) => { if (onProgress) onProgress(msg, 0, 0); });
+    let got = await NativeOcr.scan(src, R, (msg) => { if (onProgress) onProgress(msg, 0, 0); });
+    // Ноль строк на нативном проходе — не приговор: порог уверенности движка
+    // (0.25) на бледном или мелком кадре отрезает всё подряд. Один повтор с
+    // мягким порогом стоит те же ~3 с, но страница не остаётся «пустой».
+    if (got && got.ok && !(got.items || []).length) {
+      if (onProgress) onProgress('нативный движок: повтор с мягким порогом', 0, 0);
+      const soft = { ...R, minConfidence: 0.05, detRetry: true };
+      const again = await NativeOcr.scan(src, soft, null);
+      if (again && again.ok && (again.items || []).length) got = again;
+    }
     if (got && got.ok) {
       const W = src.width, H = src.height;
       const regions = [];
@@ -1961,15 +1978,21 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         OCR.engine = 'native';
         OCR.detPass = 'native';
         OCR.lastNativeMs = got.ms || 0;
+        // ms — это ВЕСЬ нативный проход (детектор + распознавание вместе), он
+        // неделим. Раньше поля не заполнялись, и тост писал «NaN с» — на
+        // телефоне 22:11 это и было видно. Теперь честно: detMs/recMs = null,
+        // а сумма есть, поэтому страница печатает один замер, а не два.
         return {
           regions,
           det: { boxes: regions.length, pass: 'native' },
-          detMs: got.ms || 0,
-          recMs: 0,
+          ms: got.ms || Math.round(performance.now() - t0),
+          detMs: null, recMs: null,
           crops: regions.length,
           stats: DECODE_STATS,
-          whole: false,
+          whole: !band,
+          band: band ? { y0, y1 } : null,
           pass: 'native',
+          via: 'native',
         };
       }
       // Кадр не распознался нативно (пустая страница или каприз модели) —
@@ -1979,6 +2002,21 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     } else if (got && got.error) {
       OCR.nativeNote = String(got.error).slice(0, 200);
       console.warn('нативный OCR не сработал:', got.error);
+    }
+  }
+
+  // ── Запасной путь требует ЖИВЫХ сессий движка в странице.
+  // Раньше здесь падало «Cannot read properties of null (reading 'inputNames')»
+  // (телефон 22:12): движок выбран нативный, loadModels намеренно не поднимал
+  // WASM, нативный проход не дал текста — и код шёл в детектор с пустой
+  // сессией. Теперь либо честно поднимаем WASM, либо говорим причину.
+  if (!OCR.det || !OCR.rec) {
+    const ok = await OCR.loadModels({ wasm: true }).catch(() => false);
+    if (!ok || !OCR.det || !OCR.rec) {
+      const why = OCR.nativeNote || OCR.reason || 'причина неизвестна';
+      OCR.nativeNote = why;
+      throw new Error('нативный движок не прочитал этот кадр (' + why
+        + '), а запасной путь в странице не поднят');
     }
   }
 
@@ -2213,6 +2251,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     detMs, recMs: Math.round(performance.now() - t1), crops,
     band: band ? { y0, y1 } : null,
     detPass: det.pass,
+    via: 'wasm',
     largePasses,
     variantRuns: DECODE_STATS.variantRuns,
     variantsPicked: DECODE_STATS.variantsPicked,

@@ -601,8 +601,13 @@ function bindUI() {
   };
   $('#btnFrames').onclick = () => {
     Reader.frames = !Reader.frames;
+    // Настройка живёт в правилах: иначе после перезапуска рамки молча
+    // выключались, и это выглядело как «рамки делись» (телефон 22:11).
+    RULES.frames = Reader.frames;
     $('#btnFrames').classList.toggle('hot', Reader.frames);
+    const cb = $('#cbFrames'); if (cb) cb.checked = Reader.frames;
     Reader.paintAllFrames();
+    saveRules().catch(() => {});
   };
   $('#btnRead').onclick = () => {
     if (TTS.stopped) {
@@ -692,10 +697,12 @@ function bindUI() {
     RULES.semiManualSettleMs = clamp(+e.target.value || 0, 0, 5000);
     await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
   };
-  $('#cbFrames').onchange = (e) => {
+  $('#cbFrames').onchange = async (e) => {
     Reader.frames = e.target.checked;
+    RULES.frames = Reader.frames;
     $('#btnFrames').classList.toggle('hot', Reader.frames);
     Reader.paintAllFrames();
+    await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
   };
   $('#cbFollow').onchange = (e) => { Reader.follow = e.target.checked; };
   $('#reader').addEventListener('click', (e) => {
@@ -867,6 +874,14 @@ async function selfCheck() {
     let parsedRules = {};
     if (saved) { try { parsedRules = JSON.parse(saved.v) || {}; } catch (e) { console.warn(e); } }
     RULES = sanitizeRules(parsedRules);
+  });
+  await step('рамки', () => {
+    // Раньше эта настройка жила только в памяти Reader: после перезапуска
+    // приложения рамки пропадали. Теперь она в правилах — по умолчанию включена.
+    Reader.frames = RULES.frames !== false;
+    const b = $('#btnFrames'); if (b) b.classList.toggle('hot', Reader.frames);
+    const cb = $('#cbFrames'); if (cb) cb.checked = Reader.frames;
+    Reader.paintAllFrames();
   });
   await step('библиотека', () => Library.load());
   await step('модели: список', () => renderModels());
