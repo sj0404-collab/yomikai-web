@@ -274,25 +274,26 @@ function bindUI() {
 
   // правила
   // ── Блок «Приложение (АПК)»: обновление читалки и проверка нативного Lens ──
-  // Показывается только если страница открыта внутри АПК: там есть мосты
-  // KomaApp и KomaLens. В браузере блока нет — и это честно, а не «кнопка есть,
-  // но ничего не делает».
-  const syncAppBlock = async () => {
+  // Кнопки есть в разметке всегда, обработчики — тоже: «мёртвых» кнопок в сборке
+  // не остаётся. Но сам блок виден только при живом мосте KomaApp, то есть
+  // только внутри АПК: в браузере обновлять и перезагружать нечего, и вместо
+  // пустых обещаний там просто нет этого блока.
+  const appReady = () => (typeof window !== 'undefined' && window.KomaApp
+    && typeof window.KomaApp.version === 'function');
+  const syncAppBlock = () => {
     const block = $('#appBlock');
     if (!block) return;
-    const has = typeof window !== 'undefined' && window.KomaApp && typeof window.KomaApp.version === 'function';
-    block.style.display = has ? 'block' : 'none';
-    if (!has) return;
+    if (!appReady()) { block.style.display = 'none'; return; }
+    block.style.display = 'block';
     try {
       const info = JSON.parse(window.KomaApp.version() || '{}');
       $('#appState').innerHTML = 'Оболочка: <b>' + (info.app || '—') + '</b> · читалка: <b>'
-        + (info.page || '—') + '</b><br><span class="hint">Обновление качает koma-web.html с GitHub '
-        + 'и перезагружает страницу. Модели, книги и настройки остаются на месте.</span>';
+        + (info.page || '—') + '</b><br><span class="hint">Обновление качает koma-web.html из '
+        + 'релиза на GitHub и перезагружает страницу. Модели, книги и настройки остаются на месте.</span>';
     } catch (e) { console.warn('KomaApp.version', e); }
   };
-  document.addEventListener('koma-app', syncAppBlock);
-  setTimeout(syncAppBlock, 0);
   if ($('#btnAppUpdate')) $('#btnAppUpdate').onclick = () => {
+    if (!appReady()) { toast('Обновление есть только в приложении: в браузере страница не обновляется сама', 7000); return; }
     try {
       const res = JSON.parse(window.KomaApp.checkUpdate() || '{}');
       if (res.updated) toast('Скачано обновление: ' + res.version + '. Перезагружаю…', 4000);
@@ -300,6 +301,7 @@ function bindUI() {
     } catch (e) { toast('Обновление не удалось: ' + ((e && e.message) || e), 6000); }
   };
   if ($('#btnAppLens')) $('#btnAppLens').onclick = () => {
+    if (!appReady()) { toast('Движок АПК есть только в приложении', 7000); return; }
     try {
       const r = JSON.parse(window.KomaApp.lensSelfTest() || '{}');
       toast(r.ok
@@ -307,6 +309,13 @@ function bindUI() {
         : 'Lens не ответил: ' + (r.error || (r.antiBot ? 'антибот Google' : 'нет текста')), 9000);
     } catch (e) { toast('Проверка Lens не удалась: ' + ((e && e.message) || e), 6000); }
   };
+  if (appReady()) {
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      // Оболочка сообщает версию событием после загрузки страницы.
+      document.addEventListener('koma-app', syncAppBlock);
+    }
+    if (typeof setTimeout === 'function') setTimeout(syncAppBlock, 0);
+  }
 
   $('#btnRulesImport').onclick = () => {
     const inp = rulesInput;
