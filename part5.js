@@ -535,7 +535,15 @@ function bindUI() {
 function syncEngineUI() {
   for (const id of ['engineLocal', 'engineLens', 'engineLocal2', 'engineLens2']) {
     const b = $('#' + id); if (!b) continue;
-    b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
+    const on = (b.dataset.engine === 'lens') === LENS.isLens();
+    // Два класса — не описка: в ⚙ → «Модели» это кнопки (.btn.hot), а в
+    // «Голос и чтение» — чипсы (.chip.on). На скриншоте 28.10 было видно, что
+    // выбранный движок никак не подсвечен, потому что код ставил только .hot.
+    b.classList.toggle('hot', on);
+    b.classList.toggle('on', on);
+    // setAttribute — только если он есть: в тестовом мини-DOM его нет, и
+    // раньше это роняло два набора тестов насмерть (FATAL вместо FAIL).
+    if (typeof b.setAttribute === 'function') b.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
   const note = $('#engineLensNote');
   if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
