@@ -29,6 +29,7 @@ const DEFAULT_RULES = {
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
+  lensRelay: '',           // свой релей для прямого Lens — без открытия сайта
 };
 /**
  * Профили скорости. Замерено на настоящей странице (720×2960, полосы 412×800,
@@ -120,6 +121,7 @@ function sanitizeRules(r) {
   R.inkLevels = Math.round(R.inkLevels); R.semiManualSettleMs = Math.round(R.semiManualSettleMs);
   R.semiManual = !!R.semiManual;
   if (typeof R.wordFixes !== 'object' || !R.wordFixes) R.wordFixes = {};
+  R.lensRelay = String(R.lensRelay || '').trim().slice(0, 500);
   return R;
 }
 
@@ -2827,6 +2829,142 @@ const LENS = {
    * координаты нам), зато порядок сверху вниз сохраняется, рамки показывают
    * номера реплик, и озвучка работает тем же путём, что всегда.
    */
+  /* ── ПРЯМОЕ РАСПОЗНАВАНИЕ: как в АПК, без открытия сайта ──────────────────
+     В АПК Lens — это не «открыть сайт», а движок: приложение само отправляет
+     картинку и само забирает текст (GlensOcrEngine, protobuf). В обычной вкладке
+     браузера так нельзя: Google не отдаёт CORS-заголовки, и прочитать ответ
+     чужой странице он не даёт. Поэтому прямой путь идёт по одному из двух
+     транспортов, и оба не открывают никаких сайтов:
+
+       native  — window.KomaLens.recognize(base64jpeg): мост в АПК. WebView зовёт
+                 тот самый GlensOcrEngine, что уже работает в приложении;
+       relay   — свой адрес (RULES.lensRelay): страница шлёт картинку туда, а
+                 релей возвращает текст (Cloudflare Worker / Node / VPS, 20 строк;
+                 готовый файл — lab/lens_relay.js). Тоже без сайта.
+
+     Если ни одного транспорта нет — честно говорим, что прямой путь недоступен,
+     и оставляем прежнюю кнопку «Открыть в Lens» как ЯВНЫЙ выбор человека. */
+  transports() {
+    const list = [];
+    if (typeof window !== 'undefined' && window.KomaLens && typeof window.KomaLens.recognize === 'function') {
+      list.push('native');
+    }
+    if (RULES && RULES.lensRelay) list.push('relay');
+    return list;
+  },
+  hasDirect() { return this.transports().length > 0; },
+
+  /** Кадр → JPEG base64. Прямой путь не требует жеста, поэтому можно сжимать:
+   *  на глаз для распознавания хватает 78 % и стороны 1500 px. */
+  toJpegBase64(canvas, maxSide = 1500, quality = 0.78) {
+    if (!canvas || !canvas.width) return '';
+    const k = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+    let src = canvas;
+    if (k < 1) {
+      src = makeCanvas(Math.round(canvas.width * k), Math.round(canvas.height * k));
+      const g = src.getContext('2d', { willReadFrequently: true });
+      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+      g.drawImage(canvas, 0, 0, src.width, src.height);
+    }
+    const url = src.toDataURL('image/jpeg', quality);
+    return url.slice(url.indexOf(',') + 1);
+  },
+
+  /** Разобрать ответ релея: принимаем и голый текст, и JSON, и HTML от Google. */
+  parseResponse(body, contentType) {
+    const raw = String(body || '');
+    const ct = String(contentType || '');
+    // 1) JSON — самый удобный формат для своего релея.
+    if (/json/i.test(ct) || /^\s*[[{]/.test(raw)) {
+      try {
+        const data = JSON.parse(raw);
+        const fromObj = (o) => {
+          if (!o) return null;
+          if (typeof o === 'string') return o.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+          if (Array.isArray(o)) return o.map(x => (typeof x === 'string' ? x : (x && (x.text || x.words)))).filter(Boolean);
+          for (const k of ['lines', 'text', 'regions', 'result', 'ocr']) {
+            if (o[k] != null) return fromObj(o[k]);
+          }
+          return null;
+        };
+        const lines = fromObj(data);
+        if (lines && lines.length) return lines;
+      } catch (e) { /* не JSON — идём дальше */ }
+    }
+    // 2) HTML от Lens: текст лежит внутри AF_initDataCallback. Достаём из него
+    //    строки, которые состоят из букв, и склеиваем по одной реплике в строку.
+    const html = raw;
+    const looksHtml = /<html|<!doctype|AF_initDataCallback/i.test(html);
+    if (looksHtml) {
+      let best = [];
+      const chunks = html.split('AF_initDataCallback');
+      for (const ch of chunks) {
+        // В данных Lens строка реплики — это JSON-строка с текстом.
+        // В данных Lens текст бывает с \uXXXX-экранированием, поэтому обратный
+        // слэш в строке разрешён (иначе «\u041c» рвал совпадение).
+        const strs = [...ch.matchAll(/"((?:\\.|[^"\\]){2,160})"/g)]
+          .map(m => m[1].replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))));
+        // Раскодировали \uXXXX ДО проверки: иначе строка «\u041c\u0430…» выглядит
+        // как латиница с обратными слэшами и отбрасывается как не-текст.
+        const cyr = strs.filter(t => (t.match(/[А-Яа-яЁё]/g) || []).length >= 3
+          && (t.match(/\p{L}/gu) || []).length / t.length > 0.55);
+        if (cyr.length > best.length) best = cyr;
+      }
+      if (best.length) return best.filter(t => (t.match(/\p{L}/gu) || []).length >= 2);
+    }
+    // 3) Голый текст: по строке на реплику.
+    return raw.split(/\r?\n/).map(s => s.trim())
+      .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
+  },
+
+  /** Прямое распознавание кадра. Возвращает { ok, lines, via, reason }. */
+  async recognizeDirect(canvas, opts = {}) {
+    if (!this.isLens() && !opts.force) return { ok: false, reason: 'движок «в файле» — ничего не отправлял', via: null };
+    const via = this.transports()[0];
+    if (!via) return { ok: false, reason: 'прямой путь недоступен', via: null };
+    const b64 = this.toJpegBase64(canvas, opts.maxSide || 1500, opts.quality || 0.78);
+    if (!b64) return { ok: false, reason: 'страница ещё не загрузилась', via };
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    try {
+      let lines = null;
+      if (via === 'native') {
+        // Мост в АПК: сюда приходит либо строка, либо массив, либо объект.
+        const res = await window.KomaLens.recognize(b64, { lang: (RULES && RULES.lang) || 'ru' });
+        lines = Array.isArray(res) ? res : this.parseResponse(
+          typeof res === 'string' ? res : JSON.stringify(res || ''), 'application/json');
+      } else {
+        const form = new FormData();
+        form.append('encoded_image', new Blob([this._b64bytes(b64)], { type: 'image/jpeg' }), 'page.jpg');
+        const r = await fetch(RULES.lensRelay, { method: 'POST', body: form, mode: 'cors' });
+        const text = await r.text();
+        if (!r.ok) return { ok: false, via, reason: 'релей ответил ' + r.status + ': ' + text.slice(0, 160) };
+        lines = this.parseResponse(text, r.headers.get('content-type') || '');
+      }
+      lines = (lines || []).filter(s => s && (s.match(/\p{L}/gu) || []).length >= 2);
+      if (!lines.length) return { ok: false, via, reason: 'ответ пустой — текста в нём нет' };
+      const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
+      this.lastSentAt = Date.now();
+      this.lastDirect = { via, ms, lines: lines.length };
+      return { ok: true, lines, via, ms };
+    } catch (e) {
+      // Для релея самая частая причина — CORS: браузер не дал прочитать ответ.
+      const msg = String((e && e.message) || e);
+      const cors = /Failed to fetch|NetworkError|CORS/i.test(msg);
+      return {
+        ok: false, via,
+        reason: cors
+          ? 'релей не отдал CORS-заголовки (Access-Control-Allow-Origin) — браузер не дал прочитать ответ'
+          : msg.slice(0, 200),
+      };
+    }
+  },
+  _b64bytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  },
+
   textToLines(text) {
     // Принимаем и строку, и массив строк (массив удобнее вызывать из тестов и
     // из кода: String([...]) склеил бы всё через запятую в одну «строку»).
