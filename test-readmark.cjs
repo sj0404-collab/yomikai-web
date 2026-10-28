@@ -93,7 +93,11 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
 
   // 6. Рамка рисуется каждой строке, «прочитано» — только цвет
   const paint = html.slice(html.indexOf('paintPage(i) {'), html.indexOf('paintAllFrames()'));
-  ok(/for \(const line of data\.lines\)/.test(paint), 'рамки рисуются по всем строкам страницы');
+  // С 28.10 обход по строкам идёт через forEach (нужен индекс реплики для
+  // номера на рамке текста из Lens), поэтому проверяем смысл, а не форму записи:
+  // обход ВСЕХ строк data.lines.
+  ok(/data\.lines\.forEach\(\(line, idx\)|for \(const line of data\.lines\)/.test(paint),
+    'рамки рисуются по всем строкам страницы');
   ok(!/filter\(.*spoken/.test(paint), 'прочитанные строки не выпадают из рамок');
 
   
