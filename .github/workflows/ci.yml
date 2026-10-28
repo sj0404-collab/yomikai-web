@@ -26,8 +26,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq fonts-dejavu-core
           python3 -m pip install -q -r tools/requirements.txt
+      # Без playwright e2e-проверки Lens молча «пропускаются», и красный прогон
+      # выглядит зелёным. На ранере он ставится за минуту — ставим всегда.
+      - name: Браузер для e2e
+        run: |
+          python3 -m pip install -q playwright
+          python3 -m playwright install --with-deps chromium
       - name: Тесты страницы
         run: bash run_all.sh
+      - name: Движок Lens виден в читалке
+        run: python3 lab/lens_ui_check.py --shot shots/lens-in-reader.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lens-ui
+          path: shots/lens-in-reader.png
+          if-no-files-found: warn
       - name: Самопроверка инструментов
         run: python3 tools/selftest.py
       - name: Контракт распознавателя (если модель в репозитории)
