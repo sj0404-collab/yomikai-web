@@ -11,7 +11,7 @@ global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
 global.ort = { Tensor: class { constructor(t, d, s) { this.type = t; this.data = d; this.dims = s; } } };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+  .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
   + '; return {Words, DB, OCR, RULES, beamDecode, shearCanvas, estimateSlant,'
   + ' decoderWords, isWordPrefix, makeCanvas, lineStat};')();
