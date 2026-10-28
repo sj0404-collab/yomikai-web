@@ -90,6 +90,11 @@
   /* Текст из Google Lens приходит БЕЗ координат: рамки делят страницу на равные
      полосы по порядку реплик. Поэтому они пунктирные и с номером — чтобы было
      видно, что это «строка №3 сверху», а не точное место на картинке. */
+  /* Место реплики найдено локальным детектором, текст — из Lens: сплошная
+     сиреневая рамка, чтобы отличать от «примерно» (пунктир). */
+  #strip .frame.lensbox{border-color:#8a7be0}
+  #strip .frame.lensbox.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
+  #strip .frame.lensbox.done{border-color:#8a7be055}
   #strip .frame.approx{border-style:dashed;border-color:#8a7be0a0}
   #strip .frame.approx.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
   #strip .frame.approx.done{border-color:#8a7be055}
@@ -5500,6 +5505,8 @@ const Reader = {
       // Текст из Lens: координат нет, полосы равные — честно помечаем пунктиром
       // и номером, чтобы «рамка» не выглядела точным местом на картинке.
       if (line.fromLens || data.fromLens) {
+        // 'det' — рамка стоит на облачке, найденном локальным детектором;
+        // 'band' — координат нет вовсе, полосы равные (пунктир + номер).
         d.classList.add('approx');
         const n = document.createElement('span');
         n.className = 'fnum';
@@ -6503,15 +6510,52 @@ async function cleanLines(lines) {
  * Геометрия приблизительная (Lens не отдаёт нам координаты), поэтому в шторке
  * это честно написано: рамки — по номерам сверху вниз, а не по пикселям.
  */
-function applyLensText(pageIndex, text) {
+async function applyLensText(pageIndex, text, opts = {}) {
   const lines = LENS.textToLines(text);
   if (!lines.length) return { ok: false, reason: 'в тексте нет ни одной строки с буквами' };
+
+  // ── Где на картинке эти строки ────────────────────────────────────────────
+  // Lens координат не отдаёт. Раньше строки раскладывались равными полосами на
+  // всю ширину — и первая рамка накрывала шапку страницы, что выглядело как
+  // «какая-то синяя рамка ни о чём». Теперь, если локальный детектор доступен
+  // (он у нас есть и работает ~0,4 с), рамки ставятся по найденным облачкам
+  // в том же порядке, в каком идёт текст. Равные полосы остаются запасным
+  // вариантом: без моделей или когда детектор ничего не нашёл.
+  let placed = 'band';
+  const cv = Reader.canvases[pageIndex];
+  if (cv && OCR.ready && opts.detect !== false) {
+    try {
+      const det = await detectWithRetry(cv, RULES);
+      const rtl = (Reader.dir || 'rtl') === 'rtl';
+      const boxes = (det.boxes || [])
+        .filter(b => (b.right - b.left) > cv.width * 0.03 && (b.bottom - b.top) > cv.height * 0.006)
+        .sort((a, b) => (a.top - b.top) || (rtl ? b.left - a.left : a.left - b.left));
+      // Рамки ставим, если детектор нашёл хотя бы два облачка. Соответствие
+      // «реплика ↔ облачко» при этом ПРИБЛИЗИТЕЛЬНОЕ (Lens может склеить или
+      // разбить иначе), поэтому рамка всегда рисуется пунктиром с номером и не
+      // притворяется точным адресом реплики.
+      const fit = boxes.length >= 2;
+      if (fit) {
+        lines.forEach((line, i) => {
+          const b = boxes[Math.min(boxes.length - 1, Math.floor(i * boxes.length / lines.length))];
+          line.left = +(b.left / cv.width).toFixed(4);
+          line.right = +(b.right / cv.width).toFixed(4);
+          line.top = +(b.top / cv.height).toFixed(4);
+          line.bottom = +(b.bottom / cv.height).toFixed(4);
+          line.lensPlaced = 'det';        // место найдено детектором, текст — из Lens
+        });
+        placed = 'det';
+      }
+    } catch (e) { console.warn('Lens: детектор не сработал, ставлю полосы', e); }
+  }
+  if (placed !== 'det') for (const line of lines) line.lensPlaced = 'band';
+
   // Собираем запись С НУЛЯ, не подмешивая то, что осталось от локального OCR:
   // иначе в ней жили бы старые regions/ms, и «Распознать заново» или смена
   // направления чтения дёргали бы данные, которых больше нет.
   const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   Reader.regions.set(pageIndex, {
-    lines, regions: null, cached: true, fromLens: true,
+    lines, regions: null, cached: true, fromLens: true, lensPlaced: placed,
     ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0, bands: 0, at,
   });
   // Полоса-кэш сбрасываем: иначе следующее распознавание вернёт старые строки.
@@ -6521,7 +6565,7 @@ function applyLensText(pageIndex, text) {
   Reader.current = null;
   Reader.paintPage(pageIndex);
   if ($('#sheetText').classList.contains('on')) renderTextSheet(pageIndex);
-  return { ok: true, lines: lines.length };
+  return { ok: true, lines: lines.length, placed };
 }
 
 /** Шторка Lens: состояние + какая страница ждёт текст. */
@@ -6564,7 +6608,10 @@ function renderTextSheet(i) {
   Reader.textPage = i;
   const raw = data.regions || [];
   const stamp = data.at ? ' · обновлено ' + data.at : '';
-  $('#textStats').textContent = data.cached
+  $('#textStats').textContent = (data.fromLens
+    ? `${data.lines.length} реплик · текст из Google Lens · `
+      + (data.lensPlaced === 'det' ? 'рамки по облачкам (найдены локально, порядок из Lens)' : 'рамки примерные — полосы')
+    : data.cached
     ? `${data.lines.length} реплик · из буфера (без повторного распознавания)`
     : `${raw.length} строк · ${data.boxes} блоков · ${data.crops} кропов · `
       + `итого ${(data.ms / 1000).toFixed(1)} с = детектор ${(data.detMs / 1000).toFixed(1)} с `
@@ -6579,7 +6626,7 @@ function renderTextSheet(i) {
       + (data.variantRuns ? ` · перебор вариантов: ${data.variantRuns}` : '')
       + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
       + (data.wordsFixed ? ` · дочинено слов: ${data.wordsFixed}` : '')
-      + stamp;
+      + stamp);
   // Показываем ВСЕ реплики страницы, включая уже прочитанные: прочитанное не
   // исчезает из списка, а помечается. Иначе выглядело бы, будто текст пропал.
   // Группируем по полосам страницы. Раньше был один общий список, и на
@@ -7288,11 +7335,18 @@ function bindUI() {
       const box = $('#lensBox'); if (box) box.focus();
     }
   };
-  const lensApply = (speak) => {
+  const lensApply = async (speak) => {
     const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
-    const res = applyLensText(i, $('#lensBox').value);
+    const btn = $('#btnLensApply');
+    if (btn) { btn.disabled = true; btn.textContent = 'Ставлю рамки…'; }
+    let res;
+    try { res = await applyLensText(i, $('#lensBox').value); }
+    finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'В текст страницы'; }
+    }
     if (!res.ok) { toast('Нечего применять: ' + res.reason, 6000); return; }
-    toast('Текст из Lens принят: ' + res.lines + ' реплик на странице ' + (i + 1), 5000);
+    toast('Текст из Lens принят: ' + res.lines + ' реплик на странице ' + (i + 1)
+      + (res.placed === 'det' ? ' · рамки по облачкам' : ' · рамки примерные (полосы)'), 6000);
     renderLensSheet(i);
     if (speak) { TTS.prime(); closeSheets(); TTS.readVisible(); }
   };
