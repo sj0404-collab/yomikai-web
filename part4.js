@@ -423,6 +423,25 @@ const Reader = {
    */
   async scanPage(i, opts = {}) {
     this.hideStart();
+    // Режим «Google Lens»: локальный конвейер НЕ запускаем вообще. Иначе
+    // получалось бы «нажал Распознать — и ничего не произошло, только звёздочка
+    // покрутилась»: Lens работает в другой вкладке, а местный OCR тут ни при чём.
+    if (LENS.isLens() && !opts.fromLens && !opts.silent) {
+      const cv = this.canvases[i];
+      if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
+      const band = opts.full ? null : this.visibleBandPx(i);
+      const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+      const sent = LENS.send(crop, { page: i });
+      if (sent.ok) {
+        toast('Страница ' + (i + 1) + ' ушла в Google Lens — откройте новую вкладку', 6000);
+        openSheet('sheetLens');
+        LENS.pendingPage = i;
+        renderLensSheet(i);
+      } else {
+        toast('Lens не открылся: ' + sent.reason, 7000);
+      }
+      return this.regions.get(i) || null;
+    }
     const silent = !!opts.silent;          // предзагрузка: без бейджа и тостов
     const force = !!opts.force;
     const keepSheet = !!opts.keepSheet;
@@ -1135,6 +1154,47 @@ async function cleanLines(lines) {
     out.push(text === ln.text ? ln : { ...ln, text });
   }
   return out;
+}
+
+/**
+ * Текст, вставленный из Google Lens, становится обычными репликами страницы.
+ * Геометрия приблизительная (Lens не отдаёт нам координаты), поэтому в шторке
+ * это честно написано: рамки — по номерам сверху вниз, а не по пикселям.
+ */
+function applyLensText(pageIndex, text) {
+  const lines = LENS.textToLines(text);
+  if (!lines.length) return { ok: false, reason: 'в тексте нет ни одной строки с буквами' };
+  const prev = Reader.regions.get(pageIndex) || {};
+  Reader.regions.set(pageIndex, {
+    lines, regions: null, cached: true, fromLens: true,
+    ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0,
+    at: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    ...prev, lines, fromLens: true,
+  });
+  // Полоса-кэш сбрасываем: иначе следующее распознавание вернёт старые строки.
+  if (Reader.bandCache instanceof Map) Reader.bandCache.delete(pageIndex);
+  Reader.paintPage(pageIndex);
+  if ($('#sheetText').classList.contains('on')) renderTextSheet(pageIndex);
+  return { ok: true, lines: lines.length };
+}
+
+/** Шторка Lens: состояние + какая страница ждёт текст. */
+function renderLensSheet(pageIndex) {
+  const i = pageIndex ?? LENS.pendingPage ?? Reader.textPage ?? Reader.page;
+  LENS.pendingPage = i;
+  const st = $('#lensState');
+  if (st) {
+    const own = Reader.regions.get(i);
+    st.innerHTML = `Движок: <b>${LENS.isLens() ? 'Google Lens' : 'в файле (офлайн)'}</b>`
+      + ` · страница ${i + 1}`
+      + (own && own.fromLens ? ` · в странице уже ${own.lines.length} реплик из Lens` : '')
+      + (LENS.lastSentAt ? ' · отправлено ' + new Date(LENS.lastSentAt).toLocaleTimeString('ru-RU') : '');
+  }
+  const box = $('#lensBox');
+  if (box && !box.value) {
+    const own = Reader.regions.get(i);
+    if (own && own.fromLens) box.value = own.lines.map(l => l.text).join('\n');
+  }
 }
 
 function renderTextSheet(i) {
