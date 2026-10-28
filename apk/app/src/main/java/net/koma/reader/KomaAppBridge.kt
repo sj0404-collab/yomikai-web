@@ -26,7 +26,7 @@ class KomaAppBridge(
     /** Проверить обновление по кнопке. Возвращает JSON, читалка показывает итог. */
     @JavascriptInterface
     fun checkUpdate(): String {
-        val res = updater.check(silent = false)
+        val res = updater.check()
         if (res.optBoolean("updated")) {
             // Перезагружаем на следующем кадре, чтобы успел уйти ответ в JS.
             Thread {
