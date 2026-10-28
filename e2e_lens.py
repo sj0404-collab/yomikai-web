@@ -25,7 +25,7 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-HTML = os.environ.get('HTML', '/home/user/koma-web.html')
+HTML = os.environ.get('HTML', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'koma-web.html'))
 IMG = '/home/user/uploads/Screenshot_20261023-131019.jpg'
 MODELS = '/home/user/koma_models'
 
