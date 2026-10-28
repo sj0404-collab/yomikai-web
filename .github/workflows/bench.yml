@@ -17,13 +17,51 @@ on:
         default: all
         type: choice
         options: [all, dense, prose]
+      mode:
+        description: 'matrix — все сочетания параллельно (быстро); serial — все в одном прогоне (честное сравнение, одна и та же машина)'
+        default: serial
+        type: choice
+        options: [serial, matrix, both]
   push:
     paths:
       - '.github/workflows/bench.yml'
       - 'lab/bench_ci.py'
 
 jobs:
+  # Одна и та же машина для всех сочетаний: только так времена сравнимы между
+  # собой. Matrix-задачи идут на РАЗНЫХ ранерах, и разброс между ними достигал
+  # 25 % (страница одна, вызовов столько же, а время разное) — по matrix можно
+  # судить о порядке величины, но не о выигрыше одного режима над другим.
+  serial:
+    if: github.event.inputs.mode != 'matrix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Зависимости
+        run: |
+          python3 -m pip install -q playwright
+          python3 -m playwright install --with-deps chromium
+      - name: Замер всех сочетаний подряд
+        run: |
+          python3 lab/bench_ci.py --all --twice 1 --out bench-all.json | tee serial.log
+      - name: Таблица в Summary
+        if: always()
+        run: |
+          grep '^RESULT' serial.log >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-serial
+          path: |
+            bench-all.json
+            serial.log
+
   bench:
+    if: github.event.inputs.mode != 'serial'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
