@@ -158,7 +158,7 @@ const Reader = {
     if (!data) return;
     // Рамка рисуется КАЖДОЙ распознанной строке, независимо от того, прочитана
     // она или нет. «Прочитано» — это только цвет (класс done), а не фильтр.
-    for (const line of data.lines) {
+    data.lines.forEach((line, idx) => {
       const d = document.createElement('div');
       d.className = 'frame';
       d.style.left = (line.left * 100) + '%';
@@ -168,11 +168,20 @@ const Reader = {
       const isCur = this.current && this.current.text === line.text;
       const isDone = this.spoken.has(this.spokenKey(i, line.text));
       if (line.large) d.classList.add('large');     // титул/каллиграфия — другой цвет
+      // Текст из Lens: координат нет, полосы равные — честно помечаем пунктиром
+      // и номером, чтобы «рамка» не выглядела точным местом на картинке.
+      if (line.fromLens || data.fromLens) {
+        d.classList.add('approx');
+        const n = document.createElement('span');
+        n.className = 'fnum';
+        n.textContent = String(idx + 1);
+        d.appendChild(n);
+      }
       if (isCur) d.classList.add('cur');
       else if (isDone) d.classList.add('done');
       d.onclick = () => TTS.speakLine(line);
       framesEl.appendChild(d);
-    }
+    });
   },
 
   paintAllFrames() {
@@ -852,7 +861,11 @@ const TTS = {
       if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
     } catch (e) { /* ignore */ }
     const u = new SpeechSynthesisUtterance(line.text);
-    if (this.voice) u.voice = this.voice;
+    // Голос из старого списка (после смены TTS-движка в системе) браузер
+    // отвергает исключением — раньше это обрывало speakLine ДО speak(), и
+    // реплика молча не читалась. Теперь падаем на голос по умолчанию.
+    try { if (this.voice) u.voice = this.voice; }
+    catch (e) { console.warn('голос недоступен, читаю голосом по умолчанию', e && e.message); }
     u.lang = this.voice?.lang || 'ru-RU';
     u.rate = this.rate;
     Reader.current = line;
@@ -1164,15 +1177,19 @@ async function cleanLines(lines) {
 function applyLensText(pageIndex, text) {
   const lines = LENS.textToLines(text);
   if (!lines.length) return { ok: false, reason: 'в тексте нет ни одной строки с буквами' };
-  const prev = Reader.regions.get(pageIndex) || {};
+  // Собираем запись С НУЛЯ, не подмешивая то, что осталось от локального OCR:
+  // иначе в ней жили бы старые regions/ms, и «Распознать заново» или смена
+  // направления чтения дёргали бы данные, которых больше нет.
+  const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   Reader.regions.set(pageIndex, {
     lines, regions: null, cached: true, fromLens: true,
-    ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0,
-    at: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-    ...prev, lines, fromLens: true,
+    ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0, bands: 0, at,
   });
   // Полоса-кэш сбрасываем: иначе следующее распознавание вернёт старые строки.
   if (Reader.bandCache instanceof Map) Reader.bandCache.delete(pageIndex);
+  // Прочитанное от прошлого текста к новому не относится.
+  try { Reader.spoken.clear(); } catch (e) { /* не критично */ }
+  Reader.current = null;
   Reader.paintPage(pageIndex);
   if ($('#sheetText').classList.contains('on')) renderTextSheet(pageIndex);
   return { ok: true, lines: lines.length };
