@@ -54,17 +54,16 @@ const SPEED_PRESETS = {
   // именно этот путь: текст верный («жизнь, будучи старшей сестрой тирана»).
   fast:      { pageSide: 1280, detRetry: true, largeText: false, decodeVariants: false,
                uncoveredPass: false, decodeRetryBelow: 1, extCrop: 'light', breakWords: false },
-  // «Умно» — то, ради чего всё делалось: точность «Обычно» без его цены.
-  // Что дорого в «Обычно»: полный перебор расширений кропа (до 18 подготовок на
-  // строку) плюс дочинка слов. Что реально приносит верные слова (замер 28.10 по
-  // плотной манге): перебор подготовок САМОГО кропа (pad20, up2, contrast,
-  // pad20up2, bin0) — он и оставлен. Расширения кропа (extCrop) урезаны до
-  // одного дешёвого варианта, а дорогие ступени включаются только на строках,
-  // где словарь не узнал треть слов (autoDepth), и не больше трёх на строку.
-  // Числа — в журнале «Доработки», часть 14.
+  // «Умно» — середина между «Быстро» и «Обычно»: вдвое быстрее «Обычно», но с
+  // честным предупреждением. Замер 28.10 (GitHub-ранер, один прогон, плотная
+  // манга 60 реплик): «Быстро» 11,1 с / 108 вызовов / 50 словарных слов,
+  // «Умно» 17,7 с / 175 / 48, «Обычно» 43,9 с / 464 / 58. То есть дожим
+  // действительно убирает время, но на плотной странице может не прочитать
+  // часть коротких строк — поэтому профиль НЕ по умолчанию, а в подсказке
+  // прямо написано, когда его брать. Кто хочет каждую строку — «Обычно».
   smart:     { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true,
-               autoDepth: false, maxDeepVariants: 5, maxVariants: 6, variantStopShare: 0.85 },
+               autoDepth: true, maxDeepVariants: 3, maxVariants: 3, variantStopShare: 1 },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
@@ -73,8 +72,14 @@ const SPEED_PRESETS = {
 };
 const SPEED_NAMES = { lightning: 'Молния', fast: 'Быстро', smart: 'Умно',
   normal: 'Обычно', thorough: 'Тщательно' };
-const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', smart: '≈30–60 с',
+const SPEED_APPROX = { lightning: '≈20 с', fast: '≈25 с', smart: '≈40 с',
   normal: '≈80 с', thorough: '≈70 с' };
+/** Что профиль делает с текстом — подсказка в «Голос и чтение», чтобы выбор не
+ *  был гаданием: у «Умно» есть цена, и о ней сказано прямо. */
+const SPEED_NOTES = {
+  smart: ' Дожим только трудных строк: вдвое быстрее «Обычно», но на плотной '
+       + 'странице часть коротких строк может не прочитаться. Нужна каждая — «Обычно».',
+};
 
 let RULES = { ...DEFAULT_RULES };
 function sanitizeRules(r) {
