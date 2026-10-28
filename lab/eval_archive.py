@@ -86,6 +86,56 @@ def cer(ref: str, hyp: str) -> float:
     return prev[-1] / len(ref)
 
 
+def words(text: str) -> list[str]:
+    return [w for w in norm(text).split() if len(w) >= 3]
+
+
+def coverage(gt_lines: list[str], got_lines: list[str]) -> dict:
+    """Сколько ТЕКСТА страницы реально прочитано.
+
+    Сравнивать «одна реплика ↔ одна строка эталона» на прозе нельзя: читалка
+    склеивает строки в абзац (на замере 28.10 одна реплика — 154 слова), и такой
+    абзац не совпадёт ни с одной отдельной строкой. Отсюда и брались «3 %»,
+    хотя текст был прочитан. Поэтому метрика — покрытие СЛОВ эталона:
+      • сколько слов эталона вообще встретилось в прочитанном (recall);
+      • сколько строк эталона целиком нашлось (по порядку слов);
+      • средний CER по строкам, которые нашлись.
+    """
+    gt_words = []
+    for line in gt_lines:
+        gt_words += words(line)
+    got_text = ' '.join(got_lines)
+    got_words = words(got_text)
+    pool = {}
+    for w in got_words:
+        pool[w] = pool.get(w, 0) + 1
+    hit = 0
+    for w in gt_words:
+        if pool.get(w, 0) > 0:
+            pool[w] -= 1
+            hit += 1
+    # строки эталона, найденные целиком (как подстрока в нормализованном тексте)
+    flat = ' ' + ' '.join(got_words) + ' '
+    found_lines, cers = 0, []
+    for line in gt_lines:
+        key = ' '.join(words(line))
+        if not key:
+            continue
+        if key in flat:
+            found_lines += 1
+        else:
+            # не целиком — тогда CER по лучшей паре с прочитанными репликами
+            best = min((cer(line, g) for g in got_lines), default=1.0)
+            cers.append(best)
+    return {
+        'gt_words': len(gt_words), 'gt_lines': sum(1 for l in gt_lines if words(l)),
+        'got_lines': len(got_lines), 'got_words': len(got_words),
+        'recall': hit / max(1, len(gt_words)),
+        'lines_exact': found_lines,
+        'mean_cer_missed': (sum(cers) / len(cers)) if cers else None,
+    }
+
+
 def ref_pages(xml_path: str) -> list[list[str]]:
     """Строки эталона по страницам — в том же порядке, что скачанные jpg."""
     pages = []
@@ -163,40 +213,16 @@ def main(argv: list[str]) -> int:
             got = [l['text'] for l in r['lines']]
             # каждая прочитанная строка ищет свою лучшую пару в эталоне; эталонная
             # строка считается найденной, если хоть одна прочитанная близка к ней
-            pairs = []
-            used = set()
-            for g in got:
-                best, best_c = None, 1.01
-                for j, t in enumerate(gt):
-                    c = cer(t, g) if len(norm(t)) >= 4 else 1.01
-                    if c < best_c:
-                        best, best_c = j, c
-                if best is not None and best_c <= 0.25:
-                    used.add(best)
-                pairs.append({'got': g, 'ref': gt[best] if best is not None else '',
-                              'cer': best_c if best is not None else None})
-            matched = [x for x in pairs if x['cer'] is not None and x['cer'] <= 0.25]
-            mean = sum(x['cer'] for x in matched) / len(matched) if matched else None
-            rows.append({'page': name, 'size': r['size'], 'ms': r['ms'],
-                         'gt_lines': len(gt), 'got_lines': len(got),
-                         'found': len(used), 'exact_pairs': len(matched),
-                         'mean_cer': mean, 'pairs': pairs})
+            cov = coverage(gt, got)
+            rows.append({'page': name, 'size': r['size'], 'ms': r['ms'], **cov,
+                         'texts': got})
             print(f"\n{idx + 1}. {name} {r['size'][0]}×{r['size'][1]} · {r['ms']} мс · "
-                  f"эталонных строк {len(gt)} · читалка нашла {len(got)} · "
-                  f"из эталона покрыто {len(used)} ({len(used) * 100 // max(1, len(gt))} %) · "
-                  f"пар с CER ≤ 25 %: {len(matched)}")
-            if mean is not None:
-                print(f"   средний CER по совпавшим парам: {mean * 100:.1f} %")
-            for x in sorted(matched, key=lambda z: -z['cer'])[:4]:
-                print(f"   × {x['cer'] * 100:4.0f} %  {x['got'][:70]!r}")
-            missed = 0
-            for j, t in enumerate(gt):
-                if j in used:
-                    continue
-                if len(norm(t)) >= 12:
-                    missed += 1
-                    if missed <= 3:
-                        print(f"   потеряно: {t[:70]!r}")
+                  f"реплик {cov['got_lines']} ({cov['got_words']} слов) · "
+                  f"эталон: {cov['gt_lines']} строк / {cov['gt_words']} слов")
+            print(f"   ПРОЧИТАНО СЛОВ ЭТАЛОНА: {cov['recall'] * 100:.1f} % · "
+                  f"строк эталона целиком: {cov['lines_exact']} из {cov['gt_lines']}")
+            if cov['mean_cer_missed'] is not None:
+                print(f"   по ненайденным строкам средний CER лучшей пары: {cov['mean_cer_missed'] * 100:.0f} %")
         b.close()
     out = os.path.join(REPO, 'runs', 'eval_archive.json')
     json.dump(rows, open(out, 'w'), ensure_ascii=False, indent=1)
