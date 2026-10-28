@@ -38,6 +38,12 @@ JS_PAGE = r"""async ([b64img, speed, autoDepth, twice]) => {
   const full = makeCanvas(img.naturalWidth, img.naturalHeight);
   full.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
   const R = sanitizeRules({ ...RULES, speed, autoDepth: autoDepth === 1 });
+  // МЕЖДУ ЗАМЕРАМИ КЭШ НАДО ЧИСТИТЬ. Ключ кэша — пиксели кропа и настройки
+  // чтения, но НЕ профиль: если гнать «Быстро» и «Обычно» подряд в одной
+  // вкладке, второй замер попадает в кэш первого и показывает 0 вызовов
+  // модели (ровно так и вышло в первом прогоне serial). Чистим, иначе цифры
+  // врут в пользу того, кто бежит вторым.
+  try { _textCache.clear(); _probsCache = { canvas: null, res: null }; } catch (e) {}
   let calls = 0;
   const orig = window.decodeCrop;
   window.decodeCrop = function (...a) { calls++; return orig.apply(this, a); };
