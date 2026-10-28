@@ -580,7 +580,8 @@ function syncSettingsUI() {
   const hint = $('#speedHint');
   if (hint) hint.textContent = (SPEED_NAMES[RULES.speed] || '')
     + ' ' + (SPEED_APPROX[RULES.speed] || '')
-    + ' на страницу (замер на 720×2960). Медленнее — только для трудных страниц.';
+    + ' на страницу (замер на 720×2960). Медленнее — только для трудных страниц.'
+    + ((typeof SPEED_NOTES !== 'undefined' && SPEED_NOTES[RULES.speed]) || '');
   $$('#dirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === (Reader.dir || 'rtl')));
   $('#cbSemi').checked = !!RULES.semiManual;
   $('#cbFrames').checked = Reader.frames;
