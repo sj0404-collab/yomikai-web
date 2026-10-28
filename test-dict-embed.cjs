@@ -10,9 +10,9 @@ delete global.indexedDB;
 global.window.addEventListener = () => {};
 global.navigator = { userAgent: 'Node' };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+  .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 // part0-dict.js содержит вшитый словарь и b64ToBytes — грузим вместе
-const dictSrc = fs.readFileSync('/home/user/koma-web/part0-dict.js', 'utf8');
+const dictSrc = fs.readFileSync(__dirname + '/part0-dict.js', 'utf8');
 // Собираем как в реальной странице: сначала часть со словарём, потом приложение.
 const combined = dictSrc + '\n' + body.slice(0, body.indexOf('(async function boot()'));
 const api = new Function(combined + '; return {Words, DB, embeddedDictText, DICT_GZ_B64};')();
