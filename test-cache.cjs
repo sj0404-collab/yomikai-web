@@ -10,7 +10,7 @@ global.document.querySelectorAll = () => [];
 
 global.ort = { env: { wasm: {} }, Tensor: class { constructor(t, d, dims) { this.data = d; this.dims = dims; } } };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+  .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 const trimmed = body.slice(0, body.indexOf('(async function boot()'));
 const api = new Function(trimmed + '; return {Reader, State, decodeBetter, DEFAULT_RULES, makeCanvas, OCR};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
