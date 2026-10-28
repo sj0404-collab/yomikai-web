@@ -23,8 +23,16 @@ import sys
 from playwright.sync_api import sync_playwright
 
 HTML = os.environ.get('HTML', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'koma-web.html'))
-IMG = '/home/user/uploads/Screenshot_20261023-131019.jpg'
-MODELS = '/home/user/koma_models'
+# Пути — от самого файла, чтобы прогон работал и в песочнице, и на ранере:
+# страница и модели лежат в репозитории (data/real, models), а не в /home/user.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+IMG = os.environ.get('KOMA_IMG', os.path.join(_HERE, 'data', 'real', 'dense.jpg'))
+_LEGACY_IMG = '/home/user/uploads/Screenshot_20261023-131019.jpg'
+if not os.path.exists(IMG) and os.path.exists(_LEGACY_IMG):
+    IMG = _LEGACY_IMG
+MODELS = os.environ.get('KOMA_MODELS', os.path.join(_HERE, 'models'))
+if not os.path.exists(os.path.join(MODELS, 'koma_det.onnx')) and os.path.isdir('/home/user/koma_models'):
+    MODELS = '/home/user/koma_models'
 
 
 def b64(path):
