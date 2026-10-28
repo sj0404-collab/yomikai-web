@@ -40,7 +40,9 @@ jobs:
         if: always()
         with:
           name: lens-ui
-          path: shots/lens-in-reader.png
+          path: |
+            shots/lens-in-reader.png
+            shots/lens-direct.png
           if-no-files-found: warn
       - name: Самопроверка инструментов
         run: python3 tools/selftest.py
