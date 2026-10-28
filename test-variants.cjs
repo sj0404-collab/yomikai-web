@@ -13,7 +13,7 @@ global.document.getElementById = () => ({
 global.document.querySelector = () => null;
 global.ort = { env: { wasm: {} }, Tensor: class { constructor(t, d, dims) { this.data = d; this.dims = dims; } } };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+  .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
   + '; return {Words, OCR, RULES, sanitizeRules, decodeBetter, textScore, allWordsKnown, makeCanvas, DECODE_STATS};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
