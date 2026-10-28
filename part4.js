@@ -443,6 +443,28 @@ const Reader = {
       if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
       const band = opts.full ? null : this.visibleBandPx(i);
       const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+      // СНАЧАЛА прямой путь — как в АПК: сами отправили, сами забрали текст,
+      // никаких сайтов и новых вкладок. Вкладка — только если прямого пути нет
+      // и человек сам нажмёт «Открыть в Lens».
+      if (LENS.hasDirect()) {
+        const badge = $('#scanBadge');
+        if (badge) { badge.classList.add('on'); badge.textContent = 'Lens: распознаю без сайта…'; }
+        let got;
+        try { got = await LENS.recognizeDirect(crop, { page: i }); }
+        finally { if (badge) badge.classList.remove('on'); }
+        if (got.ok) {
+          const res = await applyLensText(i, got.lines.join('\n'), { fromDirect: true });
+          toast('Lens напрямую — ' + (got.via === 'native' ? 'движок АПК' : 'свой релей') + '): '
+                + got.lines.length + ' реплик за ' + got.ms + ' мс', 6000);
+          return this.regions.get(i) || (res && res.ok ? this.regions.get(i) : null);
+        }
+        // Прямой путь не получился — говорим причину и НЕ открываем сайт молча.
+        openSheet('sheetLens');
+        LENS.pendingPage = i;
+        renderLensSheet(i);
+        toast('Прямое распознавание не вышло: ' + got.reason, 9000);
+        return this.regions.get(i) || null;
+      }
       const sent = LENS.send(crop, { page: i });
       if (sent.ok) {
         toast('Страница ' + (i + 1) + ' ушла в Google Lens — откройте новую вкладку', 6000);
@@ -1247,10 +1269,26 @@ function renderLensSheet(pageIndex) {
   const st = $('#lensState');
   if (st) {
     const own = Reader.regions.get(i);
+    const tr = LENS.transports();
+    const howDirect = tr.includes('native') ? 'движок АПК (без сайта)'
+      : tr.includes('relay') ? 'через свой релей (без сайта)' : '';
     st.innerHTML = `Движок: <b>${LENS.isLens() ? 'Google Lens' : 'в файле (офлайн)'}</b>`
       + ` · страница ${i + 1}`
+      + (howDirect ? ` · прямой путь: <b style="color:#8fd18f">${howDirect}</b>` : ' · прямой путь не настроен')
       + (own && own.fromLens ? ` · в странице уже ${own.lines.length} реплик из Lens` : '')
-      + (LENS.lastSentAt ? ' · отправлено ' + new Date(LENS.lastSentAt).toLocaleTimeString('ru-RU') : '');
+      + (LENS.lastSentAt ? ' · отправлено ' + new Date(LENS.lastSentAt).toLocaleTimeString('ru-RU') : '')
+      + (LENS.lastDirect ? ` · прямой ответ ${LENS.lastDirect.ms} мс` : '');
+  }
+  // Почему прямой путь доступен или нет — прямо в шторке, до нажатия кнопок.
+  const why = $('#lensDirectWhy');
+  if (why) {
+    const tr = LENS.transports();
+    why.innerHTML = tr.length
+      ? 'Прямой путь: <b style="color:#8fd18f">'
+        + (tr.includes('native') ? 'движок АПК (KomaLens)' : 'свой релей')
+        + '</b> — сайт не открывается, текст вернётся сюда сам.'
+      : 'Прямой путь не настроен: в браузере Google не отдаёт ответ чужой странице, '
+        + 'а в АПК подключится встроенный движок. Пока работает сайт и вставка текста.';
   }
   const box = $('#lensBox');
   if (box && !box.value) {
