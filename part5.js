@@ -601,6 +601,17 @@ function bindUI() {
     // места, где остановились в прошлый раз.
     TTS.readVisible({ fromStart: true });
   };
+  const btnPlug = $('#btnPluginsReload');
+  if (btnPlug) btnPlug.onclick = () => {
+    try {
+      if (Plugins.present() && typeof window.KomaPlugins.reload === 'function') {
+        window.KomaPlugins.reload();
+        toast('Перечитываю плагины…', 2000);
+        return;
+      }
+    } catch (e) { /* нет моста — покажем, что есть */ }
+    Plugins.load().then(syncPluginsUI);
+  };
   $('#btnFrames').onclick = () => {
     Reader.frames = !Reader.frames;
     // Настройка живёт в правилах: иначе после перезапуска рамки молча
@@ -799,6 +810,20 @@ function syncSettingsUI() {
   $('#cbAuto').checked = !TTS.stopped;
 }
 
+/**
+ * Блок «Плагины» в настройках: сколько их, откуда и что не прочиталось.
+ * Без этого человек не узнал бы, что его JSON вообще подхватился.
+ */
+function syncPluginsUI() {
+  const box = $('#pluginsState');
+  if (!box) return;
+  try {
+    box.textContent = Plugins.describe();
+  } catch (e) {
+    box.textContent = 'плагины не показались: ' + ((e && e.message) || e);
+  }
+}
+
 /* ───────────────────────── 13. Старт ───────────────────────── */
 // Ошибки не должны прятаться в консоли: иначе кнопка «молчит», и непонятно почему.
 window.addEventListener('error', (e) => {
@@ -866,10 +891,28 @@ async function selfCheck() {
   await step('словарь', () => Words.load().catch(e => console.warn('словарь не загрузился', e)));
   await step('прокрутка', () => watchScroll());
   await step('голос', () => TTS.init());
+  await step('голос из плагинов', () => {
+    if (typeof Plugins === 'undefined' || !Plugins.present()) return;
+    const v = Plugins.voice();
+    if (v.engine) { try { VOICE.useEngine(v.engine); } catch (e) {} }
+    if (v.rate > 0) { TTS.rate = v.rate; const r = $('#rngRate'); if (r) r.value = v.rate; }
+    if (v.voice) {
+      TTS.voice = (VOICE.voices() || []).find(x => x.name === v.voice) || null;
+    }
+  });
+  await step('плагины: перечитать по событию', () => {
+    if (typeof window === 'undefined' || !window.addEventListener) return;
+    window.addEventListener('koma-plugins', async () => {
+      await Plugins.load();
+      toast('Плагины перечитаны: ' + Plugins.list.length, 3000);
+      syncPluginsUI();
+    });
+  });
   // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
   // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
   await step('движок', () => LENS.load());
   await step('вид движка', () => syncEngineUI());
+  await step('плагины', () => Plugins.load());
   await step('правила', async () => {
     const saved = await DB.get('kv', 'rules');
     // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
@@ -877,7 +920,13 @@ async function selfCheck() {
     // (pageSide 1280, без перебора) оставалось только словом в настройках.
     let parsedRules = {};
     if (saved) { try { parsedRules = JSON.parse(saved.v) || {}; } catch (e) { console.warn(e); } }
-    RULES = sanitizeRules(parsedRules);
+    // Плагины главнее сохранённых настроек: это правка, которую принесли файлом.
+    const fromPlugins = (typeof Plugins !== 'undefined') ? Plugins.rules() : {};
+    const fixes = (typeof Plugins !== 'undefined') ? Plugins.wordFixes() : {};
+    RULES = sanitizeRules(parsedRules, fromPlugins);
+    if (Object.keys(fixes).length) {
+      RULES.wordFixes = { ...(RULES.wordFixes || {}), ...fixes };
+    }
   });
   await step('рамки', () => {
     // Раньше эта настройка жила только в памяти Reader: после перезапуска
@@ -907,6 +956,7 @@ async function selfCheck() {
     }
   });
   await step('сведения о правилах', () => renderRulesInfo());
+  await step('плагины: показать', () => syncPluginsUI());
   await step('подсказка о движке', () => {
     if (LENS.isLens()) toast('Движок из прошлой сессии — Google Lens. Чтобы вернуть офлайн, откройте ⚙ → Модели', 7000);
   });

@@ -93,12 +93,16 @@ const SPEED_NOTES = {
 };
 
 let RULES = { ...DEFAULT_RULES };
-function sanitizeRules(r) {
+function sanitizeRules(r, overrides) {
   const R = { ...DEFAULT_RULES, ...(r || {}) };
   // Профиль скорости главнее сохранённых чисел: иначе старые значения
   // (pageSide 1600 и т. п.) молча отменяли бы выбранный профиль.
   if (!SPEED_PRESETS[R.speed]) R.speed = DEFAULT_RULES.speed;
   Object.assign(R, SPEED_PRESETS[R.speed]);
+  // Правила из JSON-плагинов — ПОСЛЕ профиля скорости: плагин и есть та
+  // правка, которую принесли файлом, чтобы переопределить поведение без
+  // пересборки. Дальше значения всё равно проходят проверки диапазонов.
+  if (overrides && typeof overrides === 'object') Object.assign(R, overrides);
   const num = (k, a, b) => { R[k] = clamp(Number(R[k]) || 0, a, b); };
   num('inkLowPercentile', 0, .5); num('inkHighPercentile', .5, 1); num('inkFlatSpread', 0, 128);
   num('inkCoefficient', 0, .95); num('inkMin', 0, 254); num('inkMax', 1, 255);
@@ -2810,6 +2814,11 @@ function readingOrder(regions, rtl, onlyCyr, R) {
       const fixed = fixLookalikes(text);
       if (onlyCyr && !isCyr(fixed) && isLookalikeOnly(fixed)) text = fixLookalikesForced(fixed);
       else text = fixed;
+      // Правки из JSON-плагинов: то, что модель исказила системно («ГОВОРЯ.ш»),
+      // человек исправляет файлом, а не новой сборкой.
+      if (typeof Plugins !== 'undefined' && Plugins.list && Plugins.list.length) {
+        try { text = Plugins.text(text); } catch (e) { /* плагин не должен ломать чтение */ }
+      }
       return { ...r, text };
     })
     .filter(r => /[\p{L}\p{N}]/u.test(r.text))

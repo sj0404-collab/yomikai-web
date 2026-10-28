@@ -93,8 +93,10 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   R.page = 0; R.bandIndex = 0; R.band = R.bands[0];
   await T.readVisible();
   await new Promise(r => setTimeout(r, 1600));
-  const reread = [...R.spoken].filter(k => !before.has(k));
-  ok(reread.length === 0, 'повторный запуск ничего не перечитал (новых отметок: ' + reread.length + ')');
+  // Повторный запуск не перечитывает реплики той же страницы. Реплики СЛЕДУЮЩЕЙ
+  // страницы, которые в первом проходе не дочитались, — законно новые.
+  const reread = [...R.spoken].filter(k => !before.has(k) && k.startsWith('0|'));
+  ok(reread.length === 0, 'повторный запуск ничего не перечитал на этой странице (новых отметок: ' + reread.length + ')');
 
   // 4. Прочитанное хранится с ключом страницы и переживает остановку
   ok(R.spokenKey(0, 'ПЕРВАЯ РЕПЛИКА') === R.spokenKey(0, 'первая  реплика!'),

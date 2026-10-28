@@ -87,7 +87,8 @@ let toastEl = null;
   try { api.TTS.init(); } catch (e) { threw = e; }
   ok(!threw, 'TTS.init() без speechSynthesis не падает' + (threw ? ': ' + threw.message : ''));
   ok(api.VOICE.available() === false, 'фасад честно говорит: синтеза нет');
-  ok(/голосов нет/.test(env.el('selVoice').innerHTML), 'в списке голосов написано «голосов нет», а не пусто');
+  ok(/системный/.test(env.el('selVoice').innerHTML),
+    'список не пустой: есть пункт «системный (как в настройках Android)»');
 
   let vThrew = null, report = '';
   try { report = await api.selfTestVoice(); } catch (e) { vThrew = e; }
@@ -122,8 +123,15 @@ let toastEl = null;
   ok(call.text === line.text, 'в движок уходит текст реплики целиком');
   ok(call.lang === 'ru-RU', 'язык русский');
   ok(call.rate === '1.2', 'скорость передана (' + call.rate + ')');
-  ok(call.voice === 'ru-ru-x-afn', 'выбранный голос передан по имени');
+  ok(call.voice === '', 'по умолчанию голос НЕ передаётся — звучит системный (Tera TTS и любой другой)');
   ok(/^v\d+_/.test(call.id), 'у каждой фразы свой идентификатор для событий');
+
+  // Явно выбранный голос — передаётся по имени (это уже решение человека).
+  api.TTS.voice = api.TTS.voices[0];
+  env.calls.speak.length = 0;
+  api.TTS.speakLine(line, () => {});
+  ok(env.calls.speak[0].voice === 'ru-ru-x-afn', 'выбранный человеком голос передан по имени');
+  api.TTS.voice = null;
 
   // События движка: start → «прочитано», end → следующая реплика
   const marked = [];

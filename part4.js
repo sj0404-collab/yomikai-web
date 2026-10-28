@@ -654,6 +654,12 @@ const Reader = {
     const k = 'spoken:' + this.book.id;
     DB.put('kv', { k, v: Array.from(this.spoken).slice(-4000) }).catch(() => {});
   },
+  /** Непрочитанные реплики ВСЕЙ страницы — страховка от «прочитал одну». */
+  unspokenPage() {
+    const data = this.regions.get(this.page);
+    if (!data) return [];
+    return (data.lines || []).filter(l => !this.spoken.has(this.spokenKey(this.page, l.text)));
+  },
   /** Непрочитанные реплики текущей полосы. */
   unspokenInBand() {
     const i = this.page;
@@ -958,6 +964,22 @@ const VOICE = {
     try { return (sw.getVoices() || []).slice(); } catch (e) { return []; }
   },
 
+  /** Движки синтеза, установленные в системе (только в АПК). */
+  engines() {
+    if (!this.native() || typeof window.KomaSpeech.engines !== 'function') return [];
+    try {
+      const raw = window.KomaSpeech.engines();
+      const arr = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || []));
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  },
+  /** Переключить движок синтеза. Пусто — системный по умолчанию. */
+  useEngine(name) {
+    if (!this.native() || typeof window.KomaSpeech.useEngine !== 'function') return false;
+    try { window.KomaSpeech.useEngine(String(name || '')); this._voices = null; return true; }
+    catch (e) { return false; }
+  },
+
   /** Короткая причина состояния голоса — для честных сообщений человеку. */
   statusText() {
     if (!this.native()) {
@@ -1072,20 +1094,50 @@ const TTS = {
         this.voices = all.filter(v => /ru/i.test(v.lang)).concat(all.filter(v => !/ru/i.test(v.lang)));
         const sel = $('#selVoice');
         if (!sel) return;
-        sel.innerHTML = this.voices.length
-          ? this.voices.map((v, i) => `<option value="${i}">${escapeHtml(v.name)} (${v.lang})</option>`).join('')
-          : '<option value="">голосов нет</option>';
-        const saved = localStorage.getItem('koma.voice');
-        if (saved && this.voices[+saved]) sel.value = saved;
-        this.voice = this.voices[+sel.value] || null;
+        // Первый пункт — «системный по умолчанию». Это НЕ заглушка: именно так
+        // читают все, кто настроил голос в Android (Tera TTS и прочие).
+        const savedIdx = localStorage.getItem('koma.voice');
+        const chosen = (savedIdx !== null && savedIdx !== 'default') ? +savedIdx : -1;
+        sel.innerHTML = '<option value="default">системный (как в настройках Android)</option>'
+          + this.voices.map((v, i) =>
+            `<option value="${i}">${escapeHtml(v.name)} (${v.lang})</option>`).join('');
+        sel.value = (chosen >= 0 && this.voices[chosen]) ? String(chosen) : 'default';
+        this.voice = (sel.value === 'default') ? null : (this.voices[+sel.value] || null);
       } catch (e) { console.warn('голоса не заполнились', e); }
     };
     fill();
     const sw = VOICE.synth();
     if (sw) { try { sw.onvoiceschanged = fill; } catch (e) { /* ignore */ } }
+    // Список ДВИЖКОВ синтеза (в АПК): человек может выбрать Tera TTS, даже
+    // если системным по умолчанию стоит другой.
+    try {
+      const selE = $('#selTtsEngine');
+      if (selE && typeof VOICE.engines === 'function') {
+        const list = VOICE.engines();
+        if (list.length) {
+          const savedE = localStorage.getItem('koma.ttsEngine') || '';
+          selE.innerHTML = '<option value="">системный движок</option>'
+            + list.map(e => `<option value="${escapeHtml(e.name)}">${escapeHtml(e.label || e.name)}${e.default ? ' · по умолчанию' : ''}</option>`).join('');
+          selE.value = list.some(e => e.name === savedE) ? savedE : '';
+          selE.onchange = (ev) => {
+            const name = ev.target.value || '';
+            localStorage.setItem('koma.ttsEngine', name);
+            try { VOICE.useEngine(name); } catch (err) { console.warn('движок не переключился', err); }
+            VOICE._voices = null;          // голоса у нового движка свои
+            setTimeout(fill, 400);
+          };
+        }
+      }
+    } catch (e) { /* в браузере движков нет — это нормально */ }
     $('#selVoice').onchange = (e) => {
-      this.voice = this.voices[+e.target.value] || null;
-      localStorage.setItem('koma.voice', e.target.value);
+      // «default» — это выбор системного голоса, а не отсутствие выбора.
+      if (e.target.value === 'default') {
+        this.voice = null;
+        localStorage.setItem('koma.voice', 'default');
+      } else {
+        this.voice = this.voices[+e.target.value] || null;
+        localStorage.setItem('koma.voice', e.target.value);
+      }
     };
     const r = $('#rngRate');
     r.value = +(localStorage.getItem('koma.rate') || (RULES.speechRate || 1));
@@ -1152,19 +1204,21 @@ const TTS = {
       this.primed = true;
     } catch (e) { console.warn('голос не разблокировался', e); }
   },
-  /** Голос из списка, который реально доступен ПРЯМО СЕЙЧАС. */
+  /**
+   * Голос, которым читать.
+   *
+   * Возвращает null, если человек голос НЕ выбирал: тогда говорит системный
+   * голос по умолчанию — тот, что стоит в «Настройки → Синтез речи» (Tera TTS
+   * и любой другой). Раньше здесь брался первый русский голос движка, и это
+   * молча подменяло выбор человека (замечание 28.10 22:4x).
+   */
   pickVoice() {
+    const cur = this.voice;
+    if (!cur) return null;                       // «системный по умолчанию»
     let avail = [];
     try { avail = VOICE.voices() || []; } catch (e) { avail = []; }
-    if (!avail.length) return null;
-    const cur = this.voice;
-    if (cur && avail.some(v => v.voiceURI === cur.voiceURI || v.name === cur.name)) {
-      return avail.find(v => v.voiceURI === cur.voiceURI || v.name === cur.name);
-    }
-    // Сохранённый голос исчез (перезапуск WebView, смена TTS-движка) —
-    // берём русский по умолчанию, но НЕ подменяем выбор пользователя молча:
-    // об этом говорим тостом ниже.
-    return avail.find(v => /^ru/i.test(v.lang)) || null;
+    if (!avail.length) return null;              // список не отдан — пусть решает движок
+    return avail.find(v => v.voiceURI === cur.voiceURI || v.name === cur.name) || null;
   },
   speakLine(line, then) {
     // «Прочитано» отмечаем ТОЛЬКО когда голос реально заговорил (нажатие ▶ не
@@ -1200,10 +1254,20 @@ const TTS = {
       this._voiceTries = 0;
     }
     const chosen = this.pickVoice();
-    if (chosen && this.voice && chosen.voiceURI !== this.voice.voiceURI) {
+    if (this.voice && !chosen) {
+      // Выбранный раньше голос пропал (сменили движок синтеза, перезапустили
+      // TTS). Не подсовываем «первый русский» — возвращаемся к системному и
+      // говорим об этом один раз.
+      toast('Голос «' + (this.voice.name || '') + '» пропал — читаю системным', 5000);
+      this.voice = null;
+    } else if (chosen && this.voice && chosen.voiceURI !== this.voice.voiceURI) {
       toast('Голос «' + (this.voice.name || '') + '» недоступен, читаю ' + chosen.name, 5000);
+      this.voice = chosen;
+    } else if (chosen) {
+      this.voice = chosen;
     }
-    if (chosen) this.voice = chosen;
+    // Явно выбранный голос — только если человек его выбирал. Иначе null:
+    // мост не будет трогать голос и локаль, и заговорит системный (Tera TTS).
     // cancel() «на всякий случай» убивает очередь: следующий вызов уже не
     // запускается. Отменяем только если что-то реально звучит (в браузере) —
     // нативный движок отменять перед каждой репликой не нужно и вредно.
@@ -1446,63 +1510,72 @@ const TTS = {
    * распознаём: «страница уже есть в памяти» не значит «есть эта полоса».
    */
   async advanceReading() {
-    // Страницу запоминаем на входе: прокрутка ленты может пересчитать
-    // Reader.page по геометрии, и тогда «следующая страница» перескакивала
-    // через одну (0 → 2 → 4 …).
-    let page = Reader.page;
-    for (let guard = 0; guard < 64; guard++) {
-      if (this.stopped) return;
-      const i = page;
-      Reader.page = i;
-      const bands = Reader.bands || [];
-      const ni = (Reader.bandIndex || 0) + 1;
-      if (ni < bands.length) {
-        // ПОРЯДОК ВАЖЕН: сначала распознаём полосу, потом прокручиваем к ней.
-        // Было наоборот — экран прыгал на ещё не распознанную полосу, голос
-        // молчал, полоса оказывалась пустой, экран прыгал дальше. С телефона
-        // это выглядело как «резко скролит и не читает, а читает спустя
-        // несколько прокруток» (скриншоты 22:11–22:12).
-        const un = await Reader.ensureBandLines(i, ni);
-        if (!un.length) {
-          // Читать нечего — НЕ прокручиваем экран впустую: идём к следующей
-          // полосе так же, заранее, и прокрутим один раз туда, где текст есть.
+    // ОДИН проход за раз. Раньше два вызова (из step и из конвейера) шли
+    // параллельно: каждый считал «следующую полосу» и дёргал ленту — отсюда
+    // «дёрнулся, потом ещё дважды, а прочитал одну реплику» (телефон 28.10).
+    if (this._advancing) return;
+    this._advancing = true;
+    try {
+      let page = Reader.page;
+      for (let guard = 0; guard < 64; guard++) {
+        if (this.stopped) return;
+        Reader.page = page;
+        const bands = Reader.bands || [];
+        let found = null, foundNi = -1;
+        for (let ni = (Reader.bandIndex || 0) + 1; ni < bands.length; ni++) {
+          const un = await Reader.ensureBandLines(page, ni);
+          if (this.stopped) return;
+          if (un.length) { found = un; foundNi = ni; break; }
+          // Полоса пустая после распознавания — идём дальше, но БЕЗ прокрутки.
+        }
+        if (found) {
+          Reader.bandIndex = foundNi;
+          Reader.band = bands[foundNi] || Reader.band;
+          Reader.page = page;
+          Reader.scrollToLineIfNeeded(page, found[0]);
+          await sleep(160);
+          Reader.page = page;
+          return this.readQueue(found);
+        }
+        // Полосы кончились, а на странице остались непрочитанные реплики
+        // (например, текст попал в полосу, которую мы не считали текущей):
+        // читаем их, а не прыгаем дальше молча.
+        Reader.bandIndex = bands.length;
+        const rest = Reader.unspokenPage();
+        if (rest.length) { Reader.page = page; return this.readQueue(rest); }
+
+        // Следующая страница. Тоже: распознать, потом листать.
+        if (page < Reader.pages.length - 1) {
+          const next = page + 1;
+          await Reader.ensureLoaded(next);
+          Reader.page = next;
+          Reader.bandIndex = 0;
+          Reader.band = (Reader.bands || [])[0] || null;
+          await Reader.waitIdle();
+          if (!Reader.regions.get(next)) {
+            await Reader.scanPage(next, { full: true, silent: true }).catch(() => {});
+          }
+          Reader.page = next;
+          Reader.band = (Reader.bands || [])[0] || null;
+          const un = Reader.unspokenInBand();
+          if (un.length) {
+            Reader.scrollToLineIfNeeded(next, un[0]);
+            return this.readQueue(un);
+          }
+          const restNext = Reader.unspokenPage();
+          if (restNext.length) return this.readQueue(restNext);
+          page = next;
           continue;
         }
-        // Прокручиваем ТОЛЬКО если реплика вне экрана, и ставим её в верхнюю
-        // треть. Раньше каждый переход дёргал ленту к началу полосы — отсюда
-        // «ерзает непонятно куда» (телефон 22:41).
-        Reader.scrollToLineIfNeeded(i, un[0]);
-        await sleep(200);
-        Reader.page = i;
-        return this.readQueue(un);
+        this.stop();
+        toast('Конец книги', 2500);
+        return;
       }
-      // Полосы кончились — следующая страница. Тоже: распознать, потом листать.
-      if (i < Reader.pages.length - 1) {
-        const next = i + 1;
-        await Reader.ensureLoaded(next);
-        Reader.bandIndex = 0;
-        // И «текущая полоса» тоже должна вернуться к первой: иначе на новой
-        // странице читались реплики ПРОШЛОЙ полосы (пропускался верх страницы).
-        Reader.page = next;
-        Reader.band = (Reader.bands || [])[0] || null;
-        await Reader.waitIdle();
-        if (!Reader.regions.get(next)) await Reader.scanPage(next, { full: true, silent: true }).catch(() => {});
-        Reader.page = next;
-        Reader.bandIndex = 0;
-        Reader.band = (Reader.bands || [])[0] || null;
-        const un = Reader.unspokenInBand();
-        Reader.scrollToPage(next);
-        page = next;                        // дальше читаем уже эту страницу
-        if (un.length) { await sleep(200); return this.readQueue(un); }
-        continue;
-      }
-      this.stop();
-      toast('Конец книги', 2500);
-      return;
+    } finally {
+      this._advancing = false;
     }
-    this.stop();
-    toast('Дальше читать нечего', 2500);
   },
+
   /** Прочитать ровно этот список реплик (без повторного вывода полосы). */
   readQueue(lines) {
     this.queue = lines.slice();

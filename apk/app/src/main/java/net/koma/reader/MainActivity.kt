@@ -43,6 +43,7 @@ class MainActivity : android.app.Activity() {
     private lateinit var updater: Updater
     private lateinit var engine: GlensEngine
     private lateinit var speech: KomaSpeechBridge
+    private lateinit var plugins: KomaPluginsBridge
     private lateinit var ocrEngine: OcrEngine
     private lateinit var ocr: KomaOcrBridge
     private var fileCallback: ValueCallback<Array<Uri>>? = null
@@ -77,6 +78,10 @@ class MainActivity : android.app.Activity() {
         // старте, поэтому отдельный поток; страница переспросит готовность сама.
         ocrEngine.embedded = ocrEngine.embeddedInAssets(assets)
         if (ocrEngine.embedded) ocr.seed()
+
+        // Плагины читалки: JSON-файлы рядом с приложением. Правки поведения
+        // (правила, замены слов, голос) едут файлами, а не новой сборкой.
+        plugins = KomaPluginsBridge(this) { web }
 
         web = WebView(this)
         setContentView(web, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -166,6 +171,7 @@ class MainActivity : android.app.Activity() {
         web.addJavascriptInterface(KomaLensBridge(engine, appVersion) { web }, "KomaLens")
         web.addJavascriptInterface(speech, "KomaSpeech")
         web.addJavascriptInterface(ocr, "KomaOcr")
+        web.addJavascriptInterface(plugins, "KomaPlugins")
         web.addJavascriptInterface(
             KomaAppBridge(updater, engine, appVersion, { web }) { reason -> runOnUiThread { reload(reason) } },
             "KomaApp"

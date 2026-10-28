@@ -73,14 +73,30 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   spoken.length = 0;
   el('toast').textContent = '';
   T.speakLine({ text: 'четвёртый', top: 0.1, bottom: 0.2 });
-  ok(T.voice.voiceURI === 'ru2', 'взят доступный русский голос');
-  ok(/недоступен/.test(el('toast').textContent), 'о подмене голоса сказано');
+  ok(/недоступен/.test(el('toast').textContent) || T.voice === null,
+    'пропавший голос не подсовывается молча');
+  ok(!spoken[spoken.length - 1] || !spoken[spoken.length - 1].voice
+    || spoken[spoken.length - 1].voice.voiceURI !== 'gone',
+    'просто «своего» голоса в озвучку не передаём');
 
-  // 5. Ни одного голоса — прямое объяснение
+  // 5. Голос не выбран человеком — говорим СИСТЕМНЫМ (Tera TTS и любой другой).
+  // Раньше страница сама брала первый русский голос движка — это и была
+  // жалоба «голос не тот, что у меня по умолчанию».
+  T.voice = null;
+  voices = [{ name: 'Первый русский', lang: 'ru-RU', voiceURI: 'ru1' },
+            { name: 'Второй русский', lang: 'ru-RU', voiceURI: 'ru2' }];
+  spoken.length = 0;
+  T.speakLine({ text: 'системный', top: 0.1, bottom: 0.2 });
+  ok(T.voice === null, 'без явного выбора голос остаётся системным (TTS сам решает)');
+  ok(!spoken[spoken.length - 1] || !spoken[spoken.length - 1].voice,
+    'в синтез голос не передаётся — звучит голос из настроек Android');
+
+  // 6. Ни одного голоса — читаем системным, а не отказываемся
   voices = [];
   el('toast').textContent = '';
+  spoken.length = 0;
   T.speakLine({ text: 'пятый', top: 0.1, bottom: 0.2 });
-  ok(/Синтез речи/.test(el('toast').textContent), 'отсутствие голосов объяснено');
+  ok(spoken.length === 1, 'пустой список голосов не отменяет чтение');
 
   // 6. prime разблокирует синтезатор в жесте
   T.primed = false; spoken.length = 0;

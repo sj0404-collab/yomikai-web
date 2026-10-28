@@ -35,32 +35,66 @@ class KomaSpeechBridge(
     private var ready = false
     private var broken: String? = null
     private val waiting = ArrayList<() -> Unit>()
+    /** Движок синтеза: пустая строка — системный по умолчанию (как в настройках). */
+    private var engineName: String = ""
 
     private fun ensureTts() {
         if (tts != null) return
-        tts = TextToSpeech(ctx.applicationContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                val t = tts
-                if (t == null) { broken = "движок не создался"; return@TextToSpeech }
-                ready = true
-                t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) = fire(utteranceId, "start", "")
-                    override fun onDone(utteranceId: String?) = fire(utteranceId, "end", "")
-                    @Deprecated("старый API")
-                    override fun onError(utteranceId: String?) = fire(utteranceId, "error", "engine")
-                    override fun onError(utteranceId: String?, errorCode: Int) =
-                        fire(utteranceId, "error", errName(errorCode))
-                })
-                // Русский — основной язык читалки; если его нет, движок сам
-                // скажет об этом через status(), а speak() вернёт ошибку.
-                trySetLocale(Locale.forLanguageTag("ru-RU"))
+        // ВАЖНО: движок берём СИСТЕМНЫЙ по умолчанию (тот, что выбран в
+        // «Настройки → Синтез речи», например Tera TTS). Раньше здесь ничего не
+        // выбиралось явно, но мост потом вызывал setLanguage и setVoice, и
+        // Android переключался на первый русский голос движка — «голос не тот,
+        // что у меня по умолчанию» (телефон 28.10).
+        val init = TextToSpeech.OnInitListener { status -> onInit(status) }
+        tts = if (engineName.isBlank()) TextToSpeech(ctx.applicationContext, init)
+              else TextToSpeech(ctx.applicationContext, init, engineName)
+    }
+
+    private var onInitCb: ((Int) -> Unit)? = null
+
+    private fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            val t = tts
+            if (t == null) {
+                broken = "движок не создался"
                 flush()
-            } else {
-                broken = if (status == TextToSpeech.ERROR) "движок TTS не инициализировался" else "TTS: код $status"
-                GlensEngine.log("KomaSpeech: $broken")
-                flush()
+                onInitCb?.invoke(status)
+                onInitCb = null
+                return
             }
+            ready = true
+            t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) = fire(utteranceId, "start", "")
+                override fun onDone(utteranceId: String?) = fire(utteranceId, "end", "")
+                @Deprecated("старый API")
+                override fun onError(utteranceId: String?) = fire(utteranceId, "error", "engine")
+                override fun onError(utteranceId: String?, errorCode: Int) =
+                    fire(utteranceId, "error", errName(errorCode))
+            })
+            // Язык НЕ навязываем: если голос по умолчанию у движка уже русский
+            // (Tera TTS — русский), setLanguage переключил бы его на другой голос
+            // того же движка. Меняем локаль, только когда текущий голос не русский.
+            ensureRussian()
+            flush()
+        } else {
+            broken = if (status == TextToSpeech.ERROR) "движок TTS не инициализировался" else "TTS: код $status"
+            GlensEngine.log("KomaSpeech: $broken")
+            flush()
         }
+        onInitCb?.invoke(status)
+        onInitCb = null
+    }
+
+    /** Голос по умолчанию уже русский? Тогда ничего не трогаем. */
+    private fun ensureRussian(): Boolean {
+        val t = tts ?: return false
+        return try {
+            val cur = t.voice
+            val lang = cur?.locale?.language
+            if (lang == "ru") return true
+            val res = t.setLanguage(Locale.forLanguageTag("ru-RU"))
+            res != TextToSpeech.LANG_MISSING_DATA && res != TextToSpeech.LANG_NOT_SUPPORTED
+        } catch (e: Exception) { false }
     }
 
     private fun trySetLocale(locale: Locale): Int? = try {
@@ -126,6 +160,39 @@ class KomaSpeechBridge(
         return out.toString()
     }
 
+    /** Движки синтеза, установленные в системе: видно, что есть Tera TTS. */
+    @JavascriptInterface
+    fun engines(): String {
+        val out = JSONArray()
+        return try {
+            ensureTts()
+            val t = tts
+            val def = try { t?.defaultEngine ?: "" } catch (e: Throwable) { "" }
+            val list: List<TextToSpeech.EngineInfo> = try { t?.engines ?: emptyList() } catch (e: Throwable) { emptyList() }
+            for (e in list) {
+                out.put(JSONObject()
+                    .put("name", e.name)
+                    .put("label", try { e.label } catch (t: Throwable) { e.name })
+                    .put("default", e.name == def))
+            }
+            out.toString()
+        } catch (t: Throwable) { "[]" }
+    }
+
+    /**
+     * Выбрать движок синтеза САМОМУ (например, Tera TTS, если он не системный
+     * по умолчанию). Пустая строка — вернуться к системному.
+     */
+    @JavascriptInterface
+    fun useEngine(name: String) {
+        val next = name.trim()
+        if (next == engineName) return
+        engineName = next
+        try { tts?.stop(); tts?.shutdown() } catch (e: Exception) { }
+        tts = null; ready = false; broken = null
+        ensureTts()
+    }
+
     /** Готовность и что за движок — для «Проверить голос» и строки состояния. */
     @JavascriptInterface
     fun status(): String {
@@ -134,6 +201,9 @@ class KomaSpeechBridge(
         broken?.let { o.put("error", it) }
         try {
             o.put("engine", tts?.defaultEngine ?: "")
+            o.put("engineUsed", engineName.ifBlank { "системный по умолчанию" })
+            o.put("voice", try { tts?.voice?.name ?: "" } catch (e: Exception) { "" })
+            o.put("voiceLang", try { tts?.voice?.locale?.toLanguageTag() ?: "" } catch (e: Exception) { "" })
             o.put("voices", tts?.voices?.size ?: 0)
             o.put("ru", trySetLocale(Locale.forLanguageTag("ru-RU"))
                 ?.let { it != TextToSpeech.LANG_MISSING_DATA && it != TextToSpeech.LANG_NOT_SUPPORTED } ?: false)
@@ -160,16 +230,16 @@ class KomaSpeechBridge(
             return
         }
         try {
-            val locale = try { Locale.forLanguageTag(lang.ifBlank { "ru-RU" }) } catch (e: Exception) { Locale.forLanguageTag("ru-RU") }
-            val res = trySetLocale(locale)
-            if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
-                trySetLocale(Locale.forLanguageTag("ru-RU"))
-            }
+            // Локаль и голос трогаем ТОЛЬКО по явной просьбе страницы.
+            // Пустое имя голоса = «как в системе» — ровно то, чего человек ждёт
+            // от своего Tera TTS.
             val wanted = voiceName.trim()
-            if (wanted.isNotEmpty()) {
+            if (wanted.isNotEmpty() && !wanted.equals("Системный", true)) {
                 try {
                     t.voices?.firstOrNull { it.name == wanted }?.let { t.voice = it }
                 } catch (e: Exception) { GlensEngine.log("голос «$wanted» не выбран: ${e.message}") }
+            } else {
+                ensureRussian()
             }
             t.setSpeechRate((rate.toFloatOrNull() ?: 1f).coerceIn(0.5f, 2.5f))
             val code = t.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)

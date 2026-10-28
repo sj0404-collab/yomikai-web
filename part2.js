@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.38';
+const VERSION = 'v1.9.39';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -139,6 +139,131 @@ async function unzip(buf) {
   files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
   return files;
 }
+
+/* ─────────────────── 2b. Плагины (JSON, без пересборки АПК) ───────────────────
+   Зачем: любая правка поведения (правила распознавания, замены слов, голос)
+   должна ехать ФАЙЛОМ, а не новой сборкой АПК. Плагины читает приложение
+   (мост `KomaPlugins`): вшитые в сборку assets/plugins и положенные человеком
+   в папку plugins рядом с приложением. Здесь они применяются.
+
+   Формат файла:
+     { "id": "...", "name": "...", "order": 10,
+       "rules": {...}, "wordFixes": {...},
+       "replace": [{"from": "ГОВОРЯ.ш", "to": "ГОВОРИШЬ"}],
+       "voice": {"engine": "", "voice": "", "rate": 1.0},
+       "ocr": {"engine": "auto"} }                                        */
+const Plugins = {
+  list: [], problems: [], dir: '', loaded: false,
+
+  bridge() {
+    return (typeof window !== 'undefined' && window.KomaPlugins
+      && typeof window.KomaPlugins.all === 'function') ? window.KomaPlugins : null;
+  },
+  present() { return !!this.bridge(); },
+
+  async load() {
+    this.list = []; this.problems = []; this.dir = ''; this.loaded = false;
+    const b = this.bridge();
+    if (b) {
+      try {
+        const raw = b.all();
+        const data = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || {}));
+        if (data && Array.isArray(data.plugins)) this.list = data.plugins.filter(p => p && typeof p === 'object');
+        if (data && Array.isArray(data.problems)) this.problems = data.problems.map(String);
+        if (data && data.dir) this.dir = String(data.dir);
+      } catch (e) {
+        this.problems.push('плагины не прочитались: ' + ((e && e.message) || e));
+      }
+    }
+    this.loaded = true;
+    return this.list;
+  },
+
+  /** Плагины по возрастанию order: последний — самый главный. */
+  ordered() {
+    return this.list.slice().sort((a, b) => (Number(a.order) || 100) - (Number(b.order) || 100));
+  },
+
+  /** Правила из плагинов: накладываются на сохранённые, поверх — sanitizeRules. */
+  rules() {
+    const out = {};
+    for (const p of this.ordered()) {
+      if (p.rules && typeof p.rules === 'object') Object.assign(out, p.rules);
+      if (p.ocr && typeof p.ocr === 'object' && p.ocr.engine) out.ocrEngine = p.ocr.engine;
+    }
+    return out;
+  },
+
+  /** Словарные правки из всех плагинов (слово → слово). */
+  wordFixes() {
+    const out = {};
+    for (const p of this.ordered()) {
+      if (p.wordFixes && typeof p.wordFixes === 'object') {
+        for (const [k, v] of Object.entries(p.wordFixes)) {
+          if (typeof v === 'string' && k) out[k] = v;
+        }
+      }
+    }
+    return out;
+  },
+
+  /** Точечные замены в распознанном тексте. */
+  replaceList() {
+    const out = [];
+    for (const p of this.ordered()) {
+      if (!Array.isArray(p.replace)) continue;
+      for (const r of p.replace) {
+        if (r && typeof r.from === 'string' && r.from) {
+          out.push({ from: r.from, to: typeof r.to === 'string' ? r.to : '' });
+        }
+      }
+    }
+    return out;
+  },
+
+  /** Замены применяются к готовой реплике: сначала точные, потом словарные. */
+  text(text) {
+    let t = String(text || '');
+    if (!t) return t;
+    for (const r of this.replaceList()) {
+      if (t.indexOf(r.from) !== -1) t = t.split(r.from).join(r.to);
+    }
+    const fixes = this.wordFixes();
+    if (Object.keys(fixes).length) {
+      t = t.replace(/[\p{L}\p{N}]+/gu, (w) => {
+        if (fixes[w] != null) return fixes[w];
+        const up = w.toUpperCase(), low = w.toLowerCase();
+        if (fixes[up] != null) return /^\p{Lu}/u.test(w) ? fixes[up] : fixes[up].toLowerCase();
+        if (fixes[low] != null) return fixes[low];
+        return w;
+      });
+    }
+    return t;
+  },
+
+  /** Голос из плагинов (движок/голос/скорость) — применяется при запуске. */
+  voice() {
+    const out = { engine: '', voice: '', rate: 0 };
+    for (const p of this.ordered()) {
+      if (!p.voice || typeof p.voice !== 'object') continue;
+      if (typeof p.voice.engine === 'string') out.engine = p.voice.engine;
+      if (typeof p.voice.voice === 'string') out.voice = p.voice.voice;
+      if (Number.isFinite(+p.voice.rate) && +p.voice.rate > 0) out.rate = +p.voice.rate;
+    }
+    return out;
+  },
+
+  /** Что показать человеку в настройках. */
+  describe() {
+    if (!this.present()) return 'Плагинов нет: страница открыта не в приложении.';
+    if (!this.list.length) return 'Плагинов нет. Папка: ' + (this.dir || '—');
+    const names = this.ordered().map(p => (p.name || p.id || 'без имени')
+      + (p._source ? ' [' + p._source + ']' : ''));
+    return 'Плагинов: ' + this.list.length + '\n' + names.join('\n')
+      + (this.problems.length ? '\nОшибки: ' + this.problems.join('; ') : '')
+      + '\nПапка: ' + (this.dir || '—');
+  },
+};
 
 /* ───────────────────────── 3. Библиотека ───────────────────────── */
 const Library = {
