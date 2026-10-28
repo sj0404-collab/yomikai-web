@@ -257,7 +257,18 @@
     <div class="row" style="margin-top:8px;gap:8px">
       <button class="btn" id="btnClearModels">Убрать модели</button>
     </div>
-    <div class="lbl">ДВИЖОК</div>
+    <div class="lbl">ДВИЖОК РАСПОЗНАВАНИЯ</div>
+    <div class="row" id="engineChips" style="gap:8px;flex-wrap:wrap">
+      <button class="btn hot" id="engineLocal" data-engine="local">В файле (офлайн)</button>
+      <button class="btn" id="engineLens" data-engine="lens">Google Lens (интернет)</button>
+    </div>
+    <div class="hint" id="engineLensNote" style="margin-top:8px">
+      <b>Google Lens</b> — отдельный движок для трудных страниц (чужой шрифт,
+      старый скан). Он <b>отправляет картинку в Google</b>: это единственное
+      место, где приложение выходит в сеть, и по умолчанию он выключен.
+      Текст из Lens возвращается в читалку кнопкой «Вставить из буфера» —
+      после этого работают рамки, порядок реплик и озвучка.
+    </div>
     <div id="ortState" class="kv hint"></div>
     <div id="engineNote" class="hint" style="display:none;color:#ffd2d2;margin-top:6px"></div>
     <div id="dictState" class="hint" style="margin-top:6px"></div>
@@ -368,7 +379,40 @@
       <button class="btn primary" id="btnRescan">Распознать заново</button>
       <button class="btn" id="btnSpeakPage">Прочитать</button>
     </div>
+    <div class="row" style="gap:8px;margin-top:8px">
+      <button class="btn" id="btnLensSend">🔍 Открыть в Google Lens</button>
+      <button class="btn" id="btnLensPaste">Вставить текст из Lens</button>
+    </div>
     <button class="btn" id="closeSheets4" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
+<!-- ═══ Шторка: текст из Google Lens ═══ -->
+<div class="sheet" id="sheetLens">
+  <div class="head">Google Lens</div>
+  <div class="body">
+    <div class="kv" id="lensState"></div>
+    <div class="hint" style="margin-top:8px">
+      1. Нажмите «Открыть в Lens» — страница уйдёт в Google <b>новой вкладкой</b>.<br>
+      2. На странице Lens откройте вкладку «Текст», выделите и скопируйте текст.<br>
+      3. Вернитесь сюда и нажмите «Вставить из буфера» (или вставьте в поле).<br>
+      Дальше это обычные реплики страницы: рамки, порядок сверху вниз, озвучка.
+    </div>
+    <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn primary" id="btnLensOpen">Открыть в Lens</button>
+      <button class="btn" id="btnLensClip">Вставить из буфера</button>
+    </div>
+    <div class="lbl">ТЕКСТ ИЗ LENS</div>
+    <textarea id="lensBox" rows="8" placeholder="Вставьте сюда текст со страницы Lens — по одной реплике в строке"></textarea>
+    <div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn primary" id="btnLensApply">В текст страницы</button>
+      <button class="btn" id="btnLensRead">Применить и прочитать</button>
+    </div>
+    <div class="hint" id="lensDanger" style="color:#ffd2d2;margin-top:10px">
+      Внимание: пока включён движок «Google Lens», кнопка «Распознать» отправляет
+      картинку страницы в интернет. Режим «В файле» ничего не отправляет.
+    </div>
+    <button class="btn" id="closeSheets5" style="margin-top:18px;width:100%">Закрыть</button>
   </div>
 </div>
 
@@ -2315,7 +2359,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.26';
+const VERSION = 'v1.9.27';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3998,6 +4042,14 @@ function wordColumns(crop, R) {
  * чтобы не тратить время на телефоне.
  */
 /** Кроп с белыми полями: модель видит целые буквы, а не обрезанные края. */
+/** Вырезать прямоугольник страницы в отдельный canvas (для отправки в Lens). */
+function cropCanvas(src, x, y, w, h) {
+  const out = makeCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+  out.getContext('2d', { willReadFrequently: true })
+    .drawImage(src, Math.round(x), Math.round(y), Math.round(w), Math.round(h), 0, 0, out.width, out.height);
+  return out;
+}
+
 function padCanvas(src, frac) {
   const pad = Math.max(1, Math.round(src.height * frac));
   const out = makeCanvas(src.width + pad * 2, src.height + pad * 2);
@@ -5136,6 +5188,131 @@ function cutAtBandBottom(line, band, cutMargin) {
   return !/[.!?…"»)]$/.test(t);
 }
 
+/**
+ * ─── Google Lens как ОТДЕЛЬНЫЙ движок ────────────────────────────────────────
+ *
+ * Зачем. Своя модель на манге даёт 4,8 % CER против 2,7 % у штатной, а на
+ * чужих страницах (журналы 1988–2001 из archive.org) читалка находит меньше
+ * трети строк — шрифт, вёрстка и печать другие. Lens читает такое заметно
+ * лучше, но НЕ умеет работать офлайн и отправляет картинку в Google.
+ *
+ * Как устроено и почему именно так:
+ *  • Модели и текст по-прежнему обрабатываются локально, а Lens — это ЯВНО
+ *    включаемый второй движок. Пока режим «локально» (по умолчанию), ни один
+ *    байт картинки никуда не уходит: send() в этом режиме даже не строит форму.
+ *  • Отправка — обычная отправка ФОРМЫ в новую вкладку (`enctype=multipart`,
+ *    поле `encoded_image`), а не fetch: навигацию окна CORS не ограничивает,
+ *    поэтому это работает и из файла `file://`, где XHR к чужому домену
+ *    невозможен. Проверено 28.10 в Chromium: Lens принимает файл и отвечает
+ *    страницей результатов (из песочницы IP попал под проверку на робота, но
+ *    сам аплоад прошёл — в обычном браузере открывается страница «Текст»).
+ *  • Прочитать результат из другой вкладки нельзя (чужой домен). Поэтому
+ *    текст возвращается ЧЕРЕЗ ЧЕЛОВЕКА: «Вставить из буфера» одной кнопкой
+ *    (navigator.clipboard.readText в жесте) или вставкой в поле. Дальше эти
+ *    строки живут как обычные реплики страницы: рамки, порядок, озвучка.
+ *  • Никаких confirm()/prompt() — только тост и шторка.
+ */
+const LENS = {
+  mode: 'local',                     // local | lens
+  action: 'https://lens.google.com/v3/upload?hl=ru&ep=ccm',
+  lastSentAt: 0, lastSentPage: null,
+  pendingPage: null,                 // страница, для которой ждём текст от Lens
+
+  isLens() { return this.mode === 'lens'; },
+
+  /** Прочитать сохранённый выбор движка. */
+  async load() {
+    try {
+      const row = await DB.get('kv', 'engine:mode');
+      this.mode = (row && row.v === 'lens') ? 'lens' : 'local';
+    } catch (e) { this.mode = 'local'; }
+    return this.mode;
+  },
+
+  /** Сохранить выбор. Кнопка «Движок: …» работает без confirm(). */
+  async setMode(mode) {
+    this.mode = mode === 'lens' ? 'lens' : 'local';
+    try { await DB.put('kv', { k: 'engine:mode', v: this.mode }); } catch (e) { /* некуда сохранить — не беда */ }
+    return this.mode;
+  },
+
+  /**
+   * Картинка страницы (или видимой полосы) → файл для формы.
+   * Синхронно через toDataURL: отправка идёт из жеста пользователя, и ждать
+   * промис toBlob нельзя — браузер уже считает жест «законченным» и может
+   * заблокировать открытие вкладки.
+   */
+  toFile(canvas, name) {
+    const url = canvas.toDataURL('image/png');
+    const b64 = url.slice(url.indexOf(',') + 1);
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], name || 'page.png', { type: 'image/png' });
+  },
+
+  /**
+   * Отправить страницу в Lens новой вкладкой. Возвращает { ok, reason }.
+   * В режиме «локально» ничего не отправляет — это и есть защита от случайной
+   * утечки картинки в сеть.
+   */
+  send(canvas, opts = {}) {
+    if (!this.isLens() && !opts.force) {
+      return { ok: false, reason: 'движок «локально» — картинка никуда не отправлялась' };
+    }
+    if (!canvas || !canvas.width) return { ok: false, reason: 'страница ещё не загрузилась' };
+    try {
+      const file = this.toFile(canvas, 'koma-page.png');
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.enctype = 'multipart/form-data';
+      form.target = '_blank';                 // новая вкладка, читалка остаётся
+      form.action = this.action;
+      form.style.display = 'none';
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.name = 'encoded_image';
+      input.id = 'lensFile';
+      input.files = dt.files;                 // так файл и передаётся без выбора вручную
+      form.appendChild(input);
+      const dim = document.createElement('input');
+      dim.type = 'hidden';
+      dim.name = 'processed_image_dimensions';
+      dim.value = canvas.width + ',' + canvas.height;
+      form.appendChild(dim);
+      document.body.appendChild(form);
+      form.submit();
+      setTimeout(() => form.remove(), 4000);  // разметку за собой убираем
+      this.lastSentAt = Date.now();
+      this.pendingPage = opts.page ?? null;
+      return { ok: true, page: this.pendingPage, size: [canvas.width, canvas.height] };
+    } catch (e) {
+      return { ok: false, reason: String((e && e.message) || e) };
+    }
+  },
+
+  /**
+   * Текст из Lens → реплики страницы. Геометрия приблизительная (Lens не отдаёт
+   * координаты нам), зато порядок сверху вниз сохраняется, рамки показывают
+   * номера реплик, и озвучка работает тем же путём, что всегда.
+   */
+  textToLines(text) {
+    const rows = String(text || '')
+      .split(/\r?\n/)
+      .map(s => s.replace(/\s+/g, ' ').trim())
+      .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
+    const n = rows.length || 1;
+    return rows.map((t, i) => ({
+      text: t,
+      left: 0.04, right: 0.96,
+      top: +(i / n).toFixed(4), bottom: +(((i + 1) / n) - 0.002).toFixed(4),
+      confidence: 1, large: false, bandTop: 0, fromLens: true,
+    }));
+  },
+};
+
 /* ───────────────────────── 8. Читалка ───────────────────────── */
 const Reader = {
   book: null, pages: [], urls: [], canvases: [], imgEls: [],
@@ -5560,6 +5737,25 @@ const Reader = {
    */
   async scanPage(i, opts = {}) {
     this.hideStart();
+    // Режим «Google Lens»: локальный конвейер НЕ запускаем вообще. Иначе
+    // получалось бы «нажал Распознать — и ничего не произошло, только звёздочка
+    // покрутилась»: Lens работает в другой вкладке, а местный OCR тут ни при чём.
+    if (LENS.isLens() && !opts.fromLens && !opts.silent) {
+      const cv = this.canvases[i];
+      if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
+      const band = opts.full ? null : this.visibleBandPx(i);
+      const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+      const sent = LENS.send(crop, { page: i });
+      if (sent.ok) {
+        toast('Страница ' + (i + 1) + ' ушла в Google Lens — откройте новую вкладку', 6000);
+        openSheet('sheetLens');
+        LENS.pendingPage = i;
+        renderLensSheet(i);
+      } else {
+        toast('Lens не открылся: ' + sent.reason, 7000);
+      }
+      return this.regions.get(i) || null;
+    }
     const silent = !!opts.silent;          // предзагрузка: без бейджа и тостов
     const force = !!opts.force;
     const keepSheet = !!opts.keepSheet;
@@ -6274,6 +6470,47 @@ async function cleanLines(lines) {
   return out;
 }
 
+/**
+ * Текст, вставленный из Google Lens, становится обычными репликами страницы.
+ * Геометрия приблизительная (Lens не отдаёт нам координаты), поэтому в шторке
+ * это честно написано: рамки — по номерам сверху вниз, а не по пикселям.
+ */
+function applyLensText(pageIndex, text) {
+  const lines = LENS.textToLines(text);
+  if (!lines.length) return { ok: false, reason: 'в тексте нет ни одной строки с буквами' };
+  const prev = Reader.regions.get(pageIndex) || {};
+  Reader.regions.set(pageIndex, {
+    lines, regions: null, cached: true, fromLens: true,
+    ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0,
+    at: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    ...prev, lines, fromLens: true,
+  });
+  // Полоса-кэш сбрасываем: иначе следующее распознавание вернёт старые строки.
+  if (Reader.bandCache instanceof Map) Reader.bandCache.delete(pageIndex);
+  Reader.paintPage(pageIndex);
+  if ($('#sheetText').classList.contains('on')) renderTextSheet(pageIndex);
+  return { ok: true, lines: lines.length };
+}
+
+/** Шторка Lens: состояние + какая страница ждёт текст. */
+function renderLensSheet(pageIndex) {
+  const i = pageIndex ?? LENS.pendingPage ?? Reader.textPage ?? Reader.page;
+  LENS.pendingPage = i;
+  const st = $('#lensState');
+  if (st) {
+    const own = Reader.regions.get(i);
+    st.innerHTML = `Движок: <b>${LENS.isLens() ? 'Google Lens' : 'в файле (офлайн)'}</b>`
+      + ` · страница ${i + 1}`
+      + (own && own.fromLens ? ` · в странице уже ${own.lines.length} реплик из Lens` : '')
+      + (LENS.lastSentAt ? ' · отправлено ' + new Date(LENS.lastSentAt).toLocaleTimeString('ru-RU') : '');
+  }
+  const box = $('#lensBox');
+  if (box && !box.value) {
+    const own = Reader.regions.get(i);
+    if (own && own.fromLens) box.value = own.lines.map(l => l.text).join('\n');
+  }
+}
+
 function renderTextSheet(i) {
   // Открывая шторку, сначала сверяем индекс с тем, что реально на экране:
   // раньше здесь стоял «застрявший» Reader.page, и текст открывался не той
@@ -6806,7 +7043,7 @@ function bindUI() {
   $('#btnModels').onclick = () => { openSheet('sheetModels'); renderModels(); };
 
   $('#btnRulesLib').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
-  $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4').forEach(b => b.onclick = closeSheets);
+  $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4,#closeSheets5').forEach(b => b.onclick = closeSheets);
 
   // Кнопка «Проверить движок» была в разметке, но НИ К ЧЕМУ не привязана:
   // нажатие не делало ничего. Теперь она запускает синтетическую страницу и
@@ -6973,6 +7210,75 @@ function bindUI() {
     openSheet('sheetText');
     renderTextSheet(null);           // страницу берём С ЭКРАНА, а не из сохранённого индекса
   };
+  // ── Google Lens как отдельный движок ──────────────────────────────────────
+  // Переключатель живёт в ⚙ → Модели. По умолчанию «в файле»: пока человек сам
+  // не выбрал Lens, картинка страницы никуда не уходит.
+  const syncEngineUI = () => {
+    for (const id of ['engineLocal', 'engineLens']) {
+      const b = $('#' + id); if (!b) continue;
+      b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
+    }
+    const note = $('#engineLensNote');
+    if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
+    const ort = $('#ortState');
+    if (ort && LENS.isLens()) {
+      ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
+    }
+  };
+  // По обработчику на кнопку, а не один на контейнер: так «кнопка без
+  // обработчика» не проскочит проверку сборки, и обработчик точно на месте.
+  const setEngine = async (mode) => {
+    await LENS.setMode(mode);
+    syncEngineUI();
+    toast(LENS.isLens()
+      ? 'Движок: Google Lens. «Распознать» отправит страницу в Google новой вкладкой'
+      : 'Движок: в файле. Картинки никуда не отправляются', 6000);
+  };
+  $('#engineLocal').onclick = () => setEngine('local');
+  $('#engineLens').onclick = () => setEngine('lens');
+  const lensSend = (pageIndex) => {
+    const i = pageIndex ?? (Reader.textPage ?? Reader.page);
+    const cv = Reader.canvases[i];
+    if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась', 4000); return; }
+    const band = Reader.visibleBandPx(i);
+    const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+    const sent = LENS.send(crop, { page: i, force: true });   // кнопка = явное согласие
+    if (!sent.ok) { toast('Lens не открылся: ' + sent.reason, 6000); return; }
+    LENS.pendingPage = i;
+    renderLensSheet(i);
+    toast('Открываю Google Lens — страница ' + (i + 1) + ' ушла в новую вкладку', 6000);
+  };
+  $('#btnLensOpen').onclick = () => lensSend(LENS.pendingPage);
+  $('#btnLensSend').onclick = () => lensSend(Reader.textPage ?? Reader.page);
+  $('#btnLensPaste').onclick = () => {
+    openSheet('sheetLens');
+    renderLensSheet(Reader.textPage ?? Reader.page);
+  };
+  // Буфер обмена: только по кнопке (жест), и если браузер запретил — говорим
+  // прямо, а не делаем вид, что вставили.
+  $('#btnLensClip').onclick = async () => {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) throw new Error('браузер не даёт читать буфер');
+      const text = await navigator.clipboard.readText();
+      if (!text || !text.trim()) { toast('В буфере нет текста — скопируйте текст со страницы Lens', 6000); return; }
+      $('#lensBox').value = text;
+      toast('Скопировано из буфера: ' + text.trim().split(/\r?\n/).length + ' строк', 4000);
+    } catch (e) {
+      toast('Буфер недоступен (' + (e.message || e) + '). Вставьте текст в поле вручную — долгое нажатие → «Вставить»', 9000);
+      const box = $('#lensBox'); if (box) box.focus();
+    }
+  };
+  const lensApply = (speak) => {
+    const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
+    const res = applyLensText(i, $('#lensBox').value);
+    if (!res.ok) { toast('Нечего применять: ' + res.reason, 6000); return; }
+    toast('Текст из Lens принят: ' + res.lines + ' реплик на странице ' + (i + 1), 5000);
+    renderLensSheet(i);
+    if (speak) { TTS.prime(); closeSheets(); TTS.readVisible(); }
+  };
+  $('#btnLensApply').onclick = () => lensApply(false);
+  $('#btnLensRead').onclick = () => lensApply(true);
+  syncEngineUI();
   $('#btnScan').onclick = openTextSheet;
   $('#btnOcr2').onclick = openTextSheet;
   $('#btnSettings').onclick = () => { openSheet('sheetSettings'); syncSettingsUI(); };
@@ -7152,6 +7458,9 @@ async function selfCheck() {
   Words.load().catch(e => console.warn('словарь не загрузился', e));
   watchScroll();
   TTS.init();
+  // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
+  // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
+  await LENS.load();
   const saved = await DB.get('kv', 'rules');
   // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
   // иначе на чистой установке профиль скорости не применялся, и «Быстро»
@@ -7169,6 +7478,7 @@ async function selfCheck() {
     toast('Модели не загружены. Откройте ⚙ → Модели и выберите 3 файла (det, rec, словарь)', 8000);
   }
   renderRulesInfo();
+  if (LENS.isLens()) toast('Движок из прошлой сессии — Google Lens. Чтобы вернуть офлайн, откройте ⚙ → Модели', 7000);
   showEnvBanner();
   await selfCheck();
   setTimeout(selfCheck, 2500);
