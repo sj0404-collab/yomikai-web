@@ -1614,14 +1614,35 @@ async function renderNativeOcr() {
   const mb = (n) => n ? (n / 1048576).toFixed(1) + ' МБ' : 'нет';
   const mark = (ok) => (ok ? '✅' : '❌');
   const files = st.files || {};
-  const rows = [
+  const embedded = !!st.embedded;
+  // Модели встроены в сборку и раскладываются при первом запуске: пока они
+  // копируются, честно пишем «готовлю», а не «модели не выбраны» — иначе
+  // человек видит красные кресты на свежей установке и думает, что всё сломано.
+  const seeding = embedded && !st.models;
+  const rows = [];
+  if (embedded) {
+    rows.push('📦 модели вшиты в приложение — выбирать файлы не нужно');
+  }
+  rows.push(
     `${mark(st.models)} детектор: ${mb(files['det.onnx'])}`,
     `${mark(st.models)} распознаватель: ${mb(files['rec.onnx'])}`,
     `${mark(st.classes > 0)} азбука: ${st.classes ? (st.classes - 1) + ' символов' : 'нет'}`,
-    st.ready ? '✅ движок готов' : '❌ ' + (st.error || 'модели не выбраны'),
+    seeding ? '⏳ раскладываю встроенные модели (первый запуск, пара секунд)'
+      : (st.ready ? '✅ движок готов'
+        : '❌ ' + (st.error || (embedded ? 'модели готовятся' : 'модели не выбраны'))),
     'считает: <b>' + (NativeOcr.chosen() === 'native' ? 'нативно (ONNX Runtime)' : 'WASM в странице') + '</b>'
       + (OCR.nativeNote ? '<br><span class="hint">последний раз нативный путь: ' + escapeHtml(OCR.nativeNote) + '</span>' : ''),
-  ];
+  );
+  // Пока идёт раскладка — переспрашиваем, но не бесконечно.
+  if (seeding) {
+    if (renderNativeOcr.tries === undefined) renderNativeOcr.tries = 0;
+    if (renderNativeOcr.tries < 20) {
+      renderNativeOcr.tries++;
+      setTimeout(() => { renderNativeOcr().catch(() => {}); }, 700);
+    }
+  } else {
+    renderNativeOcr.tries = 0;
+  }
   $('#nativeOcrState').innerHTML = rows.join('<br>');
   // Кнопки выбора движка показывают, что выбрано в правилах.
   const mode = (RULES && RULES.ocrEngine) || 'auto';

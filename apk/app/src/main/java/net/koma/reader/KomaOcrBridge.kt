@@ -13,7 +13,9 @@ import java.util.concurrent.Executors
  * Мост нативного распознавания: `window.KomaOcr`.
  *
  * Модели живут В ПРИЛОЖЕНИИ (filesDir/models), а не в IndexedDB страницы:
- *  • их выбирают системным «Файлами» — нативно, без прогона 12 МБ через base64;
+ *  • они ВСТРОЕНЫ в сборку и раскладываются при первом запуске — выбирать
+ *    ничего не нужно, распознавание работает сразу после установки;
+ *  • свои файлы (другая модель) можно подложить системным «Файлами»;
  *  • считает ONNX Runtime для Android, без WebAssembly;
  *  • странице остаётся интерфейс, порядок реплик, словарь и озвучка.
  *
@@ -35,10 +37,29 @@ class KomaOcrBridge(
 
     @JavascriptInterface
     fun status(): String {
+        // Модели могли ещё раскладываться в фоне на старте — тогда запускаем
+        // ещё раз (это дешёвая проверка отпечатка) и отвечаем как есть: страница
+        // переспросит сама, блок покажет «готовлю модели».
+        if (!engine.modelsPresent() && engine.embedded) seed()
         val o = engine.status()
         o.put("engine", "native")
         o.put("dir", modelsDir.absolutePath)
+        o.put("embedded", engine.embedded)
+        o.put("source", if (engine.embedded) "встроены в приложение" else "выбраны вручную")
         return o.toString()
+    }
+
+    /** Разложить встроенные модели в фоне и сказать странице, что они появились. */
+    fun seed() {
+        pool.execute {
+            if (!engine.seedFromAssets(ctx.assets)) return@execute
+            val ws = web() ?: return@execute
+            ws.post {
+                ws.evaluateJavascript(
+                    "try{window.dispatchEvent(new CustomEvent('koma-models'," +
+                        "{detail:{ok:true,seeded:true}}));}catch(e){}", null)
+            }
+        }
     }
 
     /** Открыть системный выбор файлов моделей (det, rec, азбука). */
@@ -49,7 +70,7 @@ class KomaOcrBridge(
 
     /** Готовность без загрузки в память: страница спрашивает часто. */
     @JavascriptInterface
-    fun available(): Boolean = engine.modelsPresent()
+    fun available(): Boolean = engine.modelsPresent() || engine.embedded
 
     /**
      * Импорт выбранных файлов. Классификация по имени, а если имена ничего не

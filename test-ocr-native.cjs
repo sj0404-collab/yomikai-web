@@ -150,6 +150,24 @@ function makePage(w = 1000, h = 2000) {
   ok(/recognizeAsync/.test(kt) && /available\(\)/.test(kt) && /selfTestAsync/.test(kt) && /importFiles/.test(kt),
     'в мосте есть распознавание, готовность, самопроверка и импорт моделей');
 
+  // 10. Модели ВШИТЫ в сборку: иначе на свежей установке человек видит
+  // «модели не выбраны» и должен сам искать файлы — это был реальный дефект.
+  const eng = fs.readFileSync(__dirname + '/apk/app/src/main/java/net/koma/reader/OcrEngine.kt', 'utf8');
+  const mdir = __dirname + '/apk/app/src/main/assets/models/';
+  for (const [f, min] of [['det.onnx', 3e6], ['rec.onnx', 6e6], ['charset.txt', 500]]) {
+    const st = fs.existsSync(mdir + f) ? fs.statSync(mdir + f) : null;
+    ok(st && st.size >= min, `встроенная модель на месте: ${f} (${st ? st.size : 0} Б)`);
+  }
+  const abc = fs.readFileSync(mdir + 'charset.txt', 'utf8').replace(/\r/g, '').split('\n').filter((x, i, a) => !(i === a.length - 1 && !x));
+  ok(abc.length === 517, `азбука встроена целиком: ${abc.length} строк (519 классов с «пусто» и пробелом)`);
+  ok(/fun seedFromAssets/.test(eng) && /EMBEDDED_STAMP/.test(eng), 'в движке есть раскладка встроенных моделей с отпечатком');
+  ok(/embeddedInAssets/.test(eng) && /embedded/.test(kt), 'готовность сообщает, что модели вшиты, а не «выбраны»');
+  ok(/ocr\.seed\(\)/.test(main), 'приложение раскладывает модели при старте, без действий человека');
+  ok(/assets\/models/.test(fs.readFileSync(__dirname + '/.github/workflows/apk.yml', 'utf8'))
+    || /assets\/models/.test(eng), 'путь встроенных моделей совпадает в сборке и в коде');
+  ok(!/armeabi-v7a/.test(fs.readFileSync(__dirname + '/apk/app/build.gradle.kts', 'utf8')),
+    'в APK один ABI: модели + две библиотеки ONNX иначе выходят за 50 МБ');
+
   console.log(process.exitCode ? 'ЕСТЬ ПАДЕНИЯ' : 'ALL PASSED');
   process.exit(process.exitCode || 0);
 })().catch(e => { console.log('FAIL исключение: ' + (e && e.message)); console.log(e && e.stack); process.exit(1); });

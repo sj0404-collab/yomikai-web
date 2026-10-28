@@ -71,6 +71,12 @@ class MainActivity : android.app.Activity() {
         ocr = KomaOcrBridge(this, ocrEngine, { web }) {
             runOnUiThread { pickModelFiles() }
         }
+        // Модели встроены в сборку: раскладываем их в filesDir в фоне, чтобы
+        // распознавание работало сразу после установки — без выбора файлов.
+        // 12,6 МБ копируются доли секунды, но в главном потоке это «затык» на
+        // старте, поэтому отдельный поток; страница переспросит готовность сама.
+        ocrEngine.embedded = ocrEngine.embeddedInAssets(assets)
+        if (ocrEngine.embedded) ocr.seed()
 
         web = WebView(this)
         setContentView(web, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))

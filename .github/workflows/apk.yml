@@ -69,6 +69,16 @@ jobs:
           cp "$APK" koma-reader-debug.apk
           ls -l koma-reader-debug.apk >> "$GITHUB_STEP_SUMMARY"
           md5sum koma-reader-debug.apk >> "$GITHUB_STEP_SUMMARY"
+          # Модели ДОЛЖНЫ быть внутри: без них на свежей установке распознавание
+          # просит выбрать файлы руками — это уже случалось.
+          unzip -l koma-reader-debug.apk | grep -E 'assets/models/' | tee -a "$GITHUB_STEP_SUMMARY"
+          for f in det.onnx rec.onnx charset.txt; do
+            unzip -l koma-reader-debug.apk | grep -q "assets/models/$f" || { echo "НЕТ встроенной модели $f"; exit 1; }
+          done
+          SZ=$(stat -c%s koma-reader-debug.apk)
+          echo "размер APK: $SZ Б" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Потолок 50 МБ: за ним часть телефонов отказывается ставить APK.
+          test "$SZ" -lt 52428800 || { echo "APK больше 50 МБ"; exit 1; }
           # Отпечаток ключа виден в логе: по нему проверяем, что ключ НЕ сменился
           # (сменился — обновление поверх не встанет). APK подписан по схеме v2,
           # поэтому смотрим apksigner, а не keytool (тот ищет v1-подпись в META-INF).

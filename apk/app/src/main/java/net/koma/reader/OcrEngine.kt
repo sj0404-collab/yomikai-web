@@ -1,5 +1,6 @@
 package net.koma.reader
 
+import android.content.res.AssetManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
@@ -44,6 +45,14 @@ class OcrEngine(private val modelsDir: File) {
         const val DET = "det.onnx"
         const val REC = "rec.onnx"
         const val CHARSET = "charset.txt"
+        /** Каталог встроенных моделей внутри APK (assets/models). */
+        private const val ASSET_DIR = "models"
+        /**
+         * Отпечаток встроенных моделей. Меняется вместе с моделями: приложение
+         * раскладывает их заново только тогда, когда отпечаток в файлах разошёлся
+         * со сборкой. Иначе на каждом запуске 12,6 МБ переписывались бы впустую.
+         */
+        const val EMBEDDED_STAMP = "2026-10-28.1"
         private const val DET_THRESHOLD = 0.3f
     }
 
@@ -90,6 +99,10 @@ class OcrEngine(private val modelsDir: File) {
     var error: String? = null
         private set
 
+    /** Встроены ли модели в сборку — выставляется один раз при старте приложения. */
+    @Volatile
+    var embedded: Boolean = false
+
     /** Забыть загруженные модели: после импорта новых файлов сессии создаются заново. */
     @Synchronized
     fun reset() {
@@ -100,6 +113,58 @@ class OcrEngine(private val modelsDir: File) {
 
     fun modelsPresent(): Boolean =
         File(modelsDir, DET).exists() && File(modelsDir, REC).exists() && File(modelsDir, CHARSET).exists()
+
+    /**
+     * Встроены ли модели в саму сборку.
+     *
+     * Модели лежат в assets/models и раскладываются в filesDir при первом запуске:
+     * так распознавание работает сразу после установки, без «выберите файлы
+     * детектора и распознавателя». Человеку ничего выбирать не нужно.
+     */
+    fun embeddedInAssets(am: AssetManager): Boolean = try {
+        am.open("$ASSET_DIR/$DET").close()
+        am.open("$ASSET_DIR/$REC").close()
+        am.open("$ASSET_DIR/$CHARSET").close()
+        true
+    } catch (t: Throwable) {
+        false
+    }
+
+    /**
+     * Разложить встроенные модели в filesDir/models.
+     *
+     * Возвращает true, если файлы действительно переписаны. Копирование идёт
+     * через `.part` + переименование: если приложение убьют посреди записи,
+     * недописанный файл не будет принят за готовый (его не увидит modelsPresent).
+     * Свои модели, выбранные вручную, переживают перезапуск — они перезапишутся
+     * только при смене EMBEDDED_STAMP, то есть вместе с новой сборкой.
+     */
+    @Synchronized
+    fun seedFromAssets(am: AssetManager): Boolean {
+        val stamp = File(modelsDir, ".embedded")
+        if (modelsPresent() && stamp.exists() && stamp.readText().trim() == EMBEDDED_STAMP) return false
+        return try {
+            modelsDir.mkdirs()
+            copyAsset(am, "$ASSET_DIR/$DET", File(modelsDir, DET))
+            copyAsset(am, "$ASSET_DIR/$REC", File(modelsDir, REC))
+            copyAsset(am, "$ASSET_DIR/$CHARSET", File(modelsDir, CHARSET))
+            stamp.writeText(EMBEDDED_STAMP)
+            reset()
+            GlensEngine.log("нативный OCR: встроенные модели разложены в ${modelsDir.absolutePath}")
+            true
+        } catch (t: Throwable) {
+            error = "встроенные модели не разложились: ${t.message ?: t.javaClass.simpleName}"
+            GlensEngine.log("нативный OCR: $error")
+            false
+        }
+    }
+
+    private fun copyAsset(am: AssetManager, name: String, dst: File) {
+        val tmp = File(dst.parentFile, dst.name + ".part")
+        am.open(name).use { input -> tmp.outputStream().use { out -> input.copyTo(out, 1 shl 16) } }
+        if (dst.exists() && !dst.delete()) throw IllegalStateException("не перезаписать ${dst.name}")
+        if (!tmp.renameTo(dst)) throw IllegalStateException("не переименовать ${dst.name}")
+    }
 
     fun ready(): Boolean = modelsPresent() && det != null && rec != null && charset.isNotEmpty()
 

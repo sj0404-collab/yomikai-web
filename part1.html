@@ -282,7 +282,7 @@
       <div class="lbl">НАТИВНЫЙ ДВИЖОК (БЫСТРЕЕ)</div>
       <div class="kv" id="nativeOcrState"></div>
       <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
-        <button class="btn" id="btnNativePick">Взять модели в приложение</button>
+        <button class="btn" id="btnNativePick">Подложить свои модели</button>
         <button class="btn" id="btnNativeTest">Проверить нативный движок</button>
       </div>
       <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
@@ -291,9 +291,11 @@
         <button class="btn" id="btnEngineWasm" data-ocr="wasm">Только WASM</button>
       </div>
       <div class="hint" style="margin-top:6px">
-        Нативный путь считает те же модели на телефоне: быстрее, меньше памяти и
-        не грузит браузерный движок. Если он почему-то не сработает, страница
-        сама вернётся к WASM и напишет причину в состояние — чтение не пропадёт.
+        Модели уже вшиты в приложение: детектор 4,5 МБ и распознаватель 7,9 МБ
+        раскладываются при первом запуске, распознавание работает сразу после
+        установки. Кнопка «Подложить свои модели» нужна только для замены.
+        Если нативный путь почему-то не сработает, страница сама вернётся к WASM
+        и напишет причину в состояние — чтение не пропадёт.
       </div>
     </div>
     <div class="lbl">ДВИЖОК РАСПОЗНАВАНИЯ</div>
