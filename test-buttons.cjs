@@ -25,14 +25,14 @@ global.navigator = { userAgent: 'Mozilla/5.0 (Linux; Android 14) Chrome/130.0.0.
 global.ort = { env: { wasm: {} }, Tensor: class {} };
 
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+  .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 const api = new Function('toast', body.slice(0, body.indexOf('(async function boot()'))
   + '; return {bindUI, OCR, Words, DB, selfTestEngine};')(() => {});
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
   api.bindUI();
-  const html = fs.readFileSync('/home/user/koma-web/part1.html', 'utf8');
+  const html = fs.readFileSync(__dirname + '/part1.html', 'utf8');
   const ids = [...html.matchAll(/<button[^>]*id="([\w-]+)"/g)].map(m => m[1]);
   // closeSheets2..4 висят через $$-селектор, а не по одному — их проверяет check.py
   const dead = ids.filter(id => !handlers.has(id) && !/^text(Prev|Next)$/.test(id) && !/^closeSheets\d?$/.test(id));
