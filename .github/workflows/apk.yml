@@ -65,9 +65,15 @@ jobs:
           cp "$APK" koma-reader-debug.apk
           ls -l koma-reader-debug.apk >> "$GITHUB_STEP_SUMMARY"
           md5sum koma-reader-debug.apk >> "$GITHUB_STEP_SUMMARY"
-          # Отпечаток ключа виден в логе: по нему проверяем, что ключ не сменился
-          # (сменился — обновление поверх не встанет).
-          keytool -printcert -jarfile koma-reader-debug.apk | grep -E "Owner|SHA256" | head -2
+          # Отпечаток ключа виден в логе: по нему проверяем, что ключ НЕ сменился
+          # (сменился — обновление поверх не встанет). APK подписан по схеме v2,
+          # поэтому смотрим apksigner, а не keytool (тот ищет v1-подпись в META-INF).
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1)
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs koma-reader-debug.apk | grep -i "SHA-256" | head -2
+          else
+            echo "apksigner не найден — отпечаток не проверен"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
