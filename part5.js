@@ -167,7 +167,7 @@ function bindUI() {
   $('#btnModels').onclick = () => { openSheet('sheetModels'); renderModels(); };
 
   $('#btnRulesLib').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
-  $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4').forEach(b => b.onclick = closeSheets);
+  $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4,#closeSheets5').forEach(b => b.onclick = closeSheets);
 
   // Кнопка «Проверить движок» была в разметке, но НИ К ЧЕМУ не привязана:
   // нажатие не делало ничего. Теперь она запускает синтетическую страницу и
@@ -334,6 +334,75 @@ function bindUI() {
     openSheet('sheetText');
     renderTextSheet(null);           // страницу берём С ЭКРАНА, а не из сохранённого индекса
   };
+  // ── Google Lens как отдельный движок ──────────────────────────────────────
+  // Переключатель живёт в ⚙ → Модели. По умолчанию «в файле»: пока человек сам
+  // не выбрал Lens, картинка страницы никуда не уходит.
+  const syncEngineUI = () => {
+    for (const id of ['engineLocal', 'engineLens']) {
+      const b = $('#' + id); if (!b) continue;
+      b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
+    }
+    const note = $('#engineLensNote');
+    if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
+    const ort = $('#ortState');
+    if (ort && LENS.isLens()) {
+      ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
+    }
+  };
+  // По обработчику на кнопку, а не один на контейнер: так «кнопка без
+  // обработчика» не проскочит проверку сборки, и обработчик точно на месте.
+  const setEngine = async (mode) => {
+    await LENS.setMode(mode);
+    syncEngineUI();
+    toast(LENS.isLens()
+      ? 'Движок: Google Lens. «Распознать» отправит страницу в Google новой вкладкой'
+      : 'Движок: в файле. Картинки никуда не отправляются', 6000);
+  };
+  $('#engineLocal').onclick = () => setEngine('local');
+  $('#engineLens').onclick = () => setEngine('lens');
+  const lensSend = (pageIndex) => {
+    const i = pageIndex ?? (Reader.textPage ?? Reader.page);
+    const cv = Reader.canvases[i];
+    if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась', 4000); return; }
+    const band = Reader.visibleBandPx(i);
+    const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
+    const sent = LENS.send(crop, { page: i, force: true });   // кнопка = явное согласие
+    if (!sent.ok) { toast('Lens не открылся: ' + sent.reason, 6000); return; }
+    LENS.pendingPage = i;
+    renderLensSheet(i);
+    toast('Открываю Google Lens — страница ' + (i + 1) + ' ушла в новую вкладку', 6000);
+  };
+  $('#btnLensOpen').onclick = () => lensSend(LENS.pendingPage);
+  $('#btnLensSend').onclick = () => lensSend(Reader.textPage ?? Reader.page);
+  $('#btnLensPaste').onclick = () => {
+    openSheet('sheetLens');
+    renderLensSheet(Reader.textPage ?? Reader.page);
+  };
+  // Буфер обмена: только по кнопке (жест), и если браузер запретил — говорим
+  // прямо, а не делаем вид, что вставили.
+  $('#btnLensClip').onclick = async () => {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) throw new Error('браузер не даёт читать буфер');
+      const text = await navigator.clipboard.readText();
+      if (!text || !text.trim()) { toast('В буфере нет текста — скопируйте текст со страницы Lens', 6000); return; }
+      $('#lensBox').value = text;
+      toast('Скопировано из буфера: ' + text.trim().split(/\r?\n/).length + ' строк', 4000);
+    } catch (e) {
+      toast('Буфер недоступен (' + (e.message || e) + '). Вставьте текст в поле вручную — долгое нажатие → «Вставить»', 9000);
+      const box = $('#lensBox'); if (box) box.focus();
+    }
+  };
+  const lensApply = (speak) => {
+    const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
+    const res = applyLensText(i, $('#lensBox').value);
+    if (!res.ok) { toast('Нечего применять: ' + res.reason, 6000); return; }
+    toast('Текст из Lens принят: ' + res.lines + ' реплик на странице ' + (i + 1), 5000);
+    renderLensSheet(i);
+    if (speak) { TTS.prime(); closeSheets(); TTS.readVisible(); }
+  };
+  $('#btnLensApply').onclick = () => lensApply(false);
+  $('#btnLensRead').onclick = () => lensApply(true);
+  syncEngineUI();
   $('#btnScan').onclick = openTextSheet;
   $('#btnOcr2').onclick = openTextSheet;
   $('#btnSettings').onclick = () => { openSheet('sheetSettings'); syncSettingsUI(); };
@@ -513,6 +582,9 @@ async function selfCheck() {
   Words.load().catch(e => console.warn('словарь не загрузился', e));
   watchScroll();
   TTS.init();
+  // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
+  // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
+  await LENS.load();
   const saved = await DB.get('kv', 'rules');
   // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
   // иначе на чистой установке профиль скорости не применялся, и «Быстро»
@@ -530,6 +602,7 @@ async function selfCheck() {
     toast('Модели не загружены. Откройте ⚙ → Модели и выберите 3 файла (det, rec, словарь)', 8000);
   }
   renderRulesInfo();
+  if (LENS.isLens()) toast('Движок из прошлой сессии — Google Lens. Чтобы вернуть офлайн, откройте ⚙ → Модели', 7000);
   showEnvBanner();
   await selfCheck();
   setTimeout(selfCheck, 2500);
