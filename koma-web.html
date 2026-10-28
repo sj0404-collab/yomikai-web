@@ -87,6 +87,14 @@
   /* Крупный текст (титул, каллиграфия) — другим цветом, чтобы не путать с репликой */
   #strip .frame.large{border-color:#6fa8ff;border-style:dashed}
   #strip .frame.large.cur{background:#6fa8ff26;border-color:#6fa8ff}
+  /* Текст из Google Lens приходит БЕЗ координат: рамки делят страницу на равные
+     полосы по порядку реплик. Поэтому они пунктирные и с номером — чтобы было
+     видно, что это «строка №3 сверху», а не точное место на картинке. */
+  #strip .frame.approx{border-style:dashed;border-color:#8a7be0a0}
+  #strip .frame.approx.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
+  #strip .frame.approx.done{border-color:#8a7be055}
+  #strip .frame .fnum{position:absolute;left:1px;top:-13px;font-size:9px;line-height:11px;
+    color:#fff;background:#6c5ce7cc;border-radius:4px;padding:0 3px;font-weight:600}
   .lineitem.large{color:#9dc0ff}
   .lineitem.large b{color:#6fa8ff}
   /* постраничный режим */
@@ -5303,7 +5311,10 @@ const LENS = {
    * номера реплик, и озвучка работает тем же путём, что всегда.
    */
   textToLines(text) {
-    const rows = String(text || '')
+    // Принимаем и строку, и массив строк (массив удобнее вызывать из тестов и
+    // из кода: String([...]) склеил бы всё через запятую в одну «строку»).
+    const src = Array.isArray(text) ? text.join('\n') : String(text || '');
+    const rows = src
       .split(/\r?\n/)
       .map(s => s.replace(/\s+/g, ' ').trim())
       .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
@@ -5476,7 +5487,7 @@ const Reader = {
     if (!data) return;
     // Рамка рисуется КАЖДОЙ распознанной строке, независимо от того, прочитана
     // она или нет. «Прочитано» — это только цвет (класс done), а не фильтр.
-    for (const line of data.lines) {
+    data.lines.forEach((line, idx) => {
       const d = document.createElement('div');
       d.className = 'frame';
       d.style.left = (line.left * 100) + '%';
@@ -5486,11 +5497,20 @@ const Reader = {
       const isCur = this.current && this.current.text === line.text;
       const isDone = this.spoken.has(this.spokenKey(i, line.text));
       if (line.large) d.classList.add('large');     // титул/каллиграфия — другой цвет
+      // Текст из Lens: координат нет, полосы равные — честно помечаем пунктиром
+      // и номером, чтобы «рамка» не выглядела точным местом на картинке.
+      if (line.fromLens || data.fromLens) {
+        d.classList.add('approx');
+        const n = document.createElement('span');
+        n.className = 'fnum';
+        n.textContent = String(idx + 1);
+        d.appendChild(n);
+      }
       if (isCur) d.classList.add('cur');
       else if (isDone) d.classList.add('done');
       d.onclick = () => TTS.speakLine(line);
       framesEl.appendChild(d);
-    }
+    });
   },
 
   paintAllFrames() {
@@ -6170,7 +6190,11 @@ const TTS = {
       if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
     } catch (e) { /* ignore */ }
     const u = new SpeechSynthesisUtterance(line.text);
-    if (this.voice) u.voice = this.voice;
+    // Голос из старого списка (после смены TTS-движка в системе) браузер
+    // отвергает исключением — раньше это обрывало speakLine ДО speak(), и
+    // реплика молча не читалась. Теперь падаем на голос по умолчанию.
+    try { if (this.voice) u.voice = this.voice; }
+    catch (e) { console.warn('голос недоступен, читаю голосом по умолчанию', e && e.message); }
     u.lang = this.voice?.lang || 'ru-RU';
     u.rate = this.rate;
     Reader.current = line;
@@ -6482,15 +6506,19 @@ async function cleanLines(lines) {
 function applyLensText(pageIndex, text) {
   const lines = LENS.textToLines(text);
   if (!lines.length) return { ok: false, reason: 'в тексте нет ни одной строки с буквами' };
-  const prev = Reader.regions.get(pageIndex) || {};
+  // Собираем запись С НУЛЯ, не подмешивая то, что осталось от локального OCR:
+  // иначе в ней жили бы старые regions/ms, и «Распознать заново» или смена
+  // направления чтения дёргали бы данные, которых больше нет.
+  const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   Reader.regions.set(pageIndex, {
     lines, regions: null, cached: true, fromLens: true,
-    ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0,
-    at: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-    ...prev, lines, fromLens: true,
+    ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0, bands: 0, at,
   });
   // Полоса-кэш сбрасываем: иначе следующее распознавание вернёт старые строки.
   if (Reader.bandCache instanceof Map) Reader.bandCache.delete(pageIndex);
+  // Прочитанное от прошлого текста к новому не относится.
+  try { Reader.spoken.clear(); } catch (e) { /* не критично */ }
+  Reader.current = null;
   Reader.paintPage(pageIndex);
   if ($('#sheetText').classList.contains('on')) renderTextSheet(pageIndex);
   return { ok: true, lines: lines.length };
