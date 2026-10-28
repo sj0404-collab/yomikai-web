@@ -59,7 +59,7 @@ BUILTINS = set("""
 if for while switch catch function return typeof new await Math JSON Object Array Number
 String Boolean parseInt parseFloat isNaN setTimeout clearTimeout setInterval clearInterval console Promise Date Map Set
 Uint8Array Uint8ClampedArray Uint32Array Int32Array Float32Array Float64Array DataView Blob Response
-TextDecoder DecompressionStream atob btoa URL indexedDB alert confirm speechSynthesis
+TextDecoder DecompressionStream atob btoa URL indexedDB alert confirm speechSynthesis FormData
 DataTransfer File Blob2 navigator clipboard
 SpeechSynthesisUtterance fetch requestAnimationFrame Intl Error RegExp encodeURIComponent
 structuredClone async then
