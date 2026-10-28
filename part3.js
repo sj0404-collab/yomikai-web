@@ -27,6 +27,11 @@ const DEFAULT_RULES = {
   pipeline: true,          // читать, не дожидаясь конца полосы (замер в part4.js)
   hardVariants: true,      // на трудных строках перебирать подготовки и второй распознаватель
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
+  // Где считать распознавание: 'auto' — нативно в АПК (ONNX Runtime для Android),
+  // иначе проверенный WASM в странице; 'native'/'wasm' — принудительно.
+  // По умолчанию 'auto': на телефоне это быстрее, а если нативный движок не
+  // поднялся — страница сама возвращается к WASM и говорит об этом.
+  ocrEngine: 'auto',
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
   lensRelay: '',           // свой релей для прямого Lens — без открытия сайта
@@ -122,6 +127,7 @@ function sanitizeRules(r) {
   R.semiManual = !!R.semiManual;
   if (typeof R.wordFixes !== 'object' || !R.wordFixes) R.wordFixes = {};
   R.lensRelay = String(R.lensRelay || '').trim().slice(0, 500);
+  R.ocrEngine = (R.ocrEngine === 'native' || R.ocrEngine === 'wasm') ? R.ocrEngine : 'auto';
   return R;
 }
 
@@ -567,6 +573,91 @@ const Words = {
   },
 };
 
+/* ─────── 4c. Нативное распознавание (АПК): ONNX Runtime вместо WASM ───────
+   На телефоне считать модели в WebAssembly — это и медленно, и дорого по
+   памяти (в страницу вшито 11 МБ движка). В приложении рядом лежит
+   `window.KomaOcr`, который делает то же самое НАТИВНО: те же модели, тот же
+   алгоритм, но ONNX Runtime для Android. Страница отдаёт кадр и получает
+   обратно строки с прямоугольниками — ровно в том формате, что даёт
+   recognizePage, поэтому весь остальной конвейер (порядок справа налево,
+   склейка реплик, словарь, озвучка) не меняется.
+
+   Выбор движка: RULES.ocrEngine = 'auto' | 'native' | 'wasm'.
+   'auto' — нативно, если мост есть и модели скопированы в приложение.
+   Если нативный вызов упал, страница НЕ ломается: пишет причину в состояние
+   и на этом кадре уходит на WASM. */
+const NativeOcr = {
+  bridge() {
+    return (typeof window !== 'undefined' && window.KomaOcr
+      && typeof window.KomaOcr.recognizeAsync === 'function') ? window.KomaOcr : null;
+  },
+  present() { return !!this.bridge(); },
+  /** Готов ли нативный путь: мост есть и модели лежат в приложении. */
+  ready() {
+    const b = this.bridge();
+    if (!b) return false;
+    try { return !!b.available(); } catch (e) { return false; }
+  },
+  /** Какой движок РЕАЛЬНО будет считать этот кадр. */
+  chosen() {
+    const mode = (RULES && RULES.ocrEngine) || 'auto';
+    if (mode === 'wasm') return 'wasm';
+    if (mode === 'native') return this.ready() ? 'native' : 'wasm';
+    return this.ready() ? 'native' : 'wasm';
+  },
+  status() {
+    const b = this.bridge();
+    if (!b) return { present: false, ready: false, engine: 'wasm' };
+    try {
+      const st = JSON.parse(b.status() || '{}');
+      st.present = true;
+      return st;
+    } catch (e) { return { present: true, ready: false, error: String((e && e.message) || e) }; }
+  },
+  /**
+   * Распознать кадр (canvas) нативно. Возвращает {ok, items, ms} либо
+   * {ok:false, error}: в втором случае вызывающий уходит на WASM.
+   */
+  scan(canvas, R, onProgress) {
+    return new Promise((resolve) => {
+      const b = this.bridge();
+      if (!b) return resolve({ ok: false, error: 'моста KomaOcr нет' });
+      const cbId = 'o' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      let settled = false;
+      const finish = (obj) => { if (!settled) { settled = true; resolve(obj); } };
+      const timer = setTimeout(() => finish({ ok: false, error: 'нативный движок не ответил за 120 с' }), 120000);
+      window.__komaOcrEvent = (id, type, data) => {
+        if (id !== cbId) return;
+        if (type === 'state') { if (onProgress) onProgress(data); return; }
+        if (type === 'done') {
+          clearTimeout(timer);
+          let res = {};
+          try { res = JSON.parse(data || '{}'); } catch (e) { res = { ok: false, error: 'ответ не разобрался' }; }
+          finish(res);
+        }
+      };
+      try {
+        if (typeof canvas.toDataURL !== 'function') {
+          clearTimeout(timer);
+          return finish({ ok: false, error: 'кадр не отдался: canvas.toDataURL недоступен' });
+        }
+        const url = canvas.toDataURL('image/jpeg', 0.92);
+        const b64 = url.slice(url.indexOf(',') + 1);
+        const rules = {
+          pageSide: R.pageSide, minConfidence: R.minConfidence, detRetry: R.detRetry !== false,
+          inkLowPercentile: R.inkLowPercentile, inkHighPercentile: R.inkHighPercentile,
+          inkFlatSpread: R.inkFlatSpread, inkCoefficient: R.inkCoefficient,
+          inkMin: R.inkMin, inkMax: R.inkMax, inkTileRows: R.inkTileRows, inkLevels: R.inkLevels,
+        };
+        b.recognizeAsync(b64, JSON.stringify(rules), cbId);
+      } catch (e) {
+        clearTimeout(timer);
+        finish({ ok: false, error: String((e && e.message) || e) });
+      }
+    });
+  },
+};
+
 /* ───────────────────────── 5. OCR: модели в браузере ───────────────────────── */
 const OCR = {
   det: null, rec: null, dict: null, ready: false,
@@ -594,6 +685,12 @@ const OCR = {
   },
 
   async loadModels() {
+    // Нативный движок: ни WASM, ни 11 МБ вшитого бинаря не нужны — модели
+    // лежат в приложении. Это и есть главный выигрыш по скорости запуска.
+    if (typeof NativeOcr !== 'undefined' && NativeOcr.ready() && RULES.ocrEngine !== 'wasm') {
+      this.ready = true; this.engine = 'native'; this.reason = '';
+      return true;
+    }
     const det = await DB.get('kv', 'model:det');
     const rec = await DB.get('kv', 'model:rec');
     const dict = await DB.get('kv', 'model:dict');
@@ -1831,6 +1928,59 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     src = c;
   }
   const visible = (ln) => lineInBand(ln, band, y0);
+
+  // ── НАТИВНЫЙ ДВИЖОК (АПК) ────────────────────────────────────────────────
+  // Считаем детектор и распознаватель в приложении, ONNX Runtime вместо WASM.
+  // Кадр — та же полоса, что и для WASM-пути, поэтому видимая область и
+  // координаты совпадают. Если нативный вызов не удался — не ломаем чтение:
+  // говорим причину в состояние и идём прежним, проверенным путём.
+  if (!preDet && NativeOcr.chosen() === 'native') {
+    if (onProgress) onProgress('нативный движок', 0, 0);
+    const got = await NativeOcr.scan(src, R, (msg) => { if (onProgress) onProgress(msg, 0, 0); });
+    if (got && got.ok) {
+      const W = src.width, H = src.height;
+      const regions = [];
+      for (const it of (got.items || [])) {
+        if (!it || !it.text) continue;
+        // Нативный движок отдаёт доли КАДРА (полосы); страница живёт в долях
+        // ВСЕЙ страницы, поэтому поднимаем верх/низ на y0.
+        const item = {
+          text: String(it.text).trim(),
+          left: clamp(it.left, 0, 1),
+          right: clamp(it.right, 0, 1),
+          top: clamp((y0 + it.top * (H)) / imgCanvas.height, 0, 1),
+          bottom: clamp((y0 + it.bottom * (H)) / imgCanvas.height, 0, 1),
+          confidence: +it.confidence || 0,
+        };
+        if (!item.text || item.bottom <= item.top) continue;
+        if (band && !visible(item)) continue;
+        if (item.confidence <= R.minConfidence) continue;
+        regions.push(item);
+      }
+      if (regions.length) {
+        OCR.engine = 'native';
+        OCR.detPass = 'native';
+        OCR.lastNativeMs = got.ms || 0;
+        return {
+          regions,
+          det: { boxes: regions.length, pass: 'native' },
+          detMs: got.ms || 0,
+          recMs: 0,
+          crops: regions.length,
+          stats: DECODE_STATS,
+          whole: false,
+          pass: 'native',
+        };
+      }
+      // Кадр не распознался нативно (пустая страница или каприз модели) —
+      // это НЕ повод падать: пробуем WASM, если он есть.
+      OCR.nativeNote = 'нативный движок не нашёл текста на этом кадре';
+      console.warn('нативный OCR: строк 0, пробую WASM');
+    } else if (got && got.error) {
+      OCR.nativeNote = String(got.error).slice(0, 200);
+      console.warn('нативный OCR не сработал:', got.error);
+    }
+  }
 
   // ── Проход 1: детектор. Если он не нашёл ничего, пробуем другие подготовки
   // кадра: бледная каллиграфия и светлый текст на белом фоне не ловятся на

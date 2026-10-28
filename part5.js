@@ -352,6 +352,54 @@ function bindUI() {
     if (typeof setTimeout === 'function') setTimeout(syncAppBlock, 0);
   }
 
+  // ── Нативное распознавание (только в АПК) ────────────────────────────────
+  // Кнопки есть в разметке всегда, обработчики ставятся всегда — «мёртвых»
+  // кнопок в сборке не остаётся; в браузере они честно говорят, что нативно
+  // считать нечем.
+  if ($('#btnNativePick')) $('#btnNativePick').onclick = () => {
+    if (typeof NativeOcr === 'undefined' || !NativeOcr.present()) {
+      toast('Нативные модели есть только в приложении', 7000); return;
+    }
+    toast('Выберите два файла .onnx (детектор и распознаватель) и азбуку .txt', 8000);
+    try { window.KomaOcr.pickModels(); } catch (e) { toast('Выбор файлов не открылся: ' + ((e && e.message) || e), 7000); }
+  };
+  if ($('#btnNativeTest')) $('#btnNativeTest').onclick = () => {
+    if (typeof NativeOcr === 'undefined' || !NativeOcr.present()) {
+      toast('Нативный движок есть только в приложении', 7000); return;
+    }
+    toast('Проверяю нативный движок на тестовой странице…', 8000);
+    const cbId = 't' + Date.now().toString(36);
+    window.__komaOcrEvent = window.__komaOcrEvent || (() => {});
+    const prev = window.__komaOcrEvent;
+    window.__komaOcrEvent = (id, type, data) => {
+      prev(id, type, data);
+      if (id !== cbId || type !== 'done') return;
+      let r = {};
+      try { r = JSON.parse(data || '{}'); } catch (e) { r = { ok: false, error: 'ответ не разобрался' }; }
+      toast(r.ok
+        ? 'Нативный движок читает: «' + String(r.text || '').slice(0, 120) + '» за ' + r.ms + ' мс'
+        : 'Нативный движок не прочитал: ' + (r.error || 'нет текста'), 9000);
+      renderNativeOcr().catch(() => {});
+    };
+    try { window.KomaOcr.selfTestAsync(cbId); }
+    catch (e) { toast('Проверка не запустилась: ' + ((e && e.message) || e), 7000); }
+  };
+  const setOcrEngine = async (mode) => {
+    RULES = sanitizeRules({ ...RULES, ocrEngine: mode });
+    await saveRules();
+    syncSettingsUI();
+    // Смена движка должна действовать сразу: иначе «выбрал нативно», а считает
+    // по-старому до перезапуска.
+    OCR.ready = false; OCR.engine = 'idle'; OCR.nativeNote = '';
+    try { await OCR.loadModels(); } catch (e) { console.warn(e); }
+    syncEngineUI();
+    renderNativeOcr().catch(() => {});
+    toast('Движок распознавания: ' + (NativeOcr.chosen() === 'native' ? 'нативно (АПК)' : 'WASM в странице'), 5000);
+  };
+  if ($('#btnEngineAuto')) $('#btnEngineAuto').onclick = () => setOcrEngine('auto');
+  if ($('#btnEngineNative')) $('#btnEngineNative').onclick = () => setOcrEngine('native');
+  if ($('#btnEngineWasm')) $('#btnEngineWasm').onclick = () => setOcrEngine('wasm');
+
   $('#btnRulesImport').onclick = () => {
     const inp = rulesInput;
     inp.onchange = async () => {
@@ -768,7 +816,9 @@ function showEnvBanner() {
 async function selfCheck() {
   const det = await DB.get('kv', 'model:det');
   const parts = [];
-  parts.push('OCR: ' + OCR.statusText());
+  parts.push('OCR: ' + (OCR.engine === 'native'
+    ? 'нативно (ONNX Runtime в АПК)' + (OCR.nativeNote ? ' — ' + OCR.nativeNote : '')
+    : OCR.statusText()));
   parts.push('словарь: ' + (Words.ready ? Words.size.toLocaleString('ru-RU') + ' слов (' + (Words.source || 'вшит') + ')' : 'не загрузился'));
   parts.push(typeof ort === 'undefined' ? 'onnxruntime-web не загружен (нужна сеть)' : 'onnxruntime-web загружен');
   // Голос есть/нет — по фасаду, без прямого speechSynthesis: в WebView его нет.
@@ -820,7 +870,15 @@ async function selfCheck() {
   });
   await step('библиотека', () => Library.load());
   await step('модели: список', () => renderModels());
+  await step('движок распознавания', () => {
+    // Нативный путь не требует ни WASM, ни 11 МБ движка в странице: страница
+    // только спрашивает у приложения, готовы ли модели.
+    if (typeof NativeOcr !== 'undefined' && NativeOcr.ready() && RULES.ocrEngine !== 'wasm') {
+      OCR.ready = true; OCR.engine = 'native';
+    }
+  });
   await step('модели: загрузка', async () => {
+    if (OCR.ready && OCR.engine === 'native') return;   // считаем нативно
     const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
     if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);
     // Модели НЕ вшиты в файл (так файл в 2,5 раза легче). Их даёт человек через

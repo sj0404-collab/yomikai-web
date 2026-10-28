@@ -275,6 +275,27 @@
     <div class="row" style="margin-top:8px;gap:8px">
       <button class="btn" id="btnClearModels">Убрать модели</button>
     </div>
+    <!-- Нативное распознавание: видно ТОЛЬКО внутри АПК. Модели там лежат
+         в приложении, считает ONNX Runtime для Android — без WASM и без 11 МБ
+         движка в странице. В браузере блока нет: нативно считать нечем. -->
+    <div id="nativeOcrBlock" style="display:none">
+      <div class="lbl">НАТИВНЫЙ ДВИЖОК (БЫСТРЕЕ)</div>
+      <div class="kv" id="nativeOcrState"></div>
+      <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn" id="btnNativePick">Взять модели в приложение</button>
+        <button class="btn" id="btnNativeTest">Проверить нативный движок</button>
+      </div>
+      <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn" id="btnEngineAuto" data-ocr="auto">Как лучше (само)</button>
+        <button class="btn" id="btnEngineNative" data-ocr="native">Только нативно</button>
+        <button class="btn" id="btnEngineWasm" data-ocr="wasm">Только WASM</button>
+      </div>
+      <div class="hint" style="margin-top:6px">
+        Нативный путь считает те же модели на телефоне: быстрее, меньше памяти и
+        не грузит браузерный движок. Если он почему-то не сработает, страница
+        сама вернётся к WASM и напишет причину в состояние — чтение не пропадёт.
+      </div>
+    </div>
     <div class="lbl">ДВИЖОК РАСПОЗНАВАНИЯ</div>
     <div class="row" id="engineChips" style="gap:8px;flex-wrap:wrap">
       <button class="btn hot" id="engineLocal" data-engine="local">В файле (офлайн)</button>

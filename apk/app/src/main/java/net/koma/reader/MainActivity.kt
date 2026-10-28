@@ -17,6 +17,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONObject
 import android.widget.Toast
 import androidx.webkit.WebViewAssetLoader
 import java.io.File
@@ -42,6 +43,8 @@ class MainActivity : android.app.Activity() {
     private lateinit var updater: Updater
     private lateinit var engine: GlensEngine
     private lateinit var speech: KomaSpeechBridge
+    private lateinit var ocrEngine: OcrEngine
+    private lateinit var ocr: KomaOcrBridge
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val appVersion: String by lazy {
         try { packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0" } catch (e: Exception) { "1.0" }
@@ -49,6 +52,8 @@ class MainActivity : android.app.Activity() {
 
     // Выбор файлов моделей: три файла сразу, через системный «Файлы».
     private val RC_FILES = 1001
+    // Отдельный выбор — для НАТИВНЫХ моделей (они копируются в приложение).
+    private val RC_MODELS = 1002
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,6 +64,13 @@ class MainActivity : android.app.Activity() {
         // Голос: в WebView нет Web Speech API, поэтому озвучку даёт системный
         // движок Android через мост KomaSpeech.
         speech = KomaSpeechBridge(this) { web }
+        // Нативное распознавание: модели живут в filesDir/models, считает
+        // ONNX Runtime для Android. Страница получает те же строки с теми же
+        // прямоугольниками, что давал браузерный конвейер.
+        ocrEngine = OcrEngine(java.io.File(filesDir, "models"))
+        ocr = KomaOcrBridge(this, ocrEngine, { web }) {
+            runOnUiThread { pickModelFiles() }
+        }
 
         web = WebView(this)
         setContentView(web, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -147,6 +159,7 @@ class MainActivity : android.app.Activity() {
 
         web.addJavascriptInterface(KomaLensBridge(engine, appVersion) { web }, "KomaLens")
         web.addJavascriptInterface(speech, "KomaSpeech")
+        web.addJavascriptInterface(ocr, "KomaOcr")
         web.addJavascriptInterface(
             KomaAppBridge(updater, engine, appVersion, { web }) { reason -> runOnUiThread { reload(reason) } },
             "KomaApp"
@@ -213,10 +226,40 @@ class MainActivity : android.app.Activity() {
         }
     }
 
+    /** Системный выбор файлов моделей для нативного движка. */
+    private fun pickModelFiles() {
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
+            startActivityForResult(Intent.createChooser(intent, "Выберите файлы моделей (det, rec, азбука)"), RC_MODELS)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Не удалось открыть выбор файлов: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     /** Итог системного выбора файлов — отдаём странице. */
     @Deprecated("framework API: ActivityResult стартует библиотеку, а нам хватает этого")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == RC_MODELS) {
+            val uris = ArrayList<Uri>()
+            val cd = data?.clipData
+            if (cd != null) for (i in 0 until cd.itemCount) uris.add(cd.getItemAt(i).uri)
+            data?.data?.let { uris.add(it) }
+            if (uris.isEmpty()) { Toast.makeText(this, "Файлы не выбраны", Toast.LENGTH_SHORT).show(); return }
+            val res = ocr.importFiles(uris)
+            Toast.makeText(this, if (res.optBoolean("ok"))
+                "Модели скопированы в приложение. Проверяю…" else
+                "Не получилось: " + res.optString("error"), Toast.LENGTH_LONG).show()
+            // Страница обновит состояние и, если движок готов, включит нативный путь.
+            web.evaluateJavascript(
+                "try{window.dispatchEvent(new CustomEvent('koma-models',{detail:" +
+                JSONObject.quote(res.toString()) + "}));}catch(e){}", null)
+            return
+        }
         if (requestCode != RC_FILES) return
         val cb = fileCallback ?: return
         fileCallback = null
@@ -247,6 +290,7 @@ class MainActivity : android.app.Activity() {
 
     override fun onDestroy() {
         try { speech.shutdown() } catch (e: Exception) { }
+        try { ocrEngine.reset() } catch (e: Exception) { }
         web.destroy()
         super.onDestroy()
     }

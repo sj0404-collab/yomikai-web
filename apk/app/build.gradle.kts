@@ -13,8 +13,8 @@ android {
         targetSdk = 34
         // versionCode растёт с каждой сборкой: иначе установка «поверх» может
         // быть отвергнута как «та же версия».
-        versionCode = 34
-        versionName = "1.9.34"
+        versionCode = 35
+        versionName = "1.9.35"
 
         // Версию читалки знает только сам html. Читаем её при сборке и зашиваем
         // в BuildConfig — чтобы при старте не перечитывать 11 МБ ради сравнения
@@ -45,6 +45,12 @@ android {
         }
     }
 
+    // Оставляем только телефонные ABI: с полным набором (x86_64 и т.д.) АПК
+    // распухал бы на десятки мегабайт без пользы для телефона.
+    defaultConfig {
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+    }
+
     buildTypes {
         debug {
             signingConfig = signingConfigs.getByName("koma")
@@ -69,6 +75,10 @@ dependencies {
     // интерфейс целиком рисует сама читалка, а меньше зависимостей = быстрее
     // и меньше АПК.
     implementation("androidx.webkit:webkit:1.11.0")
+    // Нативное распознавание: те же ONNX-модели, но без WebAssembly.
+    // ONNX Runtime для Android считает на CPU-ядрах телефона (и умеет NNAPI),
+    // поэтому это быстрее браузерного WASM и не требует 11 МБ движка в html.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 }
 
 /**

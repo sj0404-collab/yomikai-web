@@ -12,7 +12,8 @@ cd "$(dirname "$0")/.."     # каталог apk/
 KC=${KC:-/tmp/kotlinc/bin/kotlinc}
 AJ=${AJ:-/tmp/plat/android.jar}
 WK=${WK:-/tmp/libs/webkit.jar}
-for f in "$KC" "$AJ" "$WK"; do
+ORT=${ORT:-/tmp/libs/onnx.jar}   # androidx.webkit + onnxruntime-android (classes.jar из aar)
+for f in "$KC" "$AJ" "$WK" "$ORT"; do
   [ -e "$f" ] || { echo "нет $f — скачайте тулчейн (см. комментарий в этом скрипте)"; exit 2; }
 done
 
@@ -25,10 +26,10 @@ package net.koma.reader
 object BuildConfig { const val PAGE_VERSION = "$VER" }
 GENEOF
 
-"$KC" -cp "$AJ:$WK" -d "$GEN/out" \
+"$KC" -cp "$AJ:$WK:$ORT" -d "$GEN/out" \
   app/src/main/java/net/koma/reader/*.kt "$GEN/net/koma/reader/BuildConfig.kt" 2>&1 \
   | grep -v "^warning:" || true
-if "$KC" -cp "$AJ:$WK" -d "$GEN/out" app/src/main/java/net/koma/reader/*.kt "$GEN/net/koma/reader/BuildConfig.kt" 2>/dev/null; then
+if "$KC" -cp "$AJ:$WK:$ORT" -d "$GEN/out" app/src/main/java/net/koma/reader/*.kt "$GEN/net/koma/reader/BuildConfig.kt" 2>/dev/null; then
   echo "TYPECHECK OK · версия читалки $VER"
 else
   echo "TYPECHECK FAILED"; exit 1

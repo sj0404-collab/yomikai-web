@@ -1597,6 +1597,36 @@ async function renderModels() {
   $('#ortState').textContent = (typeof ort === 'undefined')
     ? 'onnxruntime-web не загрузился: нужна сеть при первом открытии файла.'
     : OCR.statusText() + (OCR.reason ? ' — ' + OCR.reason : '');
+  renderNativeOcr().catch(() => {});
+}
+
+/**
+ * Блок «Нативный движок» в шторке моделей.
+ * Показывается только там, где есть мост `window.KomaOcr` (то есть в АПК):
+ * в браузере считать модели нативно нечем, и кнопок-обманок там нет.
+ */
+async function renderNativeOcr() {
+  const block = $('#nativeOcrBlock');
+  if (!block) return;
+  if (typeof NativeOcr === 'undefined' || !NativeOcr.present()) { block.style.display = 'none'; return; }
+  block.style.display = 'block';
+  const st = NativeOcr.status();
+  const mb = (n) => n ? (n / 1048576).toFixed(1) + ' МБ' : 'нет';
+  const mark = (ok) => (ok ? '✅' : '❌');
+  const files = st.files || {};
+  const rows = [
+    `${mark(st.models)} детектор: ${mb(files['det.onnx'])}`,
+    `${mark(st.models)} распознаватель: ${mb(files['rec.onnx'])}`,
+    `${mark(st.classes > 0)} азбука: ${st.classes ? (st.classes - 1) + ' символов' : 'нет'}`,
+    st.ready ? '✅ движок готов' : '❌ ' + (st.error || 'модели не выбраны'),
+    'считает: <b>' + (NativeOcr.chosen() === 'native' ? 'нативно (ONNX Runtime)' : 'WASM в странице') + '</b>'
+      + (OCR.nativeNote ? '<br><span class="hint">последний раз нативный путь: ' + escapeHtml(OCR.nativeNote) + '</span>' : ''),
+  ];
+  $('#nativeOcrState').innerHTML = rows.join('<br>');
+  // Кнопки выбора движка показывают, что выбрано в правилах.
+  const mode = (RULES && RULES.ocrEngine) || 'auto';
+  const hot = (id) => { const b = $(id); if (b) b.classList.toggle('hot', b.dataset.ocr === mode); };
+  hot('#btnEngineAuto'); hot('#btnEngineNative'); hot('#btnEngineWasm');
 }
 /**
  * Проверка движка на синтетической странице: гоняем ровно тот же путь, что и на
