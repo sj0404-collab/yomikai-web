@@ -43,7 +43,9 @@ JS_PAGE = r"""async ([b64img, speed, autoDepth, twice]) => {
   // вкладке, второй замер попадает в кэш первого и показывает 0 вызовов
   // модели (ровно так и вышло в первом прогоне serial). Чистим, иначе цифры
   // врут в пользу того, кто бежит вторым.
-  try { _textCache.clear(); _probsCache = { canvas: null, res: null }; } catch (e) {}
+  try { _textCache.clear(); } catch (e) {}
+  try { if (typeof _decCache !== 'undefined') _decCache.clear(); } catch (e) {}
+  try { _probsCache = { canvas: null, res: null }; } catch (e) {}
   let calls = 0;
   const orig = window.decodeCrop;
   window.decodeCrop = function (...a) { calls++; return orig.apply(this, a); };
