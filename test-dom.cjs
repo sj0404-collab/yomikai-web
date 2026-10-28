@@ -5,7 +5,7 @@ const { getById } = require('./dom_shim.js');
 // Собираем приложение из частей: в самом HTML теперь вшит движок на 7 МБ,
 // и вырезать оттуда код регулярками — плохая идея.
 const body = ['part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+  .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 const trimmed = body.slice(0, body.indexOf('(async function boot()'));
 new Function(trimmed + '; global.__api={bindUI,Library,DB};')();
 const { bindUI, DB } = global.__api;
