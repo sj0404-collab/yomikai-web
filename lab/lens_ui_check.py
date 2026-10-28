@@ -90,8 +90,12 @@ def main():
         # 4. Переключение на Lens
         pg.click('#engineLens2')
         pg.wait_for_timeout(500)
-        hot = pg.evaluate("() => document.getElementById('engineLens2').classList.contains('hot')")
-        ok(hot, 'после нажатия «Google Lens» подсветка стоит на нём')
+        hot = pg.evaluate("() => { const e = document.getElementById('engineLens2');"
+                          " return e.classList.contains('hot') && e.classList.contains('on'); }")
+        ok(hot, 'после нажатия «Google Lens» он подсвечен как выбранный (hot + on)')
+        ok(pg.evaluate("() => getComputedStyle(document.getElementById('engineLens2')).backgroundColor"
+                       " !== getComputedStyle(document.getElementById('engineLocal2')).backgroundColor"),
+           'подсветка видна глазом, а не только в разметке (фон разный)')
         ok(pg.evaluate("() => LENS.isLens() === true"), 'движок действительно переключился на Lens')
         sub = pg.locator('#rSub').inner_text()
         ok('Google Lens' in sub, 'подпись страницы говорит, что движок — Google Lens (сейчас: %r)' % sub)
