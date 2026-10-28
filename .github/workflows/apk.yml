@@ -1,0 +1,69 @@
+name: сборка АПК
+
+# Зачем: АПК-обёртка собирается здесь, на ранере, потому что в песочнице нет
+# Android SDK. Результат — устанавливаемый app-debug.apk в артефактах запуска и,
+# если тег вида v*, ещё и в Releases.
+#
+# Запуск: вкладка Actions → «сборка АПК» → Run workflow (или push в apk/).
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apk/**'
+      - '.github/workflows/apk.yml'
+      - 'koma-web.html'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      # Читалка — один html. Чтобы в APK попала именно свежая сборка,
+      # кладём её в assets перед сборкой (gradle-таск copyWeb делает то же
+      # самое локально).
+      - name: Положить читалку в assets
+        run: |
+          ls -l koma-web.html
+          mkdir -p apk/app/src/main/assets
+          cp koma-web.html apk/app/src/main/assets/koma-web.html
+          # Проверяем, что это наша сборка, а не заглушка: иначе АПК выйдет пустым.
+          grep -q "VERSION = 'v" apk/app/src/main/assets/koma-web.html
+          test "$(stat -c%s apk/app/src/main/assets/koma-web.html)" -gt 5000000
+
+      - name: Собрать APK
+        working-directory: apk
+        run: gradle --no-daemon assembleDebug
+
+      - name: Итог сборки
+        run: |
+          APK=$(find apk -name '*.apk' | head -1)
+          echo "APK: $APK" >> "$GITHUB_STEP_SUMMARY"
+          ls -l "$APK" >> "$GITHUB_STEP_SUMMARY"
+          md5sum "$APK" >> "$GITHUB_STEP_SUMMARY"
+          cp "$APK" koma-reader-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: koma-apk-debug
+          path: koma-reader-debug.apk
+          if-no-files-found: error
+
+      - name: В Releases (если это тег)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: koma-reader-debug.apk
+          generate_release_notes: true
