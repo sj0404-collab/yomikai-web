@@ -337,18 +337,6 @@ function bindUI() {
   // ── Google Lens как отдельный движок ──────────────────────────────────────
   // Переключатель живёт в ⚙ → Модели. По умолчанию «в файле»: пока человек сам
   // не выбрал Lens, картинка страницы никуда не уходит.
-  const syncEngineUI = () => {
-    for (const id of ['engineLocal', 'engineLens']) {
-      const b = $('#' + id); if (!b) continue;
-      b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
-    }
-    const note = $('#engineLensNote');
-    if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
-    const ort = $('#ortState');
-    if (ort && LENS.isLens()) {
-      ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
-    }
-  };
   // По обработчику на кнопку, а не один на контейнер: так «кнопка без
   // обработчика» не проскочит проверку сборки, и обработчик точно на месте.
   const setEngine = async (mode) => {
@@ -521,6 +509,31 @@ function bindUI() {
     }
   });
 }
+/** Показать, какой движок выбран. Вызывается и при старте (после LENS.load),
+ * и при каждом переключении — иначе кнопка «В файле» выглядела бы выбранной
+ * всегда, даже когда человек уже переключился на Lens. */
+function syncEngineUI() {
+  for (const id of ['engineLocal', 'engineLens']) {
+    const b = $('#' + id); if (!b) continue;
+    b.classList.toggle('hot', (b.dataset.engine === 'lens') === LENS.isLens());
+  }
+  const note = $('#engineLensNote');
+  if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
+  const ort = $('#ortState');
+  if (ort && LENS.isLens()) {
+    ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
+  }
+  // Обещание «ни один кадр никуда не отправляется» верно ТОЛЬКО в офлайн-режиме,
+  // поэтому с включённым Lens эту строку нельзя показывать как есть.
+  const priv = $('#privacyNote');
+  if (priv) {
+    priv.textContent = LENS.isLens()
+      ? 'Сейчас включён Google Lens: по нажатию «Распознать» кадр страницы уходит в Google. Верните «В файле» (офлайн), чтобы ничего не отправлялось.'
+      : 'Распознавание целиком в браузере: ни один кадр никуда не отправляется. Модели хранятся в IndexedDB этого сайта.';
+    priv.style.color = LENS.isLens() ? '#ffd2d2' : '';
+  }
+}
+
 async function saveRules() {
   RULES = sanitizeRules(RULES);
   await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
@@ -585,6 +598,7 @@ async function selfCheck() {
   // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
   // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
   await LENS.load();
+  syncEngineUI();                       // показать сохранённый выбор, а не «по умолчанию»
   const saved = await DB.get('kv', 'rules');
   // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
   // иначе на чистой установке профиль скорости не применялся, и «Быстро»
