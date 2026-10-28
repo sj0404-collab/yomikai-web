@@ -12,7 +12,7 @@ global.document.querySelector = () => el();
 global.document.querySelectorAll = () => [];
 global.ort = { env: { wasm: {} }, Tensor: class { constructor(t, d, dims) { this.data = d; this.dims = dims; } } };
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
-  .map(f => fs.readFileSync('/home/user/koma-web/' + f, 'utf8')).join('\n');
+  .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
   + '; return {RULES, DEFAULT_RULES, SPEED_PRESETS, SPEED_NAMES, sanitizeRules, Reader};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
@@ -50,7 +50,7 @@ ok(n.pageSide === 1600 && n.largeText === true && n.uncoveredPass === true && n.
   '«Обычно» совпадает с прежним поведением (pageSide 1600, все проходы)');
 
 // 7. Карточка старта и её кнопки существуют в разметке
-const html = fs.readFileSync('/home/user/koma-web/part1.html', 'utf8');
+const html = fs.readFileSync(__dirname + '/part1.html', 'utf8');
 for (const id of ['startCard', 'btnStartScan', 'btnStartRead', 'btnStartClose', 'cbAutoScan', 'speedChips', 'speedHint']) {
   ok(html.includes('id="' + id + '"'), 'в разметке есть #' + id);
 }
@@ -62,10 +62,10 @@ for (const sp of ['lightning', 'fast', 'smart', 'normal', 'thorough']) {
 // строках. Проверяем контракт, а не цифры: дешёвый детектор, дожим включён,
 // потолок вариантов есть, и профиль не превращается в «Обычно».
 const sm = api.sanitizeRules({ speed: 'smart' });
-ok(sm.pageSide === 1280 && sm.decodeVariants === false,
-  '«Умно»: те же дешёвые настройки, что у «Быстро» (1280, без перебора)');
-ok(sm.autoDepth === true && sm.extCrop === true,
-  '«Умно»: дожим включён и включается вместе с расширением кропа');
+ok(sm.pageSide === 1280 && sm.decodeVariants === true,
+  '«Умно»: детектор как у «Быстро» (1280), но перебор подготовок кропа включён');
+ok(sm.autoDepth === true && sm.extCrop === 'light',
+  '«Умно»: дорогие расширения кропа — только по дожиму (autoDepth, extCrop=light)');
 ok(sm.maxDeepVariants > 0 && sm.maxDeepVariants <= 10,
   '«Умно»: потолок дорогих подготовок на строку = ' + sm.maxDeepVariants);
 ok(api.SPEED_NAMES.smart === 'Умно', 'у профиля есть человеческое имя');
