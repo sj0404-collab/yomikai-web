@@ -41,6 +41,7 @@ class MainActivity : android.app.Activity() {
     private lateinit var web: WebView
     private lateinit var updater: Updater
     private lateinit var engine: GlensEngine
+    private lateinit var speech: KomaSpeechBridge
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val appVersion: String by lazy {
         try { packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0" } catch (e: Exception) { "1.0" }
@@ -55,6 +56,9 @@ class MainActivity : android.app.Activity() {
 
         updater = Updater(this, BuildConfig.PAGE_VERSION)
         engine = GlensEngine { CookieManager.getInstance().getCookie("https://lens.google.com") }
+        // Голос: в WebView нет Web Speech API, поэтому озвучку даёт системный
+        // движок Android через мост KomaSpeech.
+        speech = KomaSpeechBridge(this) { web }
 
         web = WebView(this)
         setContentView(web, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -142,6 +146,7 @@ class MainActivity : android.app.Activity() {
         }
 
         web.addJavascriptInterface(KomaLensBridge(engine, appVersion) { web }, "KomaLens")
+        web.addJavascriptInterface(speech, "KomaSpeech")
         web.addJavascriptInterface(
             KomaAppBridge(updater, engine, appVersion) { reason -> runOnUiThread { reload(reason) } },
             "KomaApp"
@@ -212,9 +217,17 @@ class MainActivity : android.app.Activity() {
     override fun onPause() {
         super.onPause()
         // Голос должен замолчать при уходе из приложения, иначе читает в кармане.
+        try { speech.stopAll() } catch (e: Exception) { }
         web.evaluateJavascript(
-            "try{(window.speechSynthesis||{}).cancel&&speechSynthesis.cancel();" +
+            "try{window.VOICE&&VOICE.cancel&&VOICE.cancel();" +
+            "window.speechSynthesis&&window.speechSynthesis.cancel&&window.speechSynthesis.cancel();" +
             "window.TTS&&TTS.stop&&TTS.stop();}catch(e){}", null)
+    }
+
+    override fun onDestroy() {
+        try { speech.shutdown() } catch (e: Exception) { }
+        web.destroy()
+        super.onDestroy()
     }
 
     private fun quote(s: String) = "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"

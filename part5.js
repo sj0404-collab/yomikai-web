@@ -563,10 +563,20 @@ function bindUI() {
   };
   $('#btnStop').onclick = () => TTS.stop();
   $('#btnPause').onclick = () => {
-    if (speechSynthesis.speaking) { speechSynthesis.pause(); $('#btnPause').textContent = '▶'; }
-    else { speechSynthesis.resume(); $('#btnPause').textContent = '⏸'; }
+    // Голос живёт за фасадом VOICE: в браузере это Web Speech, в АПК — Android
+    // TTS. Раньше здесь стоял прямой speechSynthesis, и в приложении кнопка
+    // падала с «speechSynthesis is not defined».
+    if (!TTS.paused) {
+      TTS.pauseRead();
+      TTS.paused = true;
+      $('#btnPause').textContent = '▶';
+    } else {
+      TTS.resumeRead();
+      TTS.paused = false;
+      $('#btnPause').textContent = '⏸';
+    }
   };
-  $('#btnSkip').onclick = () => { speechSynthesis.cancel(); if (!TTS.stopped) TTS.step(); };
+  $('#btnSkip').onclick = () => { VOICE.cancel(); if (!TTS.stopped) TTS.step(); };
   $('#nextArrow').onclick = async () => {
     hideArrow();
     TTS.prime();
@@ -726,45 +736,76 @@ async function selfCheck() {
   parts.push('OCR: ' + OCR.statusText());
   parts.push('словарь: ' + (Words.ready ? Words.size.toLocaleString('ru-RU') + ' слов (' + (Words.source || 'вшит') + ')' : 'не загрузился'));
   parts.push(typeof ort === 'undefined' ? 'onnxruntime-web не загружен (нужна сеть)' : 'onnxruntime-web загружен');
-  parts.push('TTS ' + (speechSynthesis.getVoices().length ? 'есть' : 'нет голосов'));
+  // Голос есть/нет — по фасаду, без прямого speechSynthesis: в WebView его нет.
+  const vc = (typeof VOICE !== 'undefined') ? VOICE.voices().length : 0;
+  parts.push('голос: ' + (VOICE && VOICE.available()
+    ? (VOICE.kind() + ', голосов ' + vc)
+    : 'нет синтеза'));
   if (ENV.android) parts.push('Android: папки нет, выбирайте файлы/CBZ');
-  $('#selfCheck').textContent = 'KOMA Web ' + VERSION + ' · ' + parts.join(' · ');
+  // Строка состояния — единственное место, где видно правду о загрузке.
+  // Если что-то не поднялось, пишем это здесь, а не оставляем на экране
+  // «Скрипты страницы не выполнились» (эта надпись — только для случая, когда
+  // не выполнился вообще ни один скрипт).
+  const errs = (State.bootErrors || []);
+  const tail = errs.length ? ' ⚠ не поднялось — ' + errs.join('; ') : '';
+  $('#selfCheck').textContent = 'KOMA Web ' + VERSION + ' · ' + parts.join(' · ') + tail;
+  $('#selfCheck').dataset.ok = errs.length ? '0' : '1';
 }
 
 (async function boot() {
-  bindUI();
-  Words.load().catch(e => console.warn('словарь не загрузился', e));
-  watchScroll();
-  TTS.init();
+  // Каждый шаг запуска отдельно. 28.10 на телефоне первый же вызов голоса
+  // (`speechSynthesis` в WebView не существует) обрывал весь boot: не грузились
+  // правила, библиотека, модели, и на экране висело «Скрипты страницы не
+  // выполнились» — хотя кнопки при этом работали. Теперь падение одного шага
+  // не мешает остальным, а его причина честно пишется в строку состояния.
+  State.bootErrors = State.bootErrors || [];
+  const step = async (name, fn) => {
+    try { await fn(); } catch (e) {
+      State.bootErrors.push(name + ': ' + ((e && e.message) || e));
+      console.error('boot, шаг «' + name + '»', e);
+    }
+  };
+
+  await step('кнопки', () => bindUI());
+  await step('словарь', () => Words.load().catch(e => console.warn('словарь не загрузился', e)));
+  await step('прокрутка', () => watchScroll());
+  await step('голос', () => TTS.init());
   // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
   // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
-  await LENS.load();
-  syncEngineUI();                       // показать сохранённый выбор, а не «по умолчанию»
-  const saved = await DB.get('kv', 'rules');
-  // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
-  // иначе на чистой установке профиль скорости не применялся, и «Быстро»
-  // (pageSide 1280, без перебора) оставалось только словом в настройках.
-  let parsedRules = {};
-  if (saved) { try { parsedRules = JSON.parse(saved.v) || {}; } catch (e) { console.warn(e); } }
-  RULES = sanitizeRules(parsedRules);
-  await Library.load();
-  await renderModels();
-  const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
-  if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);
-  // Модели НЕ вшиты в файл (так файл в 2,5 раза легче). Их даёт человек через
-  // ⚙ → Модели: detection.onnx, cyrillic.onnx, cyrillic.txt.
-  if (!(await DB.get('kv', 'model:det'))) {
-    toast('Модели не загружены. Откройте ⚙ → Модели и выберите 3 файла (det, rec, словарь)', 8000);
-  }
-  renderRulesInfo();
-  if (LENS.isLens()) toast('Движок из прошлой сессии — Google Lens. Чтобы вернуть офлайн, откройте ⚙ → Модели', 7000);
-  showEnvBanner();
-  await selfCheck();
-  setTimeout(selfCheck, 2500);
-  // предупреждение о среде
-  if (typeof ort === 'undefined') {
-    $('#ortState').textContent = 'onnxruntime-web не загрузился: нет сети или открыто в предпросмотре без интернета.';
-  }
+  await step('движок', () => LENS.load());
+  await step('вид движка', () => syncEngineUI());
+  await step('правила', async () => {
+    const saved = await DB.get('kv', 'rules');
+    // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
+    // иначе на чистой установке профиль скорости не применялся, и «Быстро»
+    // (pageSide 1280, без перебора) оставалось только словом в настройках.
+    let parsedRules = {};
+    if (saved) { try { parsedRules = JSON.parse(saved.v) || {}; } catch (e) { console.warn(e); } }
+    RULES = sanitizeRules(parsedRules);
+  });
+  await step('библиотека', () => Library.load());
+  await step('модели: список', () => renderModels());
+  await step('модели: загрузка', async () => {
+    const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
+    if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);
+    // Модели НЕ вшиты в файл (так файл в 2,5 раза легче). Их даёт человек через
+    // ⚙ → Модели: detection.onnx, cyrillic.onnx, cyrillic.txt.
+    if (!(await DB.get('kv', 'model:det'))) {
+      toast('Модели не загружены. Откройте ⚙ → Модели и выберите 3 файла (det, rec, словарь)', 8000);
+    }
+  });
+  await step('сведения о правилах', () => renderRulesInfo());
+  await step('подсказка о движке', () => {
+    if (LENS.isLens()) toast('Движок из прошлой сессии — Google Lens. Чтобы вернуть офлайн, откройте ⚙ → Модели', 7000);
+  });
+  await step('баннер среды', () => showEnvBanner());
+  await step('самопроверка', () => selfCheck());
+  if (typeof setTimeout === 'function') setTimeout(() => { selfCheck().catch(() => {}); }, 2500);
+  await step('состояние движка', () => {
+    if (typeof ort === 'undefined') {
+      $('#ortState').textContent = 'onnxruntime-web не загрузился: нет сети или открыто в предпросмотре без интернета.';
+    }
+  });
 })();
 </script>
 </body>

@@ -780,20 +780,159 @@ const SpeakCursor = {
   },
 };
 
+/**
+ * ГОЛОС: один слой над двумя движками речи.
+ *
+ * В браузере это Web Speech API (`speechSynthesis`). В Android WebView его НЕТ
+ * ВООБЩЕ: 28.10 на телефоне это выглядело как «Скрипты страницы не выполнились»
+ * и тост «speechSynthesis is not defined» — падал самый первый вызов в TTS.init(),
+ * и всё, что шло дальше по boot (правила, библиотека, модели), не выполнялось.
+ * Поэтому речи в приложении даёт нативный Android TTS через мост KomaSpeech,
+ * а страница общается только с этим фасадом и не знает, кто под ним.
+ *
+ * Фасад повторяет ровно тот минимум, который нужен читалке: список голосов,
+ * speak с событиями start/end/error, отмена, пауза (где есть) и состояние.
+ */
+const VOICE = {
+  _voices: null, _handlers: {}, _seq: 0, speaking: false, paused: false,
+
+  /** Нативный синтез из АПК. В браузере его нет — и это нормально. */
+  native() {
+    return !!(typeof window !== 'undefined' && window.KomaSpeech
+      && typeof window.KomaSpeech.speak === 'function');
+  },
+  /** Web Speech API. В WebView отсутствует, поэтому только через typeof. */
+  synth() {
+    return (typeof speechSynthesis !== 'undefined') ? speechSynthesis : null;
+  },
+  available() { return this.native() || !!this.synth(); },
+  /** Чей это голос — для проверок и для честных сообщений человеку. */
+  kind() { return this.native() ? 'Android TTS (АПК)' : (this.synth() ? 'Web Speech' : null); },
+
+  /** Список голосов в одном формате: {name, lang, voiceURI}. */
+  voices() {
+    if (this.native()) {
+      if (this._voices) return this._voices;
+      try {
+        const raw = window.KomaSpeech.voices();
+        const arr = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || []));
+        this._voices = (Array.isArray(arr) ? arr : []).map((v, i) => (
+          typeof v === 'string'
+            ? { name: v, lang: 'ru-RU', voiceURI: 'native:' + i }
+            : { name: v.name || ('голос ' + i), lang: v.lang || 'ru-RU', voiceURI: v.voiceURI || ('native:' + i) }));
+      } catch (e) { console.warn('KomaSpeech.voices', e); this._voices = []; }
+      return this._voices;
+    }
+    const sw = this.synth();
+    if (!sw) return [];
+    try { return (sw.getVoices() || []).slice(); } catch (e) { return []; }
+  },
+
+  /** Скажет ли нативный движок по-русски; null — не знаем (браузер). */
+  nativeReady() {
+    if (!this.native()) return null;
+    try {
+      const st = window.KomaSpeech.status();
+      const o = JSON.parse(typeof st === 'string' ? st : JSON.stringify(st || {}));
+      return !!o.ready;
+    } catch (e) { return false; }
+  },
+
+  cancel() {
+    this.speaking = false; this.paused = false; this._handlers = {};
+    if (this.native()) { try { window.KomaSpeech.cancel(); } catch (e) { /* моста уже нет */ } }
+    const sw = this.synth();
+    if (sw) { try { sw.cancel(); } catch (e) { /* ignore */ } }
+  },
+  pause() {
+    this.paused = true;
+    const sw = this.synth();
+    if (this.native()) {
+      // У Android TTS паузы нет: честно останавливаем и запоминаем, что читаем.
+      // Продолжение начинает текущую реплику заново — об этом говорим в интерфейсе.
+      try { window.KomaSpeech.cancel(); } catch (e) {}
+      this.speaking = false;
+      return 'restart';
+    }
+    if (sw) { try { sw.pause(); } catch (e) {} }
+    return 'pause';
+  },
+  resume() {
+    this.paused = false;
+    const sw = this.synth();
+    if (sw && !this.native()) { try { sw.resume(); } catch (e) {} return true; }
+    return false;
+  },
+
+  /**
+   * Сказать текст. opts: {lang, rate, voice, onstart, onboundary, onend, onerror}.
+   * Возвращает true, если движок принял фразу.
+   */
+  speak(text, opts = {}) {
+    if (this.native()) {
+      const id = 'v' + (++this._seq) + '_' + Date.now().toString(36);
+      this._handlers[id] = opts;
+      this.speaking = true;
+      window.__komaSpeechEvent = window.__komaSpeechEvent || ((eid, type, data) => {
+        const h = VOICE._handlers[eid];
+        if (!h) return;
+        if (type === 'start') { VOICE.speaking = true; if (h.onstart) h.onstart(); }
+        else if (type === 'end') { delete VOICE._handlers[eid]; VOICE.speaking = false; if (h.onend) h.onend(); }
+        else if (type === 'error') {
+          delete VOICE._handlers[eid]; VOICE.speaking = false;
+          if (h.onerror) h.onerror({ error: String(data || 'native') });
+        }
+      });
+      try {
+        window.KomaSpeech.speak(String(text || ''), String(opts.rate || 1),
+          String(opts.lang || 'ru-RU'), String((opts.voice && opts.voice.name) || ''), id);
+        return true;
+      } catch (e) {
+        delete this._handlers[id];
+        this.speaking = false;
+        if (opts.onerror) opts.onerror({ error: String((e && e.message) || e) });
+        return false;
+      }
+    }
+    const sw = this.synth();
+    if (!sw || typeof SpeechSynthesisUtterance === 'undefined') return false;
+    const u = new SpeechSynthesisUtterance(String(text || ''));
+    try { if (opts.voice) u.voice = opts.voice; } catch (e) { /* старый голос */ }
+    u.lang = opts.lang || (opts.voice && opts.voice.lang) || 'ru-RU';
+    u.rate = opts.rate || 1;
+    if (opts.volume != null) u.volume = opts.volume;
+    u.onstart = () => { this.speaking = true; if (opts.onstart) opts.onstart(); };
+    u.onboundary = (e) => { if (opts.onboundary) opts.onboundary((e && e.charIndex) || 0); };
+    u.onend = () => { this.speaking = false; if (opts.onend) opts.onend(); };
+    u.onerror = (e) => { this.speaking = false; if (opts.onerror) opts.onerror(e); };
+    try { sw.speak(u); return true; } catch (e) {
+      if (opts.onerror) opts.onerror({ error: String((e && e.message) || e) });
+      return false;
+    }
+  },
+};
+
 const TTS = {
   voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0, primed: false,
   init() {
+    // Ни одного прямого обращения к speechSynthesis: в WebView его нет вовсе.
     const fill = () => {
-      this.voices = speechSynthesis.getVoices().filter(v => /ru/i.test(v.lang)).concat(
-        speechSynthesis.getVoices().filter(v => !/ru/i.test(v.lang)));
-      const sel = $('#selVoice');
-      sel.innerHTML = this.voices.map((v, i) => `<option value="${i}">${escapeHtml(v.name)} (${v.lang})</option>`).join('');
-      const saved = localStorage.getItem('koma.voice');
-      if (saved && this.voices[+saved]) sel.value = saved;
-      this.voice = this.voices[+sel.value] || null;
+      try {
+        const all = VOICE.voices();
+        this.voices = all.filter(v => /ru/i.test(v.lang)).concat(all.filter(v => !/ru/i.test(v.lang)));
+        const sel = $('#selVoice');
+        if (!sel) return;
+        sel.innerHTML = this.voices.length
+          ? this.voices.map((v, i) => `<option value="${i}">${escapeHtml(v.name)} (${v.lang})</option>`).join('')
+          : '<option value="">голосов нет</option>';
+        const saved = localStorage.getItem('koma.voice');
+        if (saved && this.voices[+saved]) sel.value = saved;
+        this.voice = this.voices[+sel.value] || null;
+      } catch (e) { console.warn('голоса не заполнились', e); }
     };
     fill();
-    speechSynthesis.onvoiceschanged = fill;
+    const sw = VOICE.synth();
+    if (sw) { try { sw.onvoiceschanged = fill; } catch (e) { /* ignore */ } }
     $('#selVoice').onchange = (e) => {
       this.voice = this.voices[+e.target.value] || null;
       localStorage.setItem('koma.voice', e.target.value);
@@ -806,7 +945,7 @@ const TTS = {
   stop() {
     this.stopped = true; this.speaking = false; this.queue = [];
     try { SpeakCursor.stop(); } catch (e) { /* ленты ещё нет */ }
-    speechSynthesis.cancel();
+    VOICE.cancel();
     Reader.current = null;
     Reader.paintAllFrames();
     $('#playBar').style.display = 'none';
@@ -854,18 +993,19 @@ const TTS = {
    * обработчике нажатия разблокирует синтезатор.
    */
   prime() {
+    // В АПК голос нативный: там нет правила «только из жеста», разблокировать нечего.
+    if (VOICE.native()) { this.primed = true; return; }
     try {
-      if (this.primed) { speechSynthesis.resume(); return; }
-      const u = new SpeechSynthesisUtterance(' ');
-      u.volume = 0.05;
-      speechSynthesis.speak(u);
+      if (!VOICE.synth()) return;
+      if (this.primed) { VOICE.resume(); return; }
+      VOICE.speak(' ', { rate: 1, lang: 'ru-RU', volume: 0.05 });
       this.primed = true;
     } catch (e) { console.warn('голос не разблокировался', e); }
   },
   /** Голос из списка, который реально доступен ПРЯМО СЕЙЧАС. */
   pickVoice() {
     let avail = [];
-    try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
+    try { avail = VOICE.voices() || []; } catch (e) { avail = []; }
     if (!avail.length) return null;
     const cur = this.voice;
     if (cur && avail.some(v => v.voiceURI === cur.voiceURI || v.name === cur.name)) {
@@ -877,15 +1017,18 @@ const TTS = {
     return avail.find(v => /^ru/i.test(v.lang)) || null;
   },
   speakLine(line, then) {
-    // «Прочитано» отмечаем ТОЛЬКО когда голос реально заговорил (onstart).
-    // Раньше отметка ставилась сразу: если синтез отказывал (нет голоса,
-    // not-allowed), строка считалась прочитанной и при продолжении чтения
-    // ПРОПУСКАЛАСЬ — то есть текст терялся. Отказ = не отмечаем, прочтём снова.
+    // «Прочитано» отмечаем ТОЛЬКО когда голос реально заговорил (нажатие ▶ не
+    // считается). Раньше отметка ставилась сразу: если синтез отказывал (нет
+    // голоса, not-allowed), строка считалась прочитанной и при продолжении
+    // чтения ПРОПУСКАЛАСЬ — то есть текст терялся. Отказ = не отмечаем.
     let marked = false;
-    if (typeof speechSynthesis === 'undefined') { toast('В этой среде нет синтеза речи'); return; }
-    let avail = [];
-    try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
+    if (!VOICE.available()) {
+      toast('В этой среде нет синтеза речи: ни системного голоса, ни движка АПК', 8000);
+      return;
+    }
+    const avail = VOICE.voices();
     if (!avail.length) {
+      // В АПК список голосов даёт Android; пустой список = в системе нет TTS-движка.
       toast('Система не дала ни одного голоса: Настройки Android → Синтез речи', 7000);
     }
     const chosen = this.pickVoice();
@@ -893,50 +1036,51 @@ const TTS = {
       toast('Голос «' + (this.voice.name || '') + '» недоступен, читаю ' + chosen.name, 5000);
     }
     if (chosen) this.voice = chosen;
-    // cancel() «на всякий случай» в WebView убивает очередь: следующий вызов
-    // уже не запускается. Отменяем только если что-то реально звучит.
-    try {
-      if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
-    } catch (e) { /* ignore */ }
-    const u = new SpeechSynthesisUtterance(line.text);
-    // Голос из старого списка (после смены TTS-движка в системе) браузер
-    // отвергает исключением — раньше это обрывало speakLine ДО speak(), и
-    // реплика молча не читалась. Теперь падаем на голос по умолчанию.
-    try { if (this.voice) u.voice = this.voice; }
-    catch (e) { console.warn('голос недоступен, читаю голосом по умолчанию', e && e.message); }
-    u.lang = this.voice?.lang || 'ru-RU';
-    u.rate = this.rate;
+    // cancel() «на всякий случай» убивает очередь: следующий вызов уже не
+    // запускается. Отменяем только если что-то реально звучит (в браузере) —
+    // нативный движок отменять перед каждой репликой не нужно и вредно.
+    if (!VOICE.native()) {
+      const sw = VOICE.synth();
+      try {
+        if (sw && (sw.speaking || sw.pending)) VOICE.cancel();
+      } catch (e) { /* ignore */ }
+    }
     Reader.current = line;
     Reader.paintAllFrames();
     let started = false;
-    u.onstart = () => {
+    const started0 = () => {
       started = true;
       marked = true;
       try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
       // Тень по буквам стартует вместе со звуком, а не по нажатию кнопки.
       try { SpeakCursor.start(line.text, this.rate); } catch (e) { /* не критично */ }
     };
-    // Точная граница слова (Chrome отдаёт её как name:'word').
-    u.onboundary = (e) => {
-      try { SpeakCursor.boundary((e && e.charIndex) || 0); } catch (err) { /* ignore */ }
-    };
-    u.onend = () => { try { SpeakCursor.stop(); } catch (e) {}
-      if (then) then(); };
-    u.onerror = (e) => {
-      const code = (e && e.error) || 'unknown';
+    const finished = () => { try { SpeakCursor.stop(); } catch (e) {} if (then) then(); };
+    const failed = (code) => {
       this.speaking = false;
       try { SpeakCursor.stop(); } catch (err) {}
       // Не заговорил — снимаем возможную отметку, иначе строка потеряется.
       if (!started && marked) { try { Reader.unmarkSpoken(Reader.page, line.text); } catch (err) {} }
       // Молчать нельзя: раньше «голос не работает» выглядело как поломка
-      // читалки, хотя браузер просто отбил озвучку.
+      // читалки, хотя движок просто отбил озвучку.
       if (code === 'not-allowed') toast('Браузер не разрешил озвучку — нажмите ▶ ещё раз', 5000);
       else if (code === 'interrupted' || code === 'canceled') { /* это наш cancel() */ }
       else toast('Голос не сказал: ' + code, 5000);
       if (then) then();
     };
-    try { speechSynthesis.speak(u); } catch (e) {
-      toast('Синтез отказал: ' + (e.message || e), 6000);
+    const accepted = VOICE.speak(line.text, {
+      lang: (this.voice && this.voice.lang) || 'ru-RU',
+      rate: this.rate,
+      voice: this.voice,
+      onstart: started0,
+      // Точная граница слова (Chrome отдаёт её как name:'word'). Нативный Android
+      // TTS границ не шлёт — там тень идёт по оценке, ровно как и раньше.
+      onboundary: (ci) => { try { SpeakCursor.boundary(ci || 0); } catch (err) { /* ignore */ } },
+      onend: finished,
+      onerror: (e) => failed((e && e.error) || 'unknown'),
+    });
+    if (!accepted) {
+      toast('Синтез отказал: движок не принял фразу', 6000);
       return;
     }
     // Если синтез не начал говорить и не сообщил ошибку — молчать нельзя:
@@ -944,12 +1088,35 @@ const TTS = {
     clearTimeout(this._watch);
     this._watch = setTimeout(() => {
       if (started || this.stopped) return;
-      if (!speechSynthesis.speaking && !speechSynthesis.pending) {
+      if (VOICE.native()) {
+        if (VOICE.nativeReady() === false) toast('Android TTS не готов: Настройки → Синтез речи', 6000);
+        return;
+      }
+      const sw = VOICE.synth();
+      if (sw && !sw.speaking && !sw.pending) {
         toast('Синтез не ответил. Нажмите ⚙ → «Проверить голос»', 6000);
       }
     }, 1200);
-    // Прокрутка — ПОСЛЕ speak и в try: ошибка геометрии не должна съедать звук.
+    // Прокрутка — ПОСЛЕ запуска речи и в try: ошибка геометрии не должна съедать звук.
     try { this.followLine(line); } catch (e) { console.warn('не прокрутил к реплике', e); }
+  },
+  /** Пауза: в браузере — настоящая, в АПК — остановка с продолжением реплики заново. */
+  pauseRead() {
+    const mode = VOICE.pause();
+    if (mode === 'restart') {
+      this.pausedLine = Reader.current;
+      toast('В приложении пауза = стоп: продолжу эту реплику сначала', 3500);
+    }
+    return mode;
+  },
+  resumeRead() {
+    if (VOICE.native()) {
+      const line = this.pausedLine;
+      this.pausedLine = null;
+      if (line) { this.speakLine(line, () => { if (!this.stopped) this.step(); }); return true; }
+      return false;
+    }
+    return VOICE.resume();
   },
   async readVisible() {
     // Если страница ещё не распознана — сначала распознать, потом читать.
@@ -1443,27 +1610,31 @@ async function renderModels() {
  * (нет голосов в системе, браузер запретил озвучку, синтез не ответил).
  */
 async function selfTestVoice() {
-  if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
-    return 'В этой среде вообще нет синтеза речи (speechSynthesis undefined)';
+  if (!VOICE.available()) {
+    // Раньше здесь было «В этой среде вообще нет синтеза речи (speechSynthesis
+    // undefined)» — и это единственное, что видел человек в АПК до 28.10.
+    return 'Синтеза речи нет: ни Web Speech в этой среде, ни движка АПК KomaSpeech';
   }
-  let avail = [];
-  try { avail = speechSynthesis.getVoices() || []; } catch (e) { avail = []; }
+  const avail = VOICE.voices();
   const chosen = TTS.pickVoice();
   const parts = [];
-  parts.push('голосов в системе: ' + avail.length);
+  parts.push('движок: ' + VOICE.kind());
+  parts.push('голосов: ' + avail.length);
   parts.push('выбран: ' + (chosen ? chosen.name + ' [' + chosen.lang + ']' : 'системный по умолчанию (ru-RU)'));
-  const u = new SpeechSynthesisUtterance('Проверка голоса. Раз, два, три.');
-  if (chosen) u.voice = chosen;
-  u.lang = (chosen && chosen.lang) || 'ru-RU';
-  u.rate = TTS.rate || 1;
+  if (VOICE.native()) {
+    const ready = VOICE.nativeReady();
+    parts.push(ready ? 'Android TTS готов' : 'Android TTS не готов (нет данных движка)');
+  }
   let started = false, err = '';
-  u.onstart = () => { started = true; };
-  u.onerror = (e) => { err = (e && e.error) || 'unknown'; };
-  try {
-    if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
-    speechSynthesis.speak(u);
-  } catch (e) {
-    parts.push('система не приняла фразу: ' + (e.message || e));
+  const accepted = VOICE.speak('Проверка голоса. Раз, два, три.', {
+    lang: (chosen && chosen.lang) || 'ru-RU',
+    rate: TTS.rate || 1,
+    voice: chosen,
+    onstart: () => { started = true; },
+    onerror: (e) => { err = (e && e.error) || 'unknown'; },
+  });
+  if (!accepted) {
+    parts.push('движок не принял фразу');
     return parts.join(' · ');
   }
   await sleep(1500);
