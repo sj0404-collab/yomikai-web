@@ -16,6 +16,7 @@ const DEFAULT_RULES = {
   autoDepth: false,        // перебор вариантов сразу прекращать на лёгких строках
   autoDepthMin: 0.34,      // «трудная» строка: незнакомых слов ≥ трети и ≥ 3 слов
   maxDeepVariants: 5,      // сколько ДОРОГИХ подготовок кропа пробовать на строку
+  maxVariants: 3,          // сколько подготовок кропа перебирать в режиме «Умно»
   uncoveredPass: true,     // искать строки, которые детектор не закрыл боксом
   largeMinWidth: 0.22,     // уже — это не текстовый блок (звуковые эффекты узкие)
   decodeRetryBelow: 1,     // повторное распознавание бинаризациями: только если букв < 1
@@ -60,9 +61,9 @@ const SPEED_PRESETS = {
   // одного дешёвого варианта, а дорогие ступени включаются только на строках,
   // где словарь не узнал треть слов (autoDepth), и не больше трёх на строку.
   // Числа — в журнале «Доработки», часть 14.
-  smart:     { pageSide: 1280, detRetry: true, largeText: true, decodeVariants: true,
-               uncoveredPass: true, decodeRetryBelow: 1, extCrop: 'light', breakWords: true,
-               autoDepth: true, maxDeepVariants: 3 },
+  smart:     { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
+               uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true,
+               autoDepth: true, maxDeepVariants: 3, maxVariants: 3 },
   normal:    { pageSide: 1600, detRetry: true, largeText: true, decodeVariants: true,
                uncoveredPass: true, decodeRetryBelow: 1, extCrop: true, breakWords: true },
   thorough:  { pageSide: 1920, detRetry: true, largeText: true, decodeVariants: true,
@@ -97,6 +98,7 @@ function sanitizeRules(r) {
   R.autoDepth = R.autoDepth === true;          // по умолчанию — полный перебор, без потери слов
   num('autoDepthMin', 0, 1);
   num('maxDeepVariants', 0, 40);
+  num('maxVariants', 1, 8);
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
@@ -1490,8 +1492,12 @@ async function decodeAllVariants(crop, R, first) {
   tries.push(['contrast', contrastCanvas(crop)]);
   tries.push(['pad20up2', upscaleCanvas(pointed, 2)]);
   tries.push(['bin0', binarizeCanvas(crop, 0, R)]);
+  // «Умно»: не больше maxVariants подготовок на строку. Замер 27.10 на 45
+  // строках: побеждал «orig» в 43 случаях, «pad20» и «up2» делили остаток —
+  // дальше (contrast, pad20up2, bin0) выигрывали редко, а стоили столько же.
+  const cap = (R.autoDepth === true) ? Math.max(1, Math.round(R.maxVariants ?? 3)) : tries.length;
   let best = null;
-  for (const [name, cv] of tries) {
+  for (const [name, cv] of tries.slice(0, cap)) {
     let text = '', conf = 0;
     // Исходный кроп уже распознан в decodeBetter — не гоняем модель дважды.
     if (name === 'orig' && first) { text = first[0]; conf = first[1]; }
