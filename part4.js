@@ -1570,9 +1570,18 @@ function mergeBandLines(parts, canvas) {
       // Разный текст на одном месте: оставляем тот, что осмысленнее. Ничего не
       // выбрасываем «по диапазону полосы» — так терялись реплики, которые
       // соседняя полоса просто не распознала.
+      // «Одно и то же место» — это совпадение И по вертикали, И по горизонтали.
+      // Раньше хватало вертикали, и две реплики на одной высоте (две колонки
+      // газеты; два облачка рядом в манге) считались дублем друг друга: одна
+      // молча выбрасывалась. Замер 28.10 на странице-прозе: 58 распознанных
+      // строк → 2 реплики, потому что правая и левая колонки «перекрывались».
+      const overlapH = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left);
       const same = out.findIndex(o => {
         const oh = Math.max(1e-6, o.bottom - o.top);
-        return overlapV(o, ln) > Math.min(h, oh) * 0.6;
+        const ow = Math.max(1e-6, o.right - o.left);
+        const w = Math.max(1e-6, ln.right - ln.left);
+        return overlapV(o, ln) > Math.min(h, oh) * 0.6
+          && overlapH(o, ln) > Math.min(w, ow) * 0.5;
       });
       if (same >= 0) {
         const q1 = qualityOf([out[same].text]) + Math.min(ln.text.length, 60) * 0.3;
