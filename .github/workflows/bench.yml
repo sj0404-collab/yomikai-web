@@ -50,7 +50,7 @@ jobs:
           python3 lab/bench_ci.py --all --twice 1 --out bench-all.json | tee serial.log
       - name: Эксперименты «Умно» (сколько вариантов и нужен ли гейт)
         run: |
-          python3 lab/bench_ci.py --exp --twice 0 --out bench-exp.json | tee exp.log
+          python3 lab/bench_ci.py --exp 1 --twice 0 --out bench-exp.json | tee exp.log
       - name: Таблица в Summary
         if: always()
         run: |
