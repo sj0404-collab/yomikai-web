@@ -66,7 +66,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        updater = Updater(this)
+        updater = Updater(this, BuildConfig.PAGE_VERSION)
         engine = GlensEngine { CookieManager.getInstance().getCookie("https://lens.google.com") }
 
         web = WebView(this)
@@ -165,7 +165,7 @@ class MainActivity : AppCompatActivity() {
         // Автообновление: тихо, в фоне, после старта. Если скачалось новее —
         // один раз перезагружаем и говорим об этом тостом.
         Thread {
-            val res = updater.check(silent = true)
+            val res = updater.check()
             if (res.optBoolean("updated")) {
                 runOnUiThread { reload("Читалка обновлена до " + res.optString("version")) }
             }
