@@ -57,7 +57,7 @@ class GlensEngine(private val cookieProvider: () -> String?) {
             task.cancel(true)
             throw GlensError("Google не ответил за $timeoutSec с")
         } catch (e: java.util.concurrent.ExecutionException) {
-            throw (e.cause as? GlensError) ?: GlensError(String(e.cause?.message ?: e.message ?: "ошибка сети"))
+            throw (e.cause as? GlensError) ?: GlensError((e.cause?.message ?: e.message ?: "ошибка сети"))
         }
     }
 
@@ -74,7 +74,7 @@ class GlensEngine(private val cookieProvider: () -> String?) {
             out.put("lines", JSONArray(lines))
             out.put("antiBot", looksLikeAntiBot(body))
         } catch (e: Throwable) {
-            out.put("ok", false).put("error", String(e.message ?: e.javaClass.simpleName))
+            out.put("ok", false).put("error", (e.message ?: e.javaClass.simpleName))
         }
     }
 
