@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
         val data = res.data
         val uris: Array<Uri>? = when {
             data == null -> null
-            (data.clipData?.count ?: 0) > 1 -> (0 until data.clipData!!.count)
+            (data.clipData?.itemCount ?: 0) > 1 -> (0 until data.clipData!!.itemCount)
                 .map { data.clipData!!.getItemAt(it).uri }.toTypedArray()
             data.data != null -> arrayOf(data.data!!)
             else -> null
