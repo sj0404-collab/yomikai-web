@@ -65,10 +65,35 @@ class ReadEngine {
         private const val MAX_LINES = 2000
 
         private fun cleanSpeech(t: String): String =
-            t.replace('\u00AD', '-').replace(Regex("\\s+"), " ").trim()
+            trimJunkEdges(t.replace('\u00AD', '-').replace(Regex("\\s+"), " ").trim())
+
+        /**
+         * Мусорные края реплики: обрывок звукового эффекта («*ь*.*о») иногда
+         * приклеивается к началу честной строки. Снимаем крайние слова, где
+         * букв 1–2 и знаков (не букв) не меньше двух; одиночная кавычка или
+         * тире в начале нормальной реплики остаётся.
+         */
+        private fun trimJunkEdges(text: String): String {
+            val tokens = text.split(' ').filter { it.isNotEmpty() }.toMutableList()
+            fun junk(t: String): Boolean {
+                val letters = t.count { it.isLetter() }
+                val marks = t.count { !it.isLetterOrDigit() }
+                return letters <= 2 && marks >= 2
+            }
+            while (tokens.size > 1 && junk(tokens.first())) tokens.removeAt(0)
+            while (tokens.size > 1 && junk(tokens.last())) tokens.removeAt(tokens.size - 1)
+            return tokens.joinToString(" ")
+        }
     }
 
-    /** Строка с «типичной высотой» — как lh в странице (для склейки облачков). */
+    /**
+     * Строка (или блок строк) с «типичной высотой» — как lh в странице.
+     * rows — сколько текстовых строк внутри блока; высота ОДНОЙ строки
+     * считается как span/rows. Минимум высот для этого не годился: одна тонкая
+     * строка (детектор иногда отдаёт полоску в 2 пикселя) навсегда занижала lh,
+     * и следующие строки облачка уже не приклеивались — реплика разрезалась на
+     * два текста (эмулятор Forge, 29.10).
+     */
     private class Row(
         var text: String,
         var left: Double,
@@ -76,6 +101,8 @@ class ReadEngine {
         var right: Double,
         var bottom: Double,
         var lh: Double,
+        /** Сколько текстовых строк внутри блока (для средней высоты строки). */
+        var rows: Int = 1,
     ) {
         val w: Double get() = right - left
         val h: Double get() = bottom - top
@@ -124,10 +151,21 @@ class ReadEngine {
 
     /** Главная точка входа: строки → реплики в порядке чтения. */
     fun plan(items: List<Line>, R: Rules): List<JSONObject> {
-        val src = items.filter { it.text.isNotBlank() && it.letters >= 1 }
-            .take(MAX_LINES)
-            .sortedWith(compareBy({ it.top }, { it.left }))
-        if (src.isEmpty()) return emptyList()
+        val kept = items.filter { it.text.isNotBlank() && it.letters >= 1 }.take(MAX_LINES)
+        if (kept.isEmpty()) return emptyList()
+        // Тонкие полоски-обрывки убираем ДО склейки: детектор иногда отдаёт
+        // рамку высотой в 2–3 пикселя поперёк картинки. Текст из неё — мусор, а
+        // крошечная высота портила «типичную высоту строки», и соседняя честная
+        // строка переставала приклеиваться — реплика разрезалась на два текста
+        // (нашлось прогоном в эмуляторе APKForge, 29.10).
+        // Фильтр включается ТОЛЬКО на настоящей странице (>= 4 строк): на двух
+        // строках («заголовок + титры») медиана считала заголовок, и титры
+        // выбрасывались — они становились частью заголовка.
+        val rawHeights = kept.map { it.height }.filter { it > 0 }.sorted()
+        val medianRaw = if (rawHeights.isEmpty()) 0.0 else rawHeights[rawHeights.size / 2]
+        val filtered = if (kept.size >= 4 && medianRaw > 0)
+            kept.filter { it.height >= medianRaw * 0.35 } else kept
+        val src = filtered.ifEmpty { kept }.sortedWith(compareBy({ it.top }, { it.left }))
 
         // ── A. Облачка-блоки: строку приклеиваем, если она рядом по вертикали
         //       и по горизонтали (это уровень «бокс детектора»).
@@ -207,13 +245,17 @@ class ReadEngine {
             }
             val clean = cleanSpeech(text)
             if (clean.isBlank()) continue
+            val rowsCount = maxOf(1, block.size)
+            val blockTop = block.minOf { it.top }
+            val blockBottom = block.maxOf { it.bottom }
             linesOfBlocks.add(Row(
                 text = clean,
                 left = block.minOf { it.left },
-                top = block.minOf { it.top },
+                top = blockTop,
                 right = block.maxOf { it.right },
-                bottom = block.maxOf { it.bottom },
-                lh = block.maxOf { it.bottom } - block.minOf { it.top },
+                bottom = blockBottom,
+                lh = (blockBottom - blockTop) / rowsCount,
+                rows = rowsCount,
             ))
         }
         if (linesOfBlocks.isEmpty()) return emptyList()
@@ -230,14 +272,23 @@ class ReadEngine {
             }
             if (bestIndex >= 0) {
                 val b = bubbles[bestIndex]
+                val mergedTop = min(b.top, line.top)
+                val mergedBottom = max(b.bottom, line.bottom)
+                val mergedRows = b.rows + maxOf(1, line.rows)
                 bubbles[bestIndex] = Row(
                     text = joinText(b.text, line.text),
-                    left = min(b.left, line.left), top = min(b.top, line.top),
-                    right = max(b.right, line.right), bottom = max(b.bottom, line.bottom),
-                    lh = min(b.lh, line.h),
+                    left = min(b.left, line.left), top = mergedTop,
+                    right = max(b.right, line.right), bottom = mergedBottom,
+                    lh = (mergedBottom - mergedTop) / mergedRows,
+                    rows = mergedRows,
                 )
             } else {
-                bubbles.add(Row(line.text, line.left, line.top, line.right, line.bottom, line.h))
+                // «Типичная высота» — span/rows, как и при склейке: иначе блок
+                // из двух строк не принимал третью (отношение высот > 1,8) и
+                // облачко рвалось на два текста.
+                val r = maxOf(1, line.rows)
+                bubbles.add(Row(line.text, line.left, line.top, line.right, line.bottom,
+                    line.h / r, r))
             }
         }
 
@@ -269,7 +320,8 @@ class ReadEngine {
                     text = if (above) joinText(orphan.text, b.text) else joinText(b.text, orphan.text),
                     left = min(b.left, orphan.left), top = min(b.top, orphan.top),
                     right = max(b.right, orphan.right), bottom = max(b.bottom, orphan.bottom),
-                    lh = b.lh,
+                    lh = (max(b.bottom, orphan.bottom) - min(b.top, orphan.top)) / (b.rows + orphan.rows),
+                    rows = b.rows + orphan.rows,
                 )
                 orphans = ArrayList(orphans)
                 orphans[targetIndex] = mergedRow
@@ -304,7 +356,9 @@ class ReadEngine {
 
         return ordered.map { r ->
             JSONObject()
-                .put("text", r.text)
+                // Края чистим в самом конце: обрывок звукового эффекта
+                // приклеивается уже при склейке, после первых чистых строк.
+                .put("text", trimJunkEdges(r.text))
                 .put("left", r.left).put("top", r.top)
                 .put("right", r.right).put("bottom", r.bottom)
         }

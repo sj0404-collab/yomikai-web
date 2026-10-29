@@ -198,6 +198,26 @@ function fixLookalikesForced(raw) {
 }
 
 /** Текст для синтезатора: убрать переносы, двойников, склеить «в д а ль». */
+/**
+ * Мусорные края реплики: детектор иногда даёт «строку» из звукового эффекта, и
+ * её обрывок приклеивается к началу честной реплики — «*ь*.*о НЕ УВЕРЕН…»
+ * (нашлось прогоном в эмуляторе APKForge, 29.10). Правило узкое: снимаем
+ * крайние слова, где букв 1–2 и знаков (не букв) не меньше двух — «*ь*.*о»,
+ * «~х~», «{\"а\"». Обычные кавычки и тире (««В БУДУЩЕМ», «— ДА») не трогаем:
+ * у них знак один.
+ */
+function trimJunkEdges(text) {
+  const tokens = String(text || '').split(' ').filter(Boolean);
+  const junk = (t) => {
+    const letters = (t.match(/\p{L}/gu) || []).length;
+    const marks = (t.match(/[^\p{L}\p{N}]/gu) || []).length;
+    return letters <= 2 && marks >= 2;
+  };
+  while (tokens.length > 1 && junk(tokens[0])) tokens.shift();
+  while (tokens.length > 1 && junk(tokens[tokens.length - 1])) tokens.pop();
+  return tokens.join(' ');
+}
+
 function cleanSpeech(raw) {
   let text = String(raw || '')
     .replace(/(?<=\p{L})\s*-\s*(?=\p{L})/gu, '')
@@ -207,7 +227,8 @@ function cleanSpeech(raw) {
   for (let k = 0; k < 3; k++) {
     text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => m.replace(/\s+/g, ''));
   }
-  return text.trim();
+  // Обрывок звукового эффекта перед/после реплики — не часть текста.
+  return trimJunkEdges(text).trim();
 }
 
 /* ───────────────────────── 4c. Язык: словарь и фильтр мусора ─────────────────────────
@@ -2597,6 +2618,22 @@ function joinBrokenWord(text, next) {
 function bubblesOf(group, rtl, R) {
   const bubbleGap = R.bubbleGap;
   if (!group.length) return [];
+  // ── Тонкие полоски-обрывки убираем ДО склейки (эмулятор Forge, 29.10) ─────
+  // На странице манги детектор иногда отдаёт рамку высотой в 2–3 пикселя
+  // поперёк картинки. Текст из неё — мусор («так что сё выио шблтоо»), а её
+  // высота (0,002 страницы против 0,028 у настоящей строки) портила «типичную
+  // высоту строки» в mergeBubbles: соседняя честная строка переставала
+  // склеиваться, и ОДНА реплика выходила ДВУМЯ текстами — ровно то, что
+  // запрещено. Порог мягкий: 0,35 от медианной высоты строки страницы.
+  // Фильтр включается ТОЛЬКО на настоящей странице (>= 4 строк): иначе он
+  // съедал мелкие титры рядом с крупным заголовком — их всего две строки, и
+  // медиана «высотой строки» считала заголовок.
+  if (group.length >= 4) {
+    const heights = group.map(r => Math.max(r.bottom - r.top, 0)).sort((a, b) => a - b);
+    const medianH = heights[Math.floor(heights.length / 2)];
+    const keep = medianH > 0 ? group.filter(r => (r.bottom - r.top) >= medianH * 0.35) : group;
+    if (keep.length) group = keep;
+  }
   const sorted = group.slice().sort((a, b) => a.top - b.top || a.left - b.left);
   const blocks = [];
   for (const rg of sorted) {
@@ -2688,11 +2725,18 @@ function bubblesOf(group, rtl, R) {
       text += t;
     });
     text = cleanSpeech(text);
-    return {
+    const box = {
       text,
       left: Math.min(...block.map(r => r.left)), top: Math.min(...block.map(r => r.top)),
       right: Math.max(...block.map(r => r.right)), bottom: Math.max(...block.map(r => r.bottom)),
     };
+    // rows — сколько текстовых строк внутри блока; по нему считается средняя
+    // высота ОДНОЙ строки (lh). Минимум из высот для этого не годился: одна
+    // тонкая строка навсегда занижала lh, и следующие строки облачка уже не
+    // приклеивались (та же жалоба «реплика разрезана»).
+    box.rows = Math.max(1, rows.length);
+    box.lh = (box.bottom - box.top) / box.rows;
+    return box;
   });
   // Строки одного облачка — в ОДНУ реплику, обрывки — в соседнюю (как в АПК:
   // mergeBubbles + absorbOrphans).
@@ -2755,16 +2799,26 @@ function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
     }
     if (bestIndex >= 0) {
       const b = result[bestIndex];
-      const lineH = line.bottom - line.top;
-      result[bestIndex] = {
+      const bRows = Math.max(1, b.rows || 1), lRows = Math.max(1, line.rows || 1);
+      const merged = {
         text: joinBubbleText(b.text, line.text),
         left: Math.min(b.left, line.left), top: Math.min(b.top, line.top),
         right: Math.max(b.right, line.right), bottom: Math.max(b.bottom, line.bottom),
-        // Типичная высота строки внутри облачка — по ней и решается, можно ли
-        // приклеить следующую строку.
-        lh: Math.min(b.lh || (b.bottom - b.top), lineH),
+        rows: bRows + lRows,
       };
-    } else result.push({ ...line, lh: line.bottom - line.top });
+      // Средняя высота ОДНОЙ строки внутри облачка — по ней решается, можно ли
+      // приклеить следующую. Средняя, а не минимум: минимум занижала любая
+      // случайно тонкая строка, и облачко рвалось на части.
+      merged.lh = (merged.bottom - merged.top) / merged.rows;
+      result[bestIndex] = merged;
+    } else {
+      // Строка (или блок) попадает в результат с ТОЙ ЖЕ «типичной высотой»,
+      // что и при склейке: span/rows. Раньше здесь lh = вся высота блока, и
+      // блок из двух строк уже не принимал третью (отношение высот > 1,8) —
+      // облачко рвалось на два текста.
+      const rows = Math.max(1, line.rows || 1);
+      result.push({ ...line, rows, lh: (line.bottom - line.top) / rows });
+    }
   }
   return result;
 }

@@ -27,6 +27,23 @@ fun main() {
     println("реплик: ${plan.size}")
     plan.forEachIndexed { i, o -> println("  ${i + 1}. ${o.optString("text")}") }
 
+    // ── Тонкая полоска-обрывок от детектора (нашлось в эмуляторе APKForge) ──
+    // Детектор отдал рамку высотой 0,002 страницы поперёк картинки с мусорным
+    // текстом. Раньше её высота занижала «типичную высоту строки», и вторая
+    // строка первого облачка НЕ приклеивалась — одна реплика выходила двумя
+    // текстами, а в первый кусок попадал мусор.
+    val withSliver = story + listOf(
+        L("так что сё выио шблтоо", 0.13, 0.1290, 0.86, 0.1310),   // толщина 0,002
+    )
+    val planSliver = e.plan(withSliver, R)
+    println("с полоской-обрывком реплик: ${planSliver.size}")
+    planSliver.forEachIndexed { i, o -> println("  ${i + 1}. ${o.optString("text")}") }
+    val okSliver = planSliver.size == 3
+        && planSliver.none { it.optString("text").contains("шблтоо") }
+        && planSliver[1].optString("text").contains("ПРИБЫЛА")
+    println(if (okSliver) "ПОЛОСКА-ОБРЫВОК: реплика не разрезана и мусор не попал"
+          else "ПОЛОСКА-ОБРЫВОК: ПЛОХО — реплика разрезана или мусор в тексте")
+
     // Полосы: страница 4000 px, экран 1000 px.
     println("полос (4000/1000): " + e.bands(4000.0, 1000.0, R).length())
     println("полос (страница по экрану): " + e.bands(800.0, 1000.0, R).length())

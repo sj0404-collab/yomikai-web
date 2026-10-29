@@ -563,6 +563,12 @@ const Reader = {
         fresh = readingOrder(res.regions, rtl, true, RULES);
         OCR.readPlan = 'page';
       }
+      // Края реплик чистим ЗДЕСЬ, на выходе распознавания: обрывок звукового
+      // эффекта приклеивается к началу текста уже при склейке строк, то есть
+      // позже первой чистки («*ь*.*о НЕ УВЕРЕН…» — эмулятор APKForge, 29.10).
+      fresh = fresh
+        .map(l => ({ ...l, text: trimJunkEdges(String(l.text || '')) }))
+        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -1660,9 +1666,21 @@ const TTS = {
       } catch (e) { console.warn('конвейер: детектор не сработал', e); det = null; }
     }
     if (first) {
-      $('#playStatus').textContent = '';
-      this.queue.push({ text: first, top: 0, bottom: 0 });
-      this.step();                    // голос пошёл, пока идёт распознавание полосы
+      // Первую реплику конвейера прогоняем через ТОТ ЖЕ фильтр, что и остальные
+      // строки страницы (cleanLines): иначе в чтение пролезало то, что при
+      // обычном распознавании отбрасывается — например, обрывок титульной
+      // надписи с ошибкой в слове (эмулятор Forge, 29.10: первым звучало
+      // «Как прожить жизнь, оддучиг старшей сестрой тирана.»).
+      let firstText = first;
+      try {
+        const cleaned = await cleanLines([{ text: first, top: 0, bottom: 0.002, confidence: 1 }]);
+        firstText = cleaned.length ? String(cleaned[0].text || '').trim() : '';
+      } catch (e) { firstText = first; }
+      if (firstText && (firstText.match(/\p{L}/gu) || []).length >= 2) {
+        $('#playStatus').textContent = '';
+        this.queue.push({ text: firstText, top: 0, bottom: 0 });
+        this.step();                  // голос пошёл, пока идёт распознавание полосы
+      }
     }
     $('#scanBadge').classList.add('on');
     $('#scanBadge').textContent = 'Распознаём… стр. ' + (i + 1);
@@ -1843,7 +1861,10 @@ async function cleanLines(lines) {
   const keyOf = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   const out = [];
   for (const ln of lines) {
-    const text = Words.ready ? Words.polish(ln.text, RULES.junkRatio, ln.confidence) : ln.text;
+    // Мусорные края («*ь*.*о НЕ УВЕРЕН…») снимаем ПОСЛЕ словаря: обрывок
+    // звукового эффекта приклеивается к реплике уже при склейке строк.
+    let text = Words.ready ? Words.polish(ln.text, RULES.junkRatio, ln.confidence) : ln.text;
+    text = trimJunkEdges(text || '');
     if (!text) continue;
     // Один и тот же текст в том же месте — дубль от полос прежней версии.
     const k = keyOf(text);
