@@ -218,12 +218,31 @@ function trimJunkEdges(text) {
   return tokens.join(' ');
 }
 
+/**
+ * Регистр внутри капса. Манга почти всегда набрана заглавными, но модель
+ * иногда отдаёт одну букву строчной: «Вс ШЕПЧЕТ», «ПОМОЖЕТ лИ эТо», «ДУХи»
+ * (нашлось прогоном в эмуляторе 29.10). Словарь такие слова не узнаёт, а
+ * читалка произносит их сбивчиво. Правило: если в строке капса больше 60 %,
+ * поднимаем регистр всей строки. Смешанную латиницу не трогаем — это не капс.
+ */
+function fixCaseInCaps(text) {
+  const src = String(text || '');
+  let up = 0, low = 0;
+  for (const ch of src) {
+    if (!/[A-Za-zА-Яа-яЁё]/.test(ch)) continue;
+    if (ch === ch.toUpperCase() && ch !== ch.toLowerCase()) up++; else low++;
+  }
+  if (!up || up / (up + low) <= 0.6) return src;
+  return src.replace(/[А-Яа-яЁё]+/g, (w) => (w === w.toUpperCase() ? w : w.toUpperCase()));
+}
+
 function cleanSpeech(raw) {
   let text = String(raw || '')
     .replace(/(?<=\p{L})\s*-\s*(?=\p{L})/gu, '')
     .replace(/\s+/g, ' ')
     .trim();
   text = isLookalikeOnly(text) ? fixLookalikesForced(text) : fixLookalikes(text);
+  text = fixCaseInCaps(text);
   for (let k = 0; k < 3; k++) {
     text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => m.replace(/\s+/g, ''));
   }
@@ -1264,6 +1283,58 @@ async function recProbs(cropCanvas, sess) {
 }
 
 /** Жадный разбор выхода: самый вероятный класс на кадр (как было раньше). */
+/**
+ * Обрезать кроп строки до полосы с чернилами.
+ *
+ * Детектор часто обводит рамку выше строки, и в кроп попадает обрезок соседней
+ * строки сверху или снизу (замер 29.10 на настоящей странице: над «ПОДОЙДЕТ»
+ * в кропе был хвост «5 ЙЕН», и модель читала два текста сразу). Экономия
+ * очевидная: на 45 строках из 27.10 CER падает с 3,6 % до 2,2 %, на трудной
+ * странице dense — с 12,7 % до 9,2 % (lab/rec_eval.py, подготовка trim-cubic).
+ *
+ * Правило осторожное: ищем полосы тёмных строк, берём самую высокую и
+ * оставляем по 6 % поля — так не срезаются выносные элементы («Й», «Ц», «Д»).
+ */
+function trimCropToInk(canvas) {
+  const w = canvas.width, h = canvas.height;
+  if (w < 8 || h < 10) return canvas;
+  let px;
+  try {
+    px = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  } catch (e) { return canvas; }
+  const need = Math.max(2, Math.round(w * 0.01));      // сколько тёмного считается чернилами
+  const rowInk = new Uint8Array(h);
+  for (let y = 0; y < h; y++) {
+    let cnt = 0;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const l = (px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114);
+      if (l < 128) { if (++cnt >= need) { rowInk[y] = 1; break; } }
+    }
+  }
+  // склеиваем соседние строки в полосы (разрыв до 2 px — та же буква)
+  const bands = [];
+  let start = -1, prev = -1;
+  for (let y = 0; y < h; y++) {
+    if (!rowInk[y]) continue;
+    if (start < 0) { start = y; }
+    else if (y - prev > 2) { bands.push([start, prev]); start = y; }
+    prev = y;
+  }
+  if (start >= 0) bands.push([start, prev]);
+  if (!bands.length) return canvas;
+  const [a, b] = bands.reduce((m, t) => ((t[1] - t[0]) > (m[1] - m[0]) ? t : m), bands[0]);
+  if (b - a < 6) return canvas;                         // это не строка, а точка
+  if (b - a >= h - 2) return canvas;                    // строка и так на весь кроп
+  const pad = Math.max(1, Math.round((b - a) * 0.06));
+  const top = Math.max(0, a - pad), bottom = Math.min(h, b + pad + 1);
+  if (bottom - top >= h - 1) return canvas;
+  const out = makeCanvas(w, bottom - top);
+  out.getContext('2d', { willReadFrequently: true })
+    .drawImage(canvas, 0, top, w, bottom - top, 0, 0, w, bottom - top);
+  return out;
+}
+
 async function decodeCrop(cropCanvas, sess) {
   const res = await recProbs(cropCanvas, sess);
   if (!res) return ['', 0];
@@ -2230,10 +2301,13 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     c.getContext('2d', { willReadFrequently: true })
       .drawImage(canvas, ln.left, ln.top, w, h, 0, 0, w, h);
     crops++;
-    const ckey = _cropKey(c, wide, R);
+    // Перед распознаванием убираем из кропа обрезки соседних строк (см.
+    // trimCropToInk): без этого модель читала два текста сразу.
+    const trimmed = R.trimCrop === false ? c : trimCropToInk(c);
+    const ckey = _cropKey(trimmed, wide, R);
     const hit = textCacheGet(ckey);
     if (hit) return hit;
-    let [text, conf] = await decodeBetter(c, R, { wide });
+    let [text, conf] = await decodeBetter(trimmed, R, { wide });
     let bestScore = textScore(text, conf);
     // Титульная строка «жизнь, будучи старшей» на кропе по боксу строки читается
     // как «оддучив»: детектор обрезает низ строки, и CTC теряет «б» и «у». Точный
@@ -3171,7 +3245,9 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   joinSplitBubbles(result);
   // Финальная чистка — ПОСЛЕ страховки: обрывок, приклеенный спасателем,
   // приходит уже после первой чистки («…ПОДНОШЕНИЯ? ж с л»).
-  for (const l of result) l.text = trimTailFragments(stripJunkWords(l.text));
+  // Регистр — здесь же: сборка реплик идёт мимо cleanSpeech, поэтому «ОНА Вс
+  // ШЕПЧЕТ» доходило до экрана как есть (прогон 29.10).
+  for (const l of result) l.text = fixCaseInCaps(trimTailFragments(stripJunkWords(l.text)));
   const kept = result.filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
   result.length = 0;
   result.push(...kept);
@@ -3329,12 +3405,32 @@ function normText(s) {
  * осмысленный регион, которого нет в готовых репликах, приклеиваем к
  * ближайшей по вертикали (и только если он рядом, не дальше 18 % страницы).
  */
+/**
+ * Мусорный обрывок: 1–3 буквы И низкая уверенность модели.
+ *
+ * Детектор ставит рамки и на мелкие пятна между облачками, а распознаватель
+ * выдаёт из них «г.н» (conf 0.31), «Bс» (0.28), « ж с л» (0.44), «, ло оо.»
+ * (0.58 — два огрызка по две буквы). Настоящие короткие реплики звучат уверенно:
+ * «ОНА» 0.98, «НЕТ?» 0.99, «ДА,» 0.72. Поэтому в спасатель такие обрывки не
+ * пускаем: раньше они приклеивались к соседней реплике хвостом «…ЛО ОО.».
+ */
+function isJunkFragment(text, conf) {
+  const t = String(text || '');
+  const letters = (t.match(/\p{L}/gu) || []).length;
+  if (!letters && !(conf > 0)) return true;
+  const tokens = t.split(' ').filter(Boolean);
+  const tinyPairs = tokens.length >= 2
+    && tokens.every(w => (w.match(/\p{L}/gu) || []).length <= 2);
+  return (conf < 0.6) && (letters <= 3 || tinyPairs);
+}
+
 function rescueLostLines(result, source, R) {
   if (!result.length) return;
   const covered = result.map(l => normText(l.text));
   for (const r of source) {
     const t = String(Words.polish(r.text, R.junkRatio, r.confidence) || '').trim();
     if (!t) continue;
+    if (isJunkFragment(t, r.confidence)) continue;      // «г.н», «Bс», «, ло оо.»
     const key = normText(t);
     if (key.length < 3) continue;
     // Уже внутри реплики? Сравниваем ПО СЛОВАМ, а не по префиксу: OCR на

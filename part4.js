@@ -1873,6 +1873,8 @@ async function cleanLines(lines) {
     // звукового эффекта приклеивается к реплике уже при склейке строк.
     let text = Words.ready ? Words.polish(ln.text, RULES.junkRatio, ln.confidence) : ln.text;
     text = trimJunkEdges(text || '');
+    // Регистр: «ОНА Вс ШЕПЧЕТ» → «ОНА ВС ШЕПЧЕТ» (см. fixCaseInCaps).
+    text = fixCaseInCaps(text);
     if (!text) continue;
     // Один и тот же текст в том же месте — дубль от полос прежней версии.
     const k = keyOf(text);
