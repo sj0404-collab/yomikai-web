@@ -142,7 +142,19 @@ class ReadEngine {
         val gap = b.top - a.bottom
         if (gap < -a.h * 0.6 || gap > max(a.h, b.h) * max(1.2, R.bubbleGap)) return false
         if (a.h > a.w * 3 || b.h > b.w * 3) return false     // вертикальные колонки — не строки
-        if (max(a.lh, b.lh) / min(a.lh, b.lh) > R.mergeHeightRatio) return false
+        val heightOk = max(a.lh, b.lh) / min(a.lh, b.lh) <= R.mergeHeightRatio
+        if (!heightOk) {
+            // Высота рамки — плохой признак кегля: детектор обводит «ЯРАССЧИ-» по
+            // заглавным, а «ТbВАЮ» под ним — по строчным, и облачко рвалось на
+            // реплики. Сравниваем средний шаг буквы (ширина / число букв); порог
+            // мягкий, поэтому «заголовок + мелкие титры» остаются разными.
+            fun adv(x: Row): Double = x.w / max(1, x.text.count { it.isLetterOrDigit() }).toDouble()
+            val aAdv = adv(a)
+            val bAdv = adv(b)
+            if (aAdv <= 0.0 || bAdv <= 0.0) return false
+            if (max(aAdv, bAdv) / min(aAdv, bAdv) > 1.35) return false
+            if (min(a.h, b.h) < max(a.h, b.h) * 0.3) return false
+        }
         val mergedTop = min(a.top, b.top)
         val mergedBottom = max(a.bottom, b.bottom)
         if (mergedBottom - mergedTop > R.maxBlockHeight) return false
@@ -354,7 +366,19 @@ class ReadEngine {
             })
         }
 
-        return ordered.map { r ->
+        // Реплика-мусор («е ой», «оооо») в озвучку не идёт; настоящие короткие
+        // реплики («ДА.», «НЕТ!») проходят — в них слова, а не обрывки.
+        val realOneLetter = setOf('а', 'и', 'в', 'с', 'к', 'у', 'о', 'я')
+        fun junkReplica(text: String): Boolean {
+            val letters = text.count { it.isLetter() }
+            if (letters == 0) return true
+            if (Regex("(\\p{L})\\1\\1", RegexOption.IGNORE_CASE).containsMatchIn(text)) return true
+            if (letters > 12) return false
+            return text.split(Regex("[^\\p{L}]+")).any { w ->
+                w.length == 1 && w[0].lowercaseChar() !in realOneLetter
+            }
+        }
+        return ordered.filter { r -> !junkReplica(r.text) }.map { r ->
             JSONObject()
                 // Края чистим в самом конце: обрывок звукового эффекта
                 // приклеивается уже при склейке, после первых чистых строк.

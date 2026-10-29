@@ -2459,7 +2459,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.41';
+const VERSION = 'v1.9.42';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3066,6 +3066,99 @@ function cleanSpeech(raw) {
   }
   // Обрывок звукового эффекта перед/после реплики — не часть текста.
   return trimJunkEdges(text).trim();
+}
+
+/**
+ * Мусорная «реплика»: обрывок, который детектор принял за строку.
+ *
+ * Признаки (проверены на настоящей странице манги, data/real/dense.jpg):
+ *  • букв меньше четырёх («е ой» — 3 буквы);
+ *  • есть однобуквенное «слово», которого в русском не бывает: в языке это
+ *    только а, и, в, с, к, у, о, я («е» — не слово, это ошибка распознавания).
+ * Настоящие короткие реплики («ДА.», «НЕТ!») под правило не попадают.
+ */
+const REAL_ONE_LETTER = new Set(['а', 'и', 'в', 'с', 'к', 'у', 'о', 'я']);
+
+// Короткие слова, которые остаются, даже если словарь их не знает: междометия
+// и частицы, которых часто нет в частотных списках, но в манге они живые.
+const SHORT_OK = new Set(['да', 'не', 'ни', 'но', 'он', 'мы', 'вы', 'ты', 'же', 'ли', 'то',
+  'ах', 'ох', 'эй', 'ой', 'ой', 'ну', 'вот', 'эх', 'ух', 'ага', 'это']);
+
+function isJunkReplica(text) {
+  const t = String(text || '');
+  const letters = (t.match(/\p{L}/gu) || []).length;
+  if (!letters) return true;
+  if (/(\p{L})\1\1/iu.test(t)) return true;      // «оооо»
+  // Однобуквенное «слово», которого в русском нет, — признак мусора, но
+  // только в КОРОТКОЙ реплике: в длинной это может быть случайная буква
+  // («строка абзаца 10» после правки похожих букв), и терять из-за неё всю
+  // реплику нельзя (поймано test-columns.cjs).
+  if (letters > 12) return false;
+  const words = t.split(/[^\p{L}]+/u).filter(Boolean);
+  return words.some(w => w.length === 1 && !REAL_ONE_LETTER.has(w.toLowerCase()));
+}
+
+/**
+ * Срезает хвост-обрывок после конца фразы: «…ДЛЯ ПОДНОШЕНИЯ? ж с л» →
+ * «…ДЛЯ ПОДНОШЕНИЯ?».
+ *
+ * Так выглядят пометки и штрихи рядом с облачком: распознавание отдаёт их
+ * одно-двухбуквенными «словами», и они приклеивались к настоящей реплике.
+ * Настоящий текст после точки-вопроса не состоит из одних обрывков, поэтому
+ * правило узкое: срезаем только если после последнего знака конца фразы нет
+ * ни одного слова длиннее двух букв.
+ */
+function trimTailFragments(text) {
+  const t = String(text || '').trim();
+  if (!t) return t;
+  const words = t.split(/\s+/);
+  if (words.length < 2) return t;
+  // Без словаря не режем: настоящие короткие слова («НО», «ЛИ», «ДА») не отличить
+  // от обрывков, и реплика потеряет смысл. Лучше оставить лишнее.
+  if (typeof Words === 'undefined' || !Words.ready) return t;
+  // Срезаем хвостовые обрывки: слова из 1–2 букв, которых нет в словаре
+  // русского. Настоящие короткие слова («НО», «ЛИ», «НЕ», «ЖЕ») в словаре
+  // есть и остаются — «…ПОМОЖЕТ ЛИ ЭТО, НО…» не портится.
+  let cut = 0;
+  for (let i = words.length - 1; i >= 1; i--) {
+    const core = words[i].replace(/[^\p{L}]+/gu, '');
+    if (core.length > 2) break;                        // настоящее слово — стоп
+    if (core.length && typeof Words !== 'undefined' && Words.ready && Words.inDict(core)) break;
+    if (!core.length && !/[.!?…]$/.test(words[i])) break;
+    cut++;
+  }
+  if (!cut) return t;
+  const kept = words.slice(0, words.length - cut).join(' ').replace(/[\s.,;:—-]+$/u, '');
+  if (!kept) return t;
+  const tail = (t.match(/[.!?…]+$/) || [''])[0];
+  return /[.!?…]$/.test(kept) || !tail ? kept : kept + tail;
+}
+
+/**
+ * Убирает из собранной реплики мусорные слова-обрывки, не трогая остальное:
+ * «оооо ПОЖАЛУЙСТА ПОЗВОЛЬ МНЕ … ЕДЫ е ой» → «ПОЖАЛУЙСТА ПОЗВОЛЬ МНЕ … ЕДЫ».
+ *
+ * Признак слова-мусора: 3+ одинаковые буквы подряд («оооо») либо буква,
+ * которой нет в русском словаре, в слове из 1–2 букв. Настоящие слова не
+ * страдают: «ДА», «НЕТ», «ОН», «И» — либо словарные, либо из разрешённых.
+ */
+function stripJunkWords(text) {
+  const t = String(text || '');
+  const words = t.split(' ');
+  const keep = words.filter(w => {
+    const core = w.replace(/[^\p{L}]+/gu, '');
+    if (!core) return true;
+    if (/([\p{L}])\1\1/iu.test(core)) return false;            // «оооо»
+    // Короткое (1–2 буквы) слово, которого нет в словаре русского, — обрывок
+    // от распознавания: «ло», «оо». Настоящие короткие слова («да», «не»,
+    // «он») есть в словаре, поэтому не страдают.
+    if (core.length <= 2 && typeof Words !== 'undefined' && Words.ready && !Words.inDict(core)) {
+      return SHORT_OK.has(core.toLowerCase());
+    }
+    return true;
+  });
+  const out = keep.join(' ').replace(/\s+/g, ' ').trim();
+  return out;
 }
 
 /* ───────────────────────── 4c. Язык: словарь и фильтр мусора ─────────────────────────
@@ -5110,6 +5203,15 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
           right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
           confidence: conf,
+          // Рамка детектора, внутри которой нашлась строка. Это ГЛАВНЫЙ признак
+          // облачка: строки одного пузыря лежат в одной рамке. Без него строки
+          // склеивались по близости и пузыри слипались («ЯРАССЧИ-» + «ОНА ВСЁ
+          // ЕЩЁ» → одна реплика), а обрывки-мусор приклеивались к настоящей
+          // реплике («оооо … ЕДЫ е ой»).
+          box: {
+            left: box.left / W, top: (y0 + box.top) / imgCanvas.height,
+            right: box.right / W, bottom: (y0 + box.bottom) / imgCanvas.height,
+          },
         });
       }
     }
@@ -5147,7 +5249,10 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     // («… будучи старшей жизнь, Оцачит старшей сестрой тирана»), а не более
     // точное чтение: такую замену не берём.
     if (lettersOf(alt.items.map(i => i.text)) > letters * 1.3) continue;
-    if (qualityOf(alt.items.map(i => i.text)) > qualityOf(firstTexts)) entry.items = alt.items;
+    if (qualityOf(alt.items.map(i => i.text)) > qualityOf(firstTexts)) {
+      for (const it of alt.items) it.box = entry.items[0] && entry.items[0].box;
+      entry.items = alt.items;
+    }
   }
   for (const entry of byBox) for (const item of entry.items) regions.push(item);
 
@@ -5180,8 +5285,19 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     }
   }
 
+  // ── Служебные полосы кадра ────────────────────────────────────────────────
+  // На телефоне в кадр попадает не только страница: сверху шапка читалки
+  // («Girl That Can …», «4 из 17 · Манга · Справа налево»), снизу панель
+  // («Текст страницы», номер страницы). Детектор честно находил там текст, и
+  // реплика «Текст страницы» уходила в озвучку (живой прогон 29.10). Полоса
+  // считается служебной, только если она ПЛОСКАЯ (однотонная заливка без
+  // рисунка) и прижата к верхнему/нижнему краю кадра — поэтому тёмная панель
+  // манги у края страницы не пострадает: у неё есть фактура.
+  const chrome = chromeBands(src, R);
+  const clean = regions.filter(r => !inChrome(r, chrome));
+
   return {
-    regions, boxes: det.boxes.length,
+    regions: clean, chrome, boxes: det.boxes.length,
     ms: Math.round(performance.now() - t0),
     detMs, recMs: Math.round(performance.now() - t1), crops,
     band: band ? { y0, y1 } : null,
@@ -5194,6 +5310,76 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     wordsTried: DECODE_STATS.wordsTried,
     wordsFixed: DECODE_STATS.wordsFixed,
   };
+}
+
+/**
+ * Есть ли в полосе кадра служебная зона (однотонная заливка у края)?
+ *
+ * Возвращает {top, bottom} в долях высоты кадра: строки, целиком попавшие в
+ * эти зоны, в чтение не идут. Смотрим только верхние 18 % и нижние 22 %
+ * кадра и только «плоские» строки: разброс яркости в такой строке мал —
+ * значит там заливка панели, а не рисунок. Порог 0,055 подобран по кадру
+ * data/real/dense.jpg (тёмная тема) — у страницы манги разброс в 6–10 раз
+ * больше на любой строке с рисунком.
+ */
+function chromeBands(src, R) {
+  const out = { top: 0, bottom: 1, found: false };
+  if (R.trimChrome === false) return out;
+  try {
+    const SW = 120;
+    const k = SW / src.width;
+    const w = SW, h = Math.max(16, Math.round(src.height * k));
+    const c = makeCanvas(w, h);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0, w, h);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const flat = new Uint8Array(h);
+    for (let y = 0; y < h; y++) {
+      let sum = 0, sum2 = 0;
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const v = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) / 255;
+        sum += v; sum2 += v * v;
+      }
+      const mean = sum / w;
+      const sd = Math.sqrt(Math.max(0, sum2 / w - mean * mean));
+      // плоская строка: почти нет разброса и это либо тёмная заливка, либо
+      // светлая; серый «туман» страницы сюда не попадает
+      flat[y] = sd < 0.055 && (mean < 0.35 || mean > 0.82) ? 1 : 0;
+    }
+    let flatCount = 0;
+    for (let y = 0; y < h; y++) if (flat[y]) flatCount++;
+    // Пустой/однотонный кадр (белый лист, заглушка, тестовый холст) — это не
+    // шапка с подвалом: служебных полос там нет, иначе из чтения выпадала вся
+    // страница (поймано test-rescan.cjs).
+    if (flatCount > h * 0.5) return out;
+    let t = 0;
+    while (t < Math.floor(h * 0.18) && flat[t]) t++;
+    let b = h - 1;
+    while (b > h - 1 - Math.floor(h * 0.22) && flat[b]) b--;
+    // Полоса служебная только если она заметная (≥ 2,5 % кадра), иначе это
+    // просто пустая кромка страницы.
+    // Полосы обрезки не должны съесть сам рисунок: между ними обязано
+    // остаться не меньше 45 % кадра.
+    let topCut = t >= h * 0.025 ? t / h : 0;
+    let bottomCut = (h - 1 - b) >= h * 0.025 ? (b + 1) / h : 1;
+    if (bottomCut - topCut < 0.45) return out;
+    if (topCut > 0) { out.top = topCut; out.found = true; }
+    if (bottomCut < 1) { out.bottom = bottomCut; out.found = true; }
+    return out;
+  } catch (e) { return out; }
+}
+
+/** Строка целиком внутри служебной полосы кадра? */
+function inChrome(r, chrome) {
+  if (!chrome || !chrome.found) return false;
+  const mid = (r.top + r.bottom) / 2;
+  if (chrome.top > 0 && r.bottom <= chrome.top + 0.004) return true;
+  if (chrome.bottom < 1 && r.top >= chrome.bottom - 0.004) return true;
+  // Строка, у которой центр внутри полосы, тоже служебная (номер страницы).
+  if (chrome.top > 0 && mid < chrome.top) return true;
+  if (chrome.bottom < 1 && mid > chrome.bottom) return true;
+  return false;
 }
 
 /**
@@ -5577,7 +5763,10 @@ function bubblesOf(group, rtl, R) {
   });
   // Строки одного облачка — в ОДНУ реплику, обрывки — в соседнюю (как в АПК:
   // mergeBubbles + absorbOrphans).
-  return orderBubbles(absorbOrphans(mergeBubbles(lines, bubbleGap, R.mergeHeightRatio)), rtl);
+  const merged = orderBubbles(absorbOrphans(mergeBubbles(lines, bubbleGap, R.mergeHeightRatio)), rtl);
+  // Реплика-мусор в озвучку не идёт: «е ой», «Тг. чв». Настоящие короткие
+  // реплики («ДА», «НЕТ!») остаются — в них слова из словаря, а не обрывки.
+  return merged.filter(b => !isJunkReplica(b.text));
 }
 
 /* Склейка переноса: дефис/тире — без пробела. */
@@ -5616,7 +5805,24 @@ function sameBubble(a, b, bubbleGap, mergeHeightRatio) {
   // отказывалась приклеить третью строку — облачко рвалось на части
   // («УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ,» / «ТАК ЧТО ЕЁ ВЫСОЧЕСТВО, ДОЛЖНО» / «БЫТЬ, ПРИБЫЛА.»).
   const aLine = a.lh || aH, bLine = b.lh || bH;
-  if (Math.max(aLine, bLine) / Math.min(aLine, bLine) > mergeHeightRatio) return false;
+  const heightOk = Math.max(aLine, bLine) / Math.min(aLine, bLine) <= mergeHeightRatio;
+  if (!heightOk) {
+    // Высота рамки — плохой признак кегля: детектор обводит «ЯРАССЧИ-» по
+    // заглавным (14‰), а «ТbВАЮ» под ним — по строчным (6‰), и облачко
+    // рвалось на реплики. Сравниваем СРЕДНИЙ ШАГ БУКВЫ (ширина / число букв):
+    // он от рамки не зависит. Требование мягкое (до 1,35) и работает только
+    // когда кегль явно тот же, поэтому «крупный заголовок + мелкие титры»
+    // по-прежнему остаются РАЗНЫМИ репликами (test-logic.cjs).
+    const adv = (x) => (x.right - x.left)
+      / Math.max(1, (String(x.text || '').match(/[\p{L}\p{N}]/gu) || []).length);
+    const aAdv = adv(a), bAdv = adv(b);
+    if (!aAdv || !bAdv) return false;
+    const sameSize = Math.max(aAdv, bAdv) / Math.min(aAdv, bAdv) <= 1.35;
+    // И рамка не должна быть в разы меньше: тонкая полоска-мусор («е ой»)
+    // отсеивается именно здесь — у неё шаг буквы втрое больше.
+    if (!sameSize) return false;
+    if (Math.min(aH, bH) < Math.max(aH, bH) * 0.3) return false;
+  }
   // Тот же потолок высоты, что и в bubblesOf: иначе вторая склейка
   // (mergeBubbles) снова собирала абзацы в блок на полстраницы.
   const mergedTop = Math.min(a.top, b.top), mergedBottom = Math.max(a.bottom, b.bottom);
@@ -5780,16 +5986,155 @@ function readingOrder(regions, rtl, onlyCyr, R) {
     .filter(r => /[\p{L}\p{N}]/u.test(r.text))
     .filter(r => !onlyCyr || isCyr(r.text));
   if (!source.length) return [];
+  // Рамки детектора для группировки НЕ годятся: на этой странице детектор
+  // обводит КАЖДУЮ строку отдельной рамкой (проверено дампом 29.10: 42 рамки на
+  // 42 строки), и группировка по рамке давала 42 «реплики» по строке. Поэтому
+  // реплики по-прежнему собираются по близости строк, а признак рамки (r.box)
+  // остаётся в записи для диагностики.
   const lines = splitPanels(source, rtl, 0).flatMap(p => bubblesOf(p, rtl, R));
+  // СНАЧАЛА геометрия, ПОТОМ язык: облачко, развалившееся на две реплики, надо
+  // собрать до словаря. Иначе словарь судит половинки и выбрасывает ту, где
+  // мало знакомых слов («ОНА ВСЁ СЩЕ» пропадала, оставался один «ШЕПЧЕТ» —
+  // живой прогон 29.10).
+  joinSplitBubbles(lines);
   // Языковая починка — на СОБРАННОЙ реплике (как KomaWords.finish): словарь
   // исправляет «ПОШЕВЕАИТЬСЯ» → «ПОШЕВЕЛИТЬСЯ» и выбрасывает строки, которых
   // в русском нет вовсе.
   const result = lines
     .map(l => ({ ...l, text: Words.polish(l.text, R.junkRatio, l.confidence) }))
+    .map(l => ({ ...l, text: trimTailFragments(stripJunkWords(l.text)) }))
     .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
   rescueLostLines(result, source, R);
+  joinSplitBubbles(result);
+  // Финальная чистка — ПОСЛЕ страховки: обрывок, приклеенный спасателем,
+  // приходит уже после первой чистки («…ПОДНОШЕНИЯ? ж с л»).
+  for (const l of result) l.text = trimTailFragments(stripJunkWords(l.text));
+  const kept = result.filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+  result.length = 0;
+  result.push(...kept);
   markLargeText(result, source);
+  // Порядок чтения — ОДИН раз для всей страницы. Панели (splitPanels) дают
+  // группировку, но их порядок между собой — «сверху вниз», и в нижней панели
+  // реплика справа вставала после левой (живой прогон 29.10: «ШЕПЧЕТ» читалась
+  // последней вместо первой в панели). Для манги внутри строки — справа налево.
+  return orderBubbles(result, rtl);
+}
+
+/**
+ * Последняя страховка: строки ОДНОГО облачка не должны остаться разными
+ * репликами — это прямой запрет («одну реплику нельзя резать на два текста»).
+ *
+ * Склейка по близости иногда не дотягивает: на странице data/real/dense.jpg
+ * облачко «ОНА ВСЁ ЕЩЁ / ШЕПЧЕТ» разваливалось на две реплики — нижняя строка
+ * чуть-чуть не прошла порог по высоте рамки. Здесь правило прямое и узкое:
+ *  • реплики стоят друг под другом (зазор не больше половины высоты строки —
+ *    между облачками всегда больше),
+ *  • по горизонтали накладываются хотя бы на 60 % узкой из двух,
+ *  • кегль тот же, вместе они ниже 22 % кадра (значит, это не проза).
+ * Соседние облачка в разных колонках под правило не попадают.
+ */
+function joinSplitBubbles(result) {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const list = result.slice().sort((a, b) => a.top - b.top);
+    outer:
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i], b = list[j];
+        const aw = a.right - a.left, bw = b.right - b.left;
+        // Края обеих реплик должны совпадать: строки одного облачка
+        // выровнены по колонке. Иначе склейка шла цепочкой по всей нижней
+        // панели и три соседних облачка становились одной «репликой» на 15
+        // слов (живой прогон 29.10, второй заход).
+        if (aw > 0.5 || bw > 0.5) continue;                       // не проза
+        if (Math.abs(a.left - b.left) > 0.03) continue;
+        if (Math.abs(a.right - b.right) > 0.03) continue;
+        if (Math.max(aw, bw) / Math.min(aw, bw) > 1.5) continue;
+        const vgap = Math.max(b.top - a.bottom, a.top - b.bottom);
+        const alh = a.lh || (a.bottom - a.top), blh = b.lh || (b.bottom - b.top);
+        // Зазор меряем в высотах строки: у плотного облачка он бывает и в
+        // целую строку («ОНА ВСЁ СЩЕ» / «ШЕПЧЕТ» — 1,25 строки, и реплика
+        // оставалась разрезанной). Края и ширина при этом обязаны совпасть,
+        // так что соседние облачка под правило не попадают.
+        if (vgap > Math.min(alh, blh) * 1.3) continue;
+        if (Math.max(a.bottom, b.bottom) - Math.min(a.top, b.top) > 0.22) continue;
+        // Высота «строки» у разваленной половинки считается по её собственным
+        // строкам и может отличаться вдвое — для склейки это не приговор.
+        if (Math.max(alh, blh) / Math.min(alh, blh) > 2.5) continue;
+        const first = a.top <= b.top ? a : b, second = first === a ? b : a;
+        const merged = {
+          ...first,
+          text: cleanSpeech(first.text + ' ' + second.text),
+          left: Math.min(a.left, b.left), right: Math.max(a.right, b.right),
+          top: Math.min(a.top, b.top), bottom: Math.max(a.bottom, b.bottom),
+        };
+        merged.rows = (a.rows || 1) + (b.rows || 1);
+        merged.lh = (merged.bottom - merged.top) / merged.rows;
+        result.splice(result.indexOf(first), 1);
+        result.splice(result.indexOf(second), 1);
+        result.push(merged);
+        changed = true;
+        break outer;
+      }
+    }
+  }
   return result;
+}
+
+/**
+ * Реплики собираются ПО РАМКАМ ДЕТЕКТОРА, а не по близости строк.
+ *
+ * Почему так (живой прогон 29.10 на data/real/dense.jpg): склейка по близости
+ * путала соседние облачка — «ЯРАССЧИ-» уезжала в пузырь «ОНА ВСЁ ЕЩЁ ШЕПЧЕТ»,
+ * а обрывки «оооо», «е ой» приклеивались к настоящей реплике. Детектор же
+ * обводит КАЖДОЕ облачко или звук отдельной рамкой, и строки внутри одной
+ * рамки — это ровно одна реплика. Порядок строк внутри рамки — сверху вниз,
+ * куски одной строки — справа налево (для манги).
+ *
+ * Строки, которых рамка не накрыла (третий проход, «области без боксов»),
+ * сначала прикрепляем к ближайшей рамке — но только если они вплотную (зазор
+ * меньше 1,5 % высоты кадра); иначе собираем их старым путём по близости.
+ */
+function groupByBox(source, rtl, R) {
+  if (R.boxGroup === false) return splitPanels(source, rtl, 0).flatMap(p => bubblesOf(p, rtl, R));
+  const key = (b) => [b.left, b.top, b.right, b.bottom]
+    .map(v => Math.round(v * 500)).join('|');
+  const groups = new Map();
+  const free = [];
+  for (const r of source) {
+    if (r.box) {
+      const k = key(r.box);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(r);
+    } else free.push(r);
+  }
+  // Безрамные строки — к ближайшей рамке, если она рядом.
+  const rects = [...groups.entries()].map(([k, rows]) => ({
+    k,
+    left: Math.min(...rows.map(r => r.left)), right: Math.max(...rows.map(r => r.right)),
+    top: Math.min(...rows.map(r => r.top)), bottom: Math.max(...rows.map(r => r.bottom)),
+  }));
+  for (const r of free) {
+    let best = null, bestGap = Infinity;
+    for (const g of rects) {
+      const dx = Math.max(0, Math.max(g.left - r.right, r.left - g.right));
+      const dy = Math.max(0, Math.max(g.top - r.bottom, r.top - g.bottom));
+      const gap = Math.hypot(dx, dy);
+      if (gap < bestGap) { bestGap = gap; best = g; }
+    }
+    if (best && bestGap <= 0.015) {
+      groups.get(best.k).push(r);
+    } else {
+      if (!groups.has('')) groups.set('', []);
+      groups.get('').push(r);
+    }
+  }
+  const out = [];
+  for (const rows of groups.values()) {
+    out.push(...splitPanels(rows, rtl, 0).flatMap(p => bubblesOf(p, rtl, R)));
+  }
+  return out;
 }
 
 /**
@@ -5834,14 +6179,29 @@ function rescueLostLines(result, source, R) {
     // и по префиксу страховка приклеивала уже собранное — получались дубли
     // («УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ…» дважды).
     if (mostlyCovered(key, covered)) continue;
+    // Обрывок, который уже есть в тексте этой же реплики, — дубль: «ТbВАЮ»
+    // приклеивался к «Я РАССЧИТЫВАЮ НА ВАС, ДУХ.» и реплика начиналась с
+    // «ТвВАЮ» (живой прогон 29.10). Сравниваем нечётко: распознавание даёт
+    // «ТbВАЮ»/«ТвВАЮ»/«ТЫВАЮ» на одном и том же месте.
+    // (проверка ниже — по конкретной реплике, после выбора адресата)
     const rc = (r.top + r.bottom) / 2;
+    // Ищем реплику по ДВУМ координатам, а не только по высоте. Раньше теряшка
+    // приклеивалась к ближайшей по вертикали, и хвост каллиграфии «ТbВАЮ» уезжал
+    // в чужое облачко справа: «ОНА ВСЁ СЩЕ ТвВАЮ» — реплика на 20 букв, а само
+    // облачко оставалось разрезанным (живой прогон 29.10, третий заход).
+    // Столбец — жёсткое условие: горизонтальный зазор больше 12 % ширины кадра
+    // означает «это другая реплика», и приклеивать нельзя.
     let best = -1, bestD = Infinity;
     result.forEach((l, idx) => {
-      const d = rc < l.top ? l.top - rc : (rc > l.bottom ? rc - l.bottom : 0);
+      const dy = rc < l.top ? l.top - rc : (rc > l.bottom ? rc - l.bottom : 0);
+      const dx = r.right < l.left ? l.left - r.right : (r.left > l.right ? r.left - l.right : 0);
+      if (dx > 0.12) return;
+      const d = Math.hypot(dy, dx);
       if (d < bestD) { bestD = d; best = idx; }
     });
     if (best < 0 || bestD > 0.18) continue;
     const l = result[best];
+    if (alreadyInside(key, l.text)) continue;
     const above = rc < (l.top + l.bottom) / 2;
     result[best] = {
       ...l,
@@ -5852,6 +6212,34 @@ function rescueLostLines(result, source, R) {
     };
     covered.push(normText(result[best].text));
   }
+}
+
+/**
+ * Фрагмент уже присутствует в тексте реплики (с точностью до одной-двух букв)?
+ *
+ * Нужно страховке `rescueLostLines`: распознавание одной и той же строки даёт
+ * варианты («ТbВАЮ» / «ТЫВАЮ»), и без этой проверки обрывок приклеивался к
+ * реплике, где он уже есть, — «ТвВАЮ Я РАССЧИТЫВАЮ НА ВАС, ДУХ.».
+ */
+function alreadyInside(key, text) {
+  const hay = normText(text);
+  if (!key || !hay) return false;
+  if (hay.includes(key)) return true;
+  if (key.length > 12) {
+    // длинный фрагмент — сравниваем по словам
+    return key.split(' ').every(w => w.length < 3 || hay.includes(w));
+  }
+  // короткий: ищем похожее МЕСТО в тексте (не слово целиком). «ТвВАЮ» — это
+  // хвост слова «РАССЧИТЫВАЮ», и по целым словам такая проверка не срабатывала.
+  const flat = hay.replace(/ /g, '');
+  const k = key.replace(/ /g, '');
+  const win = k.length;
+  for (let i = 0; i + win <= flat.length; i++) {
+    let same = 0;
+    for (let j = 0; j < win; j++) if (flat[i + j] === k[j]) same++;
+    if (same / win >= 0.75) return true;
+  }
+  return false;
 }
 
 /**
@@ -7270,6 +7658,14 @@ const VOICE = {
    * Возвращает true, если движок принял фразу.
    */
   speak(text, opts = {}) {
+    // Что уходит в голос — сразу и мосту стенда (KomaUi.spoken): в эмуляторе
+    // это строка на «экране» и журнал порядка, а не догадки по логам.
+    try {
+      if (typeof window !== 'undefined' && window.KomaUi
+          && typeof window.KomaUi.spoken === 'function') {
+        window.KomaUi.spoken(String(text || ''));
+      }
+    } catch (e) { /* моста нет — обычный браузер */ }
     if (this.native()) {
       const id = 'v' + (++this._seq) + '_' + Date.now().toString(36);
       this._handlers[id] = opts;
@@ -8588,7 +8984,13 @@ function mergeBandLines(parts, canvas) {
       out.push(ln);
     }
   }
-  return out.sort((a, b) => a.top - b.top);
+  // Порядок чтения: сверху вниз, а внутри строки — справа налево для манги.
+  // Раньше здесь был простой `sort((a,b) => a.top - b.top)`, и он убивал
+  // порядок: две реплики на одной высоте (или с разницей в 1–2 ‰) вставали по
+  // левому краю, то есть для манги наоборот. Живой прогон 29.10: в нижней панели
+  // «ОНА ВСЁ ЕЩЁ ШЕПЧЕТ» (справа) читалась ПОСЛЕДНЕЙ вместо первой.
+  const rtl = (typeof Reader !== 'undefined' ? Reader.dir : 'rtl') !== 'ltr';
+  return orderBubbles(out, rtl);
 }
 
 async function onScrollSettled() {

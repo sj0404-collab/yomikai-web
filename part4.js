@@ -1063,6 +1063,14 @@ const VOICE = {
    * Возвращает true, если движок принял фразу.
    */
   speak(text, opts = {}) {
+    // Что уходит в голос — сразу и мосту стенда (KomaUi.spoken): в эмуляторе
+    // это строка на «экране» и журнал порядка, а не догадки по логам.
+    try {
+      if (typeof window !== 'undefined' && window.KomaUi
+          && typeof window.KomaUi.spoken === 'function') {
+        window.KomaUi.spoken(String(text || ''));
+      }
+    } catch (e) { /* моста нет — обычный браузер */ }
     if (this.native()) {
       const id = 'v' + (++this._seq) + '_' + Date.now().toString(36);
       this._handlers[id] = opts;
@@ -2381,7 +2389,13 @@ function mergeBandLines(parts, canvas) {
       out.push(ln);
     }
   }
-  return out.sort((a, b) => a.top - b.top);
+  // Порядок чтения: сверху вниз, а внутри строки — справа налево для манги.
+  // Раньше здесь был простой `sort((a,b) => a.top - b.top)`, и он убивал
+  // порядок: две реплики на одной высоте (или с разницей в 1–2 ‰) вставали по
+  // левому краю, то есть для манги наоборот. Живой прогон 29.10: в нижней панели
+  // «ОНА ВСЁ ЕЩЁ ШЕПЧЕТ» (справа) читалась ПОСЛЕДНЕЙ вместо первой.
+  const rtl = (typeof Reader !== 'undefined' ? Reader.dir : 'rtl') !== 'ltr';
+  return orderBubbles(out, rtl);
 }
 
 async function onScrollSettled() {
