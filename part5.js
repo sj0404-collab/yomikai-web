@@ -601,6 +601,21 @@ function bindUI() {
     // места, где остановились в прошлый раз.
     TTS.readVisible({ fromStart: true });
   };
+  const btnAdd = $('#btnPluginsAdd');
+  if (btnAdd) btnAdd.onclick = () => {
+    try {
+      if (Plugins.present() && typeof window.KomaPlugins.pick === 'function') {
+        window.KomaPlugins.pick();
+        toast('Выберите .json-файл плагина', 4000);
+        return;
+      }
+    } catch (e) { /* нет моста */ }
+    toast('Добавлять плагины можно только в приложении', 4000);
+  };
+  // В приложении панель нативная — своя HTML-панель в это время не нужна:
+  // две панели на экране и были источником «прыжков» (28.10).
+  if (NATIVE_UI.there()) document.body.classList.add('native-ui');
+
   const btnPlug = $('#btnPluginsReload');
   if (btnPlug) btnPlug.onclick = () => {
     try {

@@ -147,6 +147,10 @@
   .scanbadge{position:absolute;top:calc(env(safe-area-inset-top) + 60px);left:50%;transform:translateX(-50%);
     background:#000c;padding:6px 12px;border-radius:20px;font-size:11.5px;z-index:28;display:none}
   .scanbadge.on{display:block}
+
+  /* В АПК панель чтения нативная (под страницей). Своя HTML-панель в это
+     время скрыта: две панели на экране — это и было «дёргается». */
+  body.native-ui #playBar { display: none !important; }
 </style>
 </head>
 <body>
@@ -432,13 +436,15 @@
     <div class="lbl">ПЛАГИНЫ (JSON)</div>
     <div class="kv" id="pluginsState" style="white-space:pre-wrap;line-height:1.45">Плагины не загружены</div>
     <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" id="btnPluginsAdd">Добавить плагин из файла</button>
       <button class="btn" id="btnPluginsReload">Перечитать плагины</button>
     </div>
     <div class="hint" style="margin-top:6px">
       Правки поведения — правила распознавания, замены исковерканных слов, голос —
       можно приносить файлом <b>.json</b> в папку плагинов и нажимать «Перечитать».
-      Пересобирать приложение для этого не нужно. Образец формата лежит в приложении
-      (<code>assets/plugins/00-example.json</code>), путь к папке виден в этом блоке.
+      Пересобирать приложение для этого не нужно. «Добавить плагин из файла» берёт
+      <b>.json</b> прямо из «Загрузок» — папку приложения на Android 11+ без root не
+      открыть. Образец формата: <code>assets/plugins/00-example.json</code>.
     </div>
     <div class="lbl">РАМКИ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">

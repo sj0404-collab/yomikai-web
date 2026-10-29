@@ -548,7 +548,21 @@ const Reader = {
       }, band, opts.det || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
-      let fresh = readingOrder(res.regions, rtl, true, RULES);
+      let fresh;
+      if (res.plan === 'native' && Array.isArray(res.replicas) && res.replicas.length) {
+        // Порядок и склейку уже сделал движок чтения в приложении. Здесь только
+        // слова: словарь и языковая починка живут в странице (3 МБ словаря).
+        fresh = res.replicas
+          .map(r => ({
+            ...r,
+            text: Words.polish(String(r.text || ''), RULES.junkRatio, r.confidence),
+          }))
+          .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+        OCR.readPlan = 'native';
+      } else {
+        fresh = readingOrder(res.regions, rtl, true, RULES);
+        OCR.readPlan = 'page';
+      }
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -749,7 +763,7 @@ const Reader = {
       if (rel > viewH * 0.08 && rel < viewH * 0.8) return false;
       const target = Math.max(0, abs - viewH * 0.22);
       if (Math.abs(target - sc.scrollTop) < 24) return false;
-      sc.scrollTo({ top: target, behavior: 'smooth' });
+      SMOOTH.to(target, 240);            // один твин на всех, без спора за ленту
       return true;
     } catch (e) { return false; }
   },
@@ -762,7 +776,9 @@ const Reader = {
     if (!b || !wrap || !sc) return false;
     const h = wrap.getBoundingClientRect().height || ((this.pageRect(i) || {}).height || 0);
     if (!h) return false;
-    sc.scrollTo({ top: Math.max(0, (wrap.offsetTop || 0) + b.top * h), behavior: animate ? 'smooth' : 'auto' });
+    const target = Math.max(0, (wrap.offsetTop || 0) + b.top * h);
+    if (animate) SMOOTH.to(target, 260);
+    else { SMOOTH.stop(); sc.scrollTop = target; }
     return true;
   },
   /**
@@ -1084,6 +1100,167 @@ const VOICE = {
   },
 };
 
+/* Кадр анимации и время: в браузере requestAnimationFrame/performance,
+   в прогонах без окна — таймер. Обёртки — чтобы не звать браузерные
+   глобалы напрямую (сборка проверяет, что каждый вызов определён). */
+const RAF = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
+  ? window.requestAnimationFrame.bind(window) : null;
+const CAF = (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function')
+  ? window.cancelAnimationFrame.bind(window) : null;
+const nowMs = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+/**
+ * ПЛАВНАЯ ПРОКРУТКА ЛЕНТЫ — один твин за раз.
+ *
+ * Было: три места дёргали `scrollTo({behavior:'smooth'})` независимо
+ * (scrollToLineIfNeeded, followLine, scrollToBand), и на смене реплики они
+ * спорили за ленту. Каждый вызов стартовал свою анимацию, лента бросала
+ * начатую и ехала к другой цели — это и есть «резко дёрнулся, потом ещё
+ * дважды» (телефон 28.10). Родной smooth-scroll в WebView при этом не даёт
+ * ни события «доехал», ни отмены.
+ *
+ * Стало: один requestAnimationFrame-твин. Новая цель во время движения не
+ * запускает вторую анимацию, а просто меняет точку назначения — движение
+ * остаётся непрерывным. `done()` ждёт, пока лента реально встанет, поэтому
+ * голос начинает реплику уже на неподвижной странице.
+ */
+const SMOOTH = {
+  _raf: 0, _to: 0, _wait: [],
+  /** Кадр: в браузере rAF, в тестах и старом WebView — таймер. */
+  _raf2(fn) {
+    if (typeof RAF === 'function') return RAF(fn);
+    return setTimeout(() => fn(nowMs()), 16);
+  },
+  _caf(id) {
+    if (!id) return;
+    try {
+      if (typeof CAF === 'function') CAF(id);
+      else clearTimeout(id);
+    } catch (e) { /* уже отменён */ }
+  },
+  /** Ехать к y (в пикселях ленты). Возвращает false, если ехать некуда. */
+  to(y, ms = 240) {
+    const sc = $('#strip');
+    if (!sc) return false;
+    const from = sc.scrollTop || 0;
+    const to = Math.max(0, Math.round(y));
+    if (Math.abs(to - from) < 2) { this._to = to; return false; }
+    this._to = to;
+    if (this._raf) return true;                 // уже едем — только цель обновилась
+    const start = from, t0 = nowMs();
+    const tick = (t) => {
+      const k = Math.min(1, Math.max(0, (t - t0) / ms));
+      const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;   // easeInOutQuad
+      sc.scrollTop = Math.max(0, start + (this._to - start) * e);
+      if (k < 1) { this._raf = this._raf2(tick); return; }
+      this._raf = 0;
+      sc.scrollTop = Math.max(0, this._to);
+      const w = this._wait; this._wait = [];
+      w.forEach(f => { try { f(); } catch (e) { /* ждём, не падаем */ } });
+    };
+    this._raf = this._raf2(tick);
+    return true;
+  },
+  /** Ждать остановки ленты (сразу, если она стоит). */
+  done() {
+    if (!this._raf) return Promise.resolve();
+    return new Promise(res => this._wait.push(res));
+  },
+  /** Человек сам тронул ленту — анимацию отдаём ему. */
+  stop() {
+    this._caf(this._raf);
+    this._raf = 0;
+    const w = this._wait; this._wait = [];
+    w.forEach(f => { try { f(); } catch (e) { } });
+  },
+};
+
+/**
+ * ИНТЕРФЕЙС ЧТЕНИЯ В АПК.
+ *
+ * В приложении панель чтения нативная (KomaUi): она лежит под страницей, не
+ * ездит вместе с лентой и не пересчитывает свою высоту на каждой реплике.
+ * Страница остаётся владельцем чтения — она лишь рассказывает панели, что
+ * сейчас звучит, и принимает от неё нажатия (`window.KomaUiCmd`). В браузере
+ * моста нет, и всё работает по-старому: своя HTML-панель.
+ */
+const NATIVE_UI = {
+  there() {
+    return !!(typeof window !== 'undefined' && window.KomaUi
+      && typeof window.KomaUi.show === 'function');
+  },
+  /** Отдать панели текущее состояние чтения. */
+  push() {
+    if (!this.there()) return false;
+    try {
+      const cur = (typeof Reader !== 'undefined' && Reader.current) || null;
+      const line = (TTS && (TTS.curLine || cur)) || null;
+      const total = (TTS && TTS.queue) ? TTS.queue.length : 0;
+      const idx = (TTS && TTS.curIdx) ? TTS.curIdx : (total ? 1 : 0);
+      const bands = (typeof Reader !== 'undefined' && Reader.bands) ? Reader.bands.length : 0;
+      const band = (typeof Reader !== 'undefined') ? (Reader.bandIndex | 0) + 1 : 0;
+      let voice = '';
+      try { voice = VOICE.native() ? 'Android TTS' : 'Web Speech'; } catch (e) { voice = ''; }
+      const paused = !!(TTS && TTS.paused);
+      const playing = !!(TTS && !TTS.stopped);
+      if (!playing && !line && !total) { this.hide(); return false; }
+      window.KomaUi.show(JSON.stringify({
+        text: (line && line.text) || '',
+        index: Math.min(idx || 0, total || 0),
+        total: total,
+        band: band, bands: bands,
+        playing: playing, paused: paused,
+        voice: voice,
+        status: paused ? 'пауза' : '',
+      }));
+      return true;
+    } catch (e) { console.warn('KomaUi.show', e); return false; }
+  },
+  hide() {
+    if (!this.there() || typeof window.KomaUi.hide !== 'function') return;
+    try { window.KomaUi.hide(); } catch (e) { /* моста уже нет */ }
+  },
+};
+
+/**
+ * КОМАНДЫ С НАТИВНОЙ ПАНЕЛИ (KomaUiBridge в АПК).
+ *
+ * Панель в приложении только показывает состояние и ловит нажатия; чтением
+ * владеет страница. Поэтому здесь ровно те же действия, что у своих кнопок —
+ * иначе поведение в АПК и в браузере разъехалось бы.
+ */
+if (typeof window !== 'undefined') {
+  window.KomaUiCmd = (cmd) => {
+    try {
+      switch (String(cmd || '')) {
+        case 'toggle':
+          if (TTS.stopped) {
+            TTS.prime();
+            Reader.scanCurrent(false).then(() => TTS.readVisible({ fromStart: true }));
+          } else if (!TTS.paused) {
+            TTS.pauseRead(); TTS.paused = true;
+          } else {
+            TTS.resumeRead(); TTS.paused = false;
+          }
+          break;
+        case 'next':
+          // Пропуск: гасим текущую фразу и сразу идём к следующей реплике.
+          VOICE.cancel();
+          if (!TTS.stopped) TTS.step();
+          break;
+        case 'repeat':
+          TTS.replay();
+          break;
+        case 'stop':
+        default:
+          TTS.stop();
+          break;
+      }
+    } catch (e) { console.warn('KomaUiCmd', e); }
+    NATIVE_UI.push();
+  };
+}
+
 const TTS = {
   voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0, primed: false,
   init() {
@@ -1152,6 +1329,22 @@ const TTS = {
     Reader.paintAllFrames();
     $('#playBar').style.display = 'none';
     $('#btnRead').textContent = '▶';
+    this.curLine = null; this.curIdx = 0;
+    NATIVE_UI.hide();
+  },
+  /**
+   * Повторить текущую реплику (кнопка ⟲ на нативной панели).
+   * Отдельный метод, потому что просто «ещё раз speakLine» без остановки
+   * накладывает вторую фразу на первую.
+   */
+  replay() {
+    const line = this.curLine || Reader.current;
+    if (!line || !line.text) return false;
+    VOICE.cancel();
+    this.stopped = false;
+    this.speakLine(line, () => { if (!this.stopped) this.step(); });
+    NATIVE_UI.push();
+    return true;
   },
   /**
    * Держать читаемую реплику в «безопасной» полосе экрана: сверху шапка и
@@ -1186,7 +1379,9 @@ const TTS = {
     const safeBottom = sr.top + sr.height - 170 - nowH;  // панель чтения + лента
     if (top >= safeTop && bottom <= safeBottom) return;
     const want = sr.top + sr.height * 0.3;               // реплику — в верхнюю треть
-    sc.scrollTo({ top: Math.max(0, sc.scrollTop + top - want), behavior: 'smooth' });
+    // Тот же единственный твин: followLine больше не тянет ленту отдельно от
+    // перехода к следующей полосе.
+    SMOOTH.to(Math.max(0, sc.scrollTop + top - want), 220);
   },
   /**
    * Chrome/WebView разрешает озвучку только «из жеста»: если между нажатием и
@@ -1360,6 +1555,7 @@ const TTS = {
   /** Пауза: в браузере — настоящая, в АПК — остановка с продолжением реплики заново. */
   pauseRead() {
     const mode = VOICE.pause();
+    setTimeout(() => NATIVE_UI.push(), 0);
     if (mode === 'restart') {
       this.pausedLine = Reader.current;
       toast('В приложении пауза = стоп: продолжу эту реплику сначала', 3500);
@@ -1367,6 +1563,7 @@ const TTS = {
     return mode;
   },
   resumeRead() {
+    setTimeout(() => NATIVE_UI.push(), 0);
     if (VOICE.native()) {
       const line = this.pausedLine;
       this.pausedLine = null;
@@ -1496,11 +1693,15 @@ const TTS = {
         return;
       }
       $('#playStatus').textContent = '';
+      NATIVE_UI.push();
       this.onQueueEnd();
       return;
     }
     const line = this.queue[this.idx++];
+    this.curLine = line;                       // что звучит — для панели и ⟲
+    this.curIdx = this.idx;
     $('#playStatus').textContent = (RULES.semiManual && State.semi) ? 'ждём прокрутки' : '';
+    NATIVE_UI.push();
     this.speakLine(line, () => { if (!this.stopped) this.step(); });
   },
   /**
@@ -1533,7 +1734,10 @@ const TTS = {
           Reader.band = bands[foundNi] || Reader.band;
           Reader.page = page;
           Reader.scrollToLineIfNeeded(page, found[0]);
-          await sleep(160);
+          // Ждём именно остановки ленты, а не «примерно 160 мс»: раньше голос
+          // начинал реплику, пока страница ещё ехала, и она прыгала под звук.
+          await SMOOTH.done();
+          await sleep(40);
           Reader.page = page;
           return this.readQueue(found);
         }
@@ -1580,6 +1784,7 @@ const TTS = {
   readQueue(lines) {
     this.queue = lines.slice();
     this.idx = 0;
+    this.curLine = null; this.curIdx = 0;
     this.stopped = false;
     $('#playBar').style.display = 'flex';
     $('#btnRead').textContent = '⏸';
@@ -2064,6 +2269,12 @@ async function pickModels() {
 function watchScroll() {
   const strip = $('#strip');
   let t = null, raf = 0;
+  // Человек тронул ленту пальцем — отдаём прокрутку ему, анимация чтения
+  // уступает и не «догоняет» под пальцем.
+  try {
+    strip.addEventListener('touchstart', () => SMOOTH.stop(), { passive: true });
+    strip.addEventListener('wheel', () => SMOOTH.stop(), { passive: true });
+  } catch (e) { /* не критично */ }
   const busy = () => {
     Reader.scrollBusy = true;
     clearTimeout(t);

@@ -25,7 +25,7 @@ global.ort = { env: { wasm: {} }, Tensor: class { constructor(t, d, dims) { this
 const body = ['part0-wasm.js', 'part2.js', 'part3.js', 'part4.js', 'part5.js']
   .map(f => fs.readFileSync(__dirname + '/' + f, 'utf8')).join('\n');
 const api = new Function(body.slice(0, body.indexOf('(async function boot()'))
-  + '; return {Reader, State, OCR, Words, cleanLines, RULES, TTS};')();
+  + '; return {Reader, State, OCR, Words, cleanLines, RULES, TTS, SMOOTH};')();
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 (async () => {
@@ -59,10 +59,13 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(lines.length === 1, 'из буфера убрана мусорная строка (осталось ' + lines.length + ')');
   ok(lines[0] && /УЖЕ ПОРА/.test(lines[0].text), 'настоящая реплика из буфера сохранена');
   // Реплика не должна оставаться под панелью плеера: чтение её досматривает
+  // Прокрутка теперь ОДНА на всю читалку (SMOOTH): followLine не зовёт
+  // scrollTo у ленты сам, а запускает единственный твин. Проверяем результат,
+  // а не способ: после остановки лента обязана стоять на новом месте, а
+  // реплику в безопасной зоне трогать нельзя.
   const stripEl = el('strip');
   stripEl.scrollTop = 0;
-  let scrolledTo = null;
-  stripEl.scrollTo = (o) => { scrolledTo = o.top; };
+  stripEl.clientHeight = 800;
   stripEl.getBoundingClientRect = () => ({ top: 0, bottom: 800, height: 800, left: 0, right: 700 });
   R.page = 0; R.mode = 'vertical';
   R.pages = [{}, {}];
@@ -70,10 +73,15 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
     ? { getBoundingClientRect: () => ({ top: 0, bottom: 800, height: 800, left: 0, right: 700 }) }
     : el('strip');
   api.TTS.followLine({ text: 'x', top: 0.78, bottom: 0.86 });     // облачко внизу экрана
-  ok(scrolledTo !== null && scrolledTo > 0, 'реплика под панелью прокручивается в видимую зону');
-  scrolledTo = null;
+  ok(!stripEl.scrollTop, 'прокрутка не прыгает мгновенно: сначала анимация');
+  await api.SMOOTH.done();
+  const after = stripEl.scrollTop;
+  ok(after > 0, 'реплика под панелью прокручивается в видимую зону (scrollTop ' + after + ')');
+  ok(after >= 0.78 * 800 - 0.3 * 800 - 1, 'реплика встала в верхнюю треть, а не куда попало');
+  stripEl.scrollTop = 0;
   api.TTS.followLine({ text: 'x', top: 0.45, bottom: 0.5 });      // реплика в середине
-  ok(scrolledTo === null, 'реплику в безопасной зоне не дёргаем (масштаб и позиция не меняются)');
+  await api.SMOOTH.done();
+  ok(stripEl.scrollTop === 0, 'реплику в безопасной зоне не дёргаем (масштаб и позиция не меняются)');
 
   console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })().catch(e => { console.error('FAIL', e); process.exit(1); });

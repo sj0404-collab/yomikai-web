@@ -1,0 +1,346 @@
+package net.koma.reader
+
+import org.json.JSONArray
+import org.json.JSONObject
+import kotlin.math.max
+import kotlin.math.min
+
+/**
+ * ДВИЖОК ЧТЕНИЯ в приложении: из строк распознавания собирает РЕПЛИКИ в
+ * правильном порядке. Раньше это целиком жило в странице (bubblesOf,
+ * mergeBubbles, orderBubbles, readingOrder), и именно там чтение то прыгало,
+ * то читало одну реплику, то корёжило слова.
+ *
+ * Что здесь есть:
+ *  • строки → «ряды» по вертикали, внутри ряда — справа налево (манга);
+ *  • склейка обрывков: «ВЫСО-» + «ЧЕСТВО» → «ВЫСОЧЕСТВО»;
+ *  • ряды → облачка: по перекрытию по вертикали и зазору по горизонтали;
+ *  • потолок высоты облачка (иначе проза склеивается в «реплику» на 75 слов);
+ *  • разрезание слишком высокого блока по самому большому пробелу;
+ *  • порядок реплик: сверху вниз, реплики на одной высоте — справа налево.
+ *
+ * Чего здесь НЕТ и почему: языковая починка и словарь (Words.polish) остаются в
+ * странице — словарь весит 3 МБ, и его перенос не влияет ни на скорость, ни на
+ * порядок. Приложение отвечает за геометрию и порядок, страница — за слова.
+ */
+class ReadEngine {
+
+    class Line(
+        val text: String,
+        val left: Double,
+        val top: Double,
+        val right: Double,
+        val bottom: Double,
+        val confidence: Double = 0.0,
+    ) {
+        val height: Double get() = max(bottom - top, 1e-6)
+        val width: Double get() = max(right - left, 1e-6)
+        val letters: Int get() = text.count { it.isLetter() || it.isDigit() }
+    }
+
+    class Rules(
+        val dir: String = "rtl",
+        val bubbleGap: Double = 0.45,
+        val mergeHeightRatio: Double = 1.8,
+        val maxBlockHeight: Double = 0.22,
+    ) {
+        val rtl: Boolean get() = dir != "ltr"
+
+        companion object {
+            fun from(json: String?): Rules {
+                val o = try { JSONObject(json ?: "{}") } catch (e: Throwable) { JSONObject() }
+                val d = Rules()
+                return Rules(
+                    dir = o.optString("dir", d.dir).ifBlank { d.dir },
+                    bubbleGap = o.optDouble("bubbleGap", d.bubbleGap),
+                    mergeHeightRatio = o.optDouble("mergeHeightRatio", d.mergeHeightRatio),
+                    maxBlockHeight = o.optDouble("maxBlockHeight", d.maxBlockHeight),
+                )
+            }
+        }
+    }
+
+    companion object {
+        /** Сколько строк максимум берём в работу: защита от мусорного детектора. */
+        private const val MAX_LINES = 2000
+
+        private fun cleanSpeech(t: String): String =
+            t.replace('\u00AD', '-').replace(Regex("\\s+"), " ").trim()
+    }
+
+    /** Строка с «типичной высотой» — как lh в странице (для склейки облачков). */
+    private class Row(
+        var text: String,
+        var left: Double,
+        var top: Double,
+        var right: Double,
+        var bottom: Double,
+        var lh: Double,
+    ) {
+        val w: Double get() = right - left
+        val h: Double get() = bottom - top
+    }
+
+    /** Склейка соседних кусков одной реплики: «ВЫСО-» + «ЧЕСТВО» → слитно. */
+    private fun joinText(a: String, b: String): String {
+        val left = a.trim()
+        val right = b.trim()
+        if (left.isEmpty()) return right
+        if (right.isEmpty()) return left
+        val last = left.last()
+        // «ВЫСО-» + «ЧЕСТВО» (или «-ЧЕСТВО») → «ВЫСОЧЕСТВО»: перенос слова.
+        val hyph = "-\u2010\u2011\u2013\u2014\u2015"
+        if (hyph.indexOf(last) >= 0) return left.dropLast(1) + right.trimStart(*hyph.toCharArray())
+        if (hyph.indexOf(right.first()) >= 0 && left.last().isLetter()) return left + right.drop(1)
+        // «БУДЕ.» + «ТЕ ГОВОРИТЬ» → «БУДЕТЕ ГОВОРИТЬ»: перенос слова OCR прочитал
+        // точкой вместо дефиса. Склеиваем только короткий обрывок.
+        val m = Regex("([\\p{L}]{2,})[.\\-]$").find(left)
+        if (m != null) {
+            val head = right.split(Regex("\\s+")).firstOrNull() ?: ""
+            if (head.isNotEmpty() && head.first().isLetter() && head.length <= 3) {
+                return left.dropLast(1) + right
+            }
+        }
+        return "$left $right"
+    }
+
+    /** Приклеивается ли строка b к реплике a (порт sameBubble из страницы). */
+    private fun sameBubble(a: Row, b: Row, R: Rules): Boolean {
+        if (a.w <= 0 || b.w <= 0 || a.h <= 0 || b.h <= 0) return false
+        val overlap = min(a.right, b.right) - max(a.left, b.left)
+        if (overlap <= 0) return false
+        if (overlap / min(a.w, b.w) < 0.30) return false
+        val centerShift = kotlin.math.abs((a.left + a.right) / 2 - (b.left + b.right) / 2)
+        if (centerShift > max(a.w, b.w) * 0.8) return false
+        val gap = b.top - a.bottom
+        if (gap < -a.h * 0.6 || gap > max(a.h, b.h) * max(1.2, R.bubbleGap)) return false
+        if (a.h > a.w * 3 || b.h > b.w * 3) return false     // вертикальные колонки — не строки
+        if (max(a.lh, b.lh) / min(a.lh, b.lh) > R.mergeHeightRatio) return false
+        val mergedTop = min(a.top, b.top)
+        val mergedBottom = max(a.bottom, b.bottom)
+        if (mergedBottom - mergedTop > R.maxBlockHeight) return false
+        return true
+    }
+
+    /** Главная точка входа: строки → реплики в порядке чтения. */
+    fun plan(items: List<Line>, R: Rules): List<JSONObject> {
+        val src = items.filter { it.text.isNotBlank() && it.letters >= 1 }
+            .take(MAX_LINES)
+            .sortedWith(compareBy({ it.top }, { it.left }))
+        if (src.isEmpty()) return emptyList()
+
+        // ── A. Облачка-блоки: строку приклеиваем, если она рядом по вертикали
+        //       и по горизонтали (это уровень «бокс детектора»).
+        val blocks = ArrayList<MutableList<Line>>()
+        for (ln in src) {
+            var target: MutableList<Line>? = null
+            var bestGap = Double.MAX_VALUE
+            for (block in blocks) {
+                val head = block.last()
+                val overlap = min(head.bottom, ln.bottom) - max(head.top, ln.top)
+                if (overlap <= head.height * 0.35) continue
+                val blockLeft = block.minOf { it.left }
+                val blockRight = block.maxOf { it.right }
+                val gap = when {
+                    ln.left > blockRight -> ln.left - blockRight
+                    ln.right < blockLeft -> blockLeft - ln.right
+                    else -> 0.0
+                }
+                if (max(head.height, ln.height) / min(head.height, ln.height) > R.mergeHeightRatio) continue
+                val shortHead = head.letters <= 3
+                val shortLn = ln.letters <= 3
+                val limit = if (shortHead && shortLn && overlap >= head.height * 0.7) head.height * 2.5
+                            else head.height * R.bubbleGap
+                if (gap > limit) continue
+                if (gap < -head.height * 0.9) continue
+                val mergedTop = min(block.minOf { it.top }, ln.top)
+                val mergedBottom = max(block.maxOf { it.bottom }, ln.bottom)
+                if (mergedBottom - mergedTop > R.maxBlockHeight) continue
+                if (gap < bestGap) { bestGap = gap; target = block }
+            }
+            if (target != null) target.add(ln) else blocks.add(mutableListOf(ln))
+        }
+
+        // ── B. Слишком высокий блок — абзац или колонка: режем по наибольшему пробелу.
+        val flat = ArrayList<List<Line>>()
+        fun splitTall(block: List<Line>) {
+            if (block.size < 4) { flat.add(block); return }
+            val span = block.maxOf { it.bottom } - block.minOf { it.top }
+            if (span <= R.maxBlockHeight) { flat.add(block); return }
+            val sorted = block.sortedBy { it.top }
+            var cut = -1
+            var best = 0.0
+            for (i in 1 until sorted.size) {
+                val gap = sorted[i].top - sorted[i - 1].bottom
+                if (gap > best) { best = gap; cut = i }
+            }
+            if (cut < 0) { flat.add(block); return }
+            splitTall(sorted.subList(0, cut))
+            splitTall(sorted.subList(cut, sorted.size))
+        }
+        blocks.forEach { splitTall(it) }
+
+        // ── C. Блок → строка: ряды сверху вниз, внутри ряда — справа налево.
+        val linesOfBlocks = ArrayList<Row>()
+        for (block in flat) {
+            val rows = ArrayList<MutableList<Line>>()
+            for (part in block.sortedBy { it.top }) {
+                val row = rows.firstOrNull { r ->
+                    val rTop = r.minOf { it.top }
+                    val rBottom = r.maxOf { it.bottom }
+                    min(rBottom, part.bottom) - max(rTop, part.top) > min(part.height, rBottom - rTop) * 0.5
+                }
+                if (row != null) row.add(part) else rows.add(mutableListOf(part))
+            }
+            val ordered = ArrayList<Line>()
+            for (row in rows.sortedBy { r -> r.minOf { it.top } }) {
+                ordered.addAll(row.sortedWith { a, b ->
+                    val c = if (R.rtl) b.left.compareTo(a.left) else a.left.compareTo(b.left)
+                    if (c != 0) c else a.top.compareTo(b.top)
+                })
+            }
+            var text = ""
+            ordered.forEachIndexed { index, part ->
+                val t = part.text.trim()
+                if (t.isEmpty()) return@forEachIndexed
+                text = if (index == 0 || text.isEmpty()) t else joinText(text, t)
+            }
+            val clean = cleanSpeech(text)
+            if (clean.isBlank()) continue
+            linesOfBlocks.add(Row(
+                text = clean,
+                left = block.minOf { it.left },
+                top = block.minOf { it.top },
+                right = block.maxOf { it.right },
+                bottom = block.maxOf { it.bottom },
+                lh = block.maxOf { it.bottom } - block.minOf { it.top },
+            ))
+        }
+        if (linesOfBlocks.isEmpty()) return emptyList()
+
+        // ── D. Строки одного облачка — в ОДНУ реплику (порт mergeBubbles).
+        val bubbles = ArrayList<Row>()
+        for (line in linesOfBlocks.sortedWith(compareBy({ it.top }, { it.left }))) {
+            var bestIndex = -1
+            var bestGap = Double.MAX_VALUE
+            for (i in bubbles.indices) {
+                if (!sameBubble(bubbles[i], line, R)) continue
+                val gap = line.top - bubbles[i].bottom
+                if (gap < bestGap) { bestGap = gap; bestIndex = i }
+            }
+            if (bestIndex >= 0) {
+                val b = bubbles[bestIndex]
+                bubbles[bestIndex] = Row(
+                    text = joinText(b.text, line.text),
+                    left = min(b.left, line.left), top = min(b.top, line.top),
+                    right = max(b.right, line.right), bottom = max(b.bottom, line.bottom),
+                    lh = min(b.lh, line.h),
+                )
+            } else {
+                bubbles.add(Row(line.text, line.left, line.top, line.right, line.bottom, line.h))
+            }
+        }
+
+        // ── E. Обрывки в 1–3 знака приклеиваем к ближайшей реплике (absorbOrphans).
+        var orphans = bubbles
+        for (pass in 0 until 4) {
+            var merged = false
+            for (orphan in orphans.toList()) {
+                if (orphan.text.count { it.isLetter() || it.isDigit() } > 3) continue
+                val cx = (orphan.left + orphan.right) / 2
+                val cy = (orphan.top + orphan.bottom) / 2
+                var targetIndex = -1
+                var bestDistance = Double.MAX_VALUE
+                for (i in orphans.indices) {
+                    val b = orphans[i]
+                    if (b === orphan) continue
+                    val padX = b.w * 0.12
+                    val padY = b.h * 0.35
+                    if (cx < b.left - padX || cx > b.right + padX) continue
+                    if (cy < b.top - padY || cy > b.bottom + padY) continue
+                    val d = kotlin.math.abs(cy - (b.top + b.bottom) / 2)
+                    if (d < bestDistance) { bestDistance = d; targetIndex = i }
+                }
+                if (targetIndex < 0) continue
+                val b = orphans[targetIndex]
+                if (orphan.h > 0 && b.h > 0 && max(orphan.h, b.h) / min(orphan.h, b.h) > 2.5) continue
+                val above = cy < (b.top + b.bottom) / 2
+                val mergedRow = Row(
+                    text = if (above) joinText(orphan.text, b.text) else joinText(b.text, orphan.text),
+                    left = min(b.left, orphan.left), top = min(b.top, orphan.top),
+                    right = max(b.right, orphan.right), bottom = max(b.bottom, orphan.bottom),
+                    lh = b.lh,
+                )
+                orphans = ArrayList(orphans)
+                orphans[targetIndex] = mergedRow
+                orphans.remove(orphan)
+                merged = true
+                break
+            }
+            if (!merged) break
+        }
+
+        // ── F. Порядок реплик: «ряды» по вертикали, внутри ряда — справа налево
+        //       (порт orderBubbles). Это и есть порядок чтения манги.
+        val heights = orphans.map { it.h }.sorted()
+        val median = if (heights.isEmpty()) 0.05 else heights[heights.size / 2]
+        val tolerance = max(0.02, median * 0.8)
+        val bandsOut = ArrayList<MutableList<Row>>()
+        var bandTop = 0.0
+        for (b in orphans.sortedBy { it.top }) {
+            if (bandsOut.isNotEmpty() && b.top - bandTop <= tolerance) {
+                bandsOut.last().add(b)
+            } else {
+                bandsOut.add(mutableListOf(b))
+                bandTop = b.top
+            }
+        }
+        val ordered = ArrayList<Row>()
+        for (band in bandsOut) {
+            ordered.addAll(band.sortedWith { a, b ->
+                if (R.rtl) b.left.compareTo(a.left) else a.left.compareTo(b.left)
+            })
+        }
+
+        return ordered.map { r ->
+            JSONObject()
+                .put("text", r.text)
+                .put("left", r.left).put("top", r.top)
+                .put("right", r.right).put("bottom", r.bottom)
+        }
+    }
+
+    /**
+     * Полосы страницы: то, что видно на экране (доля страницы), плюс признак
+     * «страница целиком». Границы полос — правило чтения, а не интерфейс.
+     */
+    fun bands(
+        pageHeightPx: Double,
+        viewportPx: Double,
+        R: Rules,
+        wholeThreshold: Double = 0.72,
+        bandsMax: Int = 8,
+        overlap: Double = 0.0,
+    ): JSONArray {
+        val out = JSONArray()
+        val whole = {
+            val a = JSONArray()
+            a.put(JSONObject().put("index", 0).put("top", 0.0).put("bottom", 1.0).put("whole", true))
+            a
+        }
+        if (pageHeightPx <= 0 || viewportPx <= 0) return whole()
+        val fraction = viewportPx / pageHeightPx
+        if (fraction <= 0 || fraction >= wholeThreshold) return whole()
+        var top = 0.0
+        var idx = 0
+        while (idx < bandsMax) {
+            val bottom = min(1.0, top + fraction)
+            out.put(JSONObject().put("index", idx).put("top", top).put("bottom", bottom).put("whole", false))
+            if (bottom >= 0.999) return out
+            top = max(0.0001, bottom - fraction * overlap)
+            idx++
+        }
+        if (out.length() > 0) out.getJSONObject(out.length() - 1).put("bottom", 1.0)
+        return out
+    }
+}

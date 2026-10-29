@@ -1,6 +1,7 @@
 package net.koma.reader
 
 import android.content.Context
+import android.net.Uri
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import org.json.JSONArray
@@ -43,6 +44,13 @@ class KomaPluginsBridge(
     /** Где лежат пользовательские плагины — чтобы человек мог их положить. */
     @JavascriptInterface
     fun where(): String = dir.absolutePath
+
+    /** Открыть системный выбор файла плагина (копирование делает MainActivity). */
+    @JavascriptInterface
+    fun pick() {
+        val a = ctx as? MainActivity
+        a?.runOnUiThread { a.pickPluginFiles() }
+    }
 
     /** Все плагины: сначала вшитые (assets), затем пользовательские (filesDir). */
     @JavascriptInterface
@@ -94,6 +102,42 @@ class KomaPluginsBridge(
             .put("problems", problems)
             .put("dir", dir.absolutePath)
             .toString()
+    }
+
+    /**
+     * Плагины из файла, который человек выбрал системным «Файлами».
+     *
+     * Зачем: на Android 11+ папка приложения недоступна без root, и «положите
+     * файл в plugins» — совет, который невозможно выполнить. Теперь: выбрал
+     * .json в «Загрузках» → он скопирован в папку приложения → перечитан.
+     */
+    fun importUris(uris: List<Uri>): JSONObject {
+        val out = JSONObject()
+        val saved = JSONArray()
+        try {
+            dir.mkdirs()
+            var any = 0
+            for (u in uris) {
+                val name = (u.lastPathSegment ?: "plugin.json").substringAfterLast('/')
+                val safe = if (name.endsWith(".json", true)) name else "$name.json"
+                val dst = File(dir, safe)
+                val text = ctx.contentResolver.openInputStream(u)?.use { it.reader().readText() }
+                    ?: throw IllegalStateException("не удалось открыть файл")
+                // Проверяем, что это плагин, ДО записи: кривой файл не должен
+                // попадать в папку и ломать чтение при следующем запуске.
+                val obj = JSONObject(text)
+                dst.writeText(text)
+                saved.put(dst.name)
+                any++
+                if (obj.optString("id").isBlank() && obj.optString("name").isBlank()) {
+                    out.put("warning", "в файле нет id/name — работает, но непонятно, чей он")
+                }
+            }
+            out.put("ok", any > 0).put("saved", saved)
+        } catch (t: Throwable) {
+            out.put("ok", false).put("error", t.message ?: t.javaClass.simpleName)
+        }
+        return out
     }
 
     /** Перечитать плагины и сказать странице, что они обновились. */

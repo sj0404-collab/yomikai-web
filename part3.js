@@ -596,6 +596,59 @@ const Words = {
    'auto' — нативно, если мост есть и модели скопированы в приложение.
    Если нативный вызов упал, страница НЕ ломается: пишет причину в состояние
    и на этом кадре уходит на WASM. */
+/**
+ * ДВИЖОК ЧТЕНИЯ в приложении (`window.KomaRead`).
+ *
+ * Порядок реплик, склейка слов и полосы — это правила чтения, а не интерфейс.
+ * В АПК их считает Kotlin (ReadEngine.kt), страница только отдаёт строки и
+ * получает готовые реплики. В браузере моста нет — работает прежний путь,
+ * поэтому одна и та же сборка живёт и там, и там.
+ */
+const NativeRead = {
+  bridge() {
+    return (typeof window !== 'undefined' && window.KomaRead
+      && typeof window.KomaRead.plan === 'function') ? window.KomaRead : null;
+  },
+  present() { return !!this.bridge(); },
+
+  /** Строки → реплики в порядке чтения. null, если нативного движка нет. */
+  plan(items, R) {
+    const b = this.bridge();
+    if (!b) return null;
+    try {
+      const rules = {
+        dir: (R && R.readDir) || (typeof Reader !== 'undefined' && Reader.dir) || 'rtl',
+        bubbleGap: (R && R.bubbleGap) || 0.45,
+        mergeHeightRatio: (R && R.mergeHeightRatio) || 1.8,
+        maxBlockHeight: 0.22,
+      };
+      const raw = b.plan(JSON.stringify(items || []), JSON.stringify(rules));
+      const res = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || {}));
+      if (!res || res.ok !== true || !Array.isArray(res.replicas)) return null;
+      return res.replicas;
+    } catch (e) {
+      console.warn('нативный движок чтения не сработал', e);
+      return null;
+    }
+  },
+
+  /** Полосы страницы по видимой доле (0..1). null — нет моста. */
+  bands(frac, R) {
+    const b = this.bridge();
+    if (!b || typeof b.bands !== 'function') return null;
+    try {
+      const raw = b.bands(1, frac, JSON.stringify({
+        dir: (typeof Reader !== 'undefined' && Reader.dir) || 'rtl',
+        bubbleGap: (R && R.bubbleGap) || 0.45,
+        mergeHeightRatio: (R && R.mergeHeightRatio) || 1.8,
+        maxBlockHeight: 0.22,
+      }));
+      const arr = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || []));
+      return Array.isArray(arr) && arr.length ? arr : null;
+    } catch (e) { return null; }
+  },
+};
+
 const NativeOcr = {
   bridge() {
     return (typeof window !== 'undefined' && window.KomaOcr
@@ -1987,6 +2040,11 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         regions.push(item);
       }
       if (regions.length) {
+        // Порядок и склейку отдаём движку чтения в приложении: он делает те же
+        // шаги (ряды сверху вниз, справа налево, склейка обрывков, облачка), но
+        // в одном месте и без правок страницы. Нет моста — работает прежний путь.
+        let replicas = null;
+        try { replicas = NativeRead.plan(regions, R); } catch (e) { replicas = null; }
         OCR.engine = 'native';
         OCR.detPass = 'native';
         OCR.lastNativeMs = got.ms || 0;
@@ -1996,6 +2054,10 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         // а сумма есть, поэтому страница печатает один замер, а не два.
         return {
           regions,
+          // Готовые реплики (если приложение их собрало) и признак плана: по нему
+          // страница НЕ пересортировывает текст второй раз.
+          replicas: replicas || null,
+          plan: replicas ? 'native' : 'lines',
           // boxes/regions нужны шторке «Текст страницы»: без них она печатала
           // «8 строк · undefined блоков» (телефон 22:42).
           boxes: regions.length, regionsCount: regions.length,
@@ -2643,7 +2705,10 @@ function joinBubbleText(a, b) {
   if (!left) return right;
   if (!right) return left;
   const last = left[left.length - 1];
-  if ('-\u2010\u2011\u2013\u2014\u2015'.includes(last)) return left.slice(0, -1) + right;
+  const hyph = '-\u2010\u2011\u2013\u2014\u2015';
+  if (hyph.includes(last)) return left.slice(0, -1) + right.replace(new RegExp('^[' + hyph + ']+'), '');
+  // Правая часть начинается с дефиса («-ЧЕСТВО»): это перенос того же слова.
+  if (hyph.includes(right[0]) && /\p{L}$/u.test(left)) return left + right.slice(1);
   // «БУДЕ.» + «ТЕ ГОВОРИТЬ» → «БУДЕТЕ ГОВОРИТЬ»: перенос слова OCR читает
   // точкой вместо дефиса. Склеиваем, только если получается слово из словаря.
   if (joinBrokenWord(left, right)) return left.replace(/[.\-]$/, '') + right;
@@ -2922,6 +2987,14 @@ function markLargeText(result, source) {
 
 /* ───────────────────────── 7. Полосы экрана (KomaBands) ───────────────────────── */
 function bandsOf(viewportFraction, R) {
+  // Границы полос — правило чтения: если в АПК есть движок чтения, спрашиваем
+  // его. Ответ проверяем: пустой или битый — считаем как раньше.
+  try {
+    if (typeof NativeRead !== 'undefined' && NativeRead.present() && viewportFraction > 0) {
+      const native = NativeRead.bands(viewportFraction, R);
+      if (native && native.length) return native;
+    }
+  } catch (e) { /* нет моста — обычный путь */ }
   const whole = R.wholeThreshold, overlap = R.bandOverlap, max = Math.round(R.bandsMax);
   if (!viewportFraction || viewportFraction <= 0 || viewportFraction >= whole) {
     return [{ index: 0, top: 0, bottom: 1, whole: true }];

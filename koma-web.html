@@ -147,6 +147,10 @@
   .scanbadge{position:absolute;top:calc(env(safe-area-inset-top) + 60px);left:50%;transform:translateX(-50%);
     background:#000c;padding:6px 12px;border-radius:20px;font-size:11.5px;z-index:28;display:none}
   .scanbadge.on{display:block}
+
+  /* В АПК панель чтения нативная (под страницей). Своя HTML-панель в это
+     время скрыта: две панели на экране — это и было «дёргается». */
+  body.native-ui #playBar { display: none !important; }
 </style>
 </head>
 <body>
@@ -420,10 +424,27 @@
     <div class="row" style="justify-content:space-between;padding:6px 0">
       <span>Голос</span>
       <select id="selVoice" style="max-width:62%;background:#12160f;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:7px"></select>
+      <div class="row" style="gap:8px;align-items:center;margin-top:6px">
+        <span class="kv" style="min-width:72px">Синтез</span>
+        <select id="selTtsEngine" style="max-width:62%;background:#12160f;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:7px"></select>
+      </div>
     </div>
     <div class="row" style="justify-content:space-between;padding:6px 0">
       <span>Скорость</span>
       <input type="range" id="rngRate" min="0.6" max="1.6" step="0.05" style="max-width:60%">
+    </div>
+    <div class="lbl">ПЛАГИНЫ (JSON)</div>
+    <div class="kv" id="pluginsState" style="white-space:pre-wrap;line-height:1.45">Плагины не загружены</div>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" id="btnPluginsAdd">Добавить плагин из файла</button>
+      <button class="btn" id="btnPluginsReload">Перечитать плагины</button>
+    </div>
+    <div class="hint" style="margin-top:6px">
+      Правки поведения — правила распознавания, замены исковерканных слов, голос —
+      можно приносить файлом <b>.json</b> в папку плагинов и нажимать «Перечитать».
+      Пересобирать приложение для этого не нужно. «Добавить плагин из файла» берёт
+      <b>.json</b> прямо из «Загрузок» — папку приложения на Android 11+ без root не
+      открыть. Образец формата: <code>assets/plugins/00-example.json</code>.
     </div>
     <div class="lbl">РАМКИ</div>
     <label class="row" style="justify-content:space-between;padding:6px 0">
@@ -2438,7 +2459,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.37';
+const VERSION = 'v1.9.40';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2562,6 +2583,131 @@ async function unzip(buf) {
   files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
   return files;
 }
+
+/* ─────────────────── 2b. Плагины (JSON, без пересборки АПК) ───────────────────
+   Зачем: любая правка поведения (правила распознавания, замены слов, голос)
+   должна ехать ФАЙЛОМ, а не новой сборкой АПК. Плагины читает приложение
+   (мост `KomaPlugins`): вшитые в сборку assets/plugins и положенные человеком
+   в папку plugins рядом с приложением. Здесь они применяются.
+
+   Формат файла:
+     { "id": "...", "name": "...", "order": 10,
+       "rules": {...}, "wordFixes": {...},
+       "replace": [{"from": "ГОВОРЯ.ш", "to": "ГОВОРИШЬ"}],
+       "voice": {"engine": "", "voice": "", "rate": 1.0},
+       "ocr": {"engine": "auto"} }                                        */
+const Plugins = {
+  list: [], problems: [], dir: '', loaded: false,
+
+  bridge() {
+    return (typeof window !== 'undefined' && window.KomaPlugins
+      && typeof window.KomaPlugins.all === 'function') ? window.KomaPlugins : null;
+  },
+  present() { return !!this.bridge(); },
+
+  async load() {
+    this.list = []; this.problems = []; this.dir = ''; this.loaded = false;
+    const b = this.bridge();
+    if (b) {
+      try {
+        const raw = b.all();
+        const data = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || {}));
+        if (data && Array.isArray(data.plugins)) this.list = data.plugins.filter(p => p && typeof p === 'object');
+        if (data && Array.isArray(data.problems)) this.problems = data.problems.map(String);
+        if (data && data.dir) this.dir = String(data.dir);
+      } catch (e) {
+        this.problems.push('плагины не прочитались: ' + ((e && e.message) || e));
+      }
+    }
+    this.loaded = true;
+    return this.list;
+  },
+
+  /** Плагины по возрастанию order: последний — самый главный. */
+  ordered() {
+    return this.list.slice().sort((a, b) => (Number(a.order) || 100) - (Number(b.order) || 100));
+  },
+
+  /** Правила из плагинов: накладываются на сохранённые, поверх — sanitizeRules. */
+  rules() {
+    const out = {};
+    for (const p of this.ordered()) {
+      if (p.rules && typeof p.rules === 'object') Object.assign(out, p.rules);
+      if (p.ocr && typeof p.ocr === 'object' && p.ocr.engine) out.ocrEngine = p.ocr.engine;
+    }
+    return out;
+  },
+
+  /** Словарные правки из всех плагинов (слово → слово). */
+  wordFixes() {
+    const out = {};
+    for (const p of this.ordered()) {
+      if (p.wordFixes && typeof p.wordFixes === 'object') {
+        for (const [k, v] of Object.entries(p.wordFixes)) {
+          if (typeof v === 'string' && k) out[k] = v;
+        }
+      }
+    }
+    return out;
+  },
+
+  /** Точечные замены в распознанном тексте. */
+  replaceList() {
+    const out = [];
+    for (const p of this.ordered()) {
+      if (!Array.isArray(p.replace)) continue;
+      for (const r of p.replace) {
+        if (r && typeof r.from === 'string' && r.from) {
+          out.push({ from: r.from, to: typeof r.to === 'string' ? r.to : '' });
+        }
+      }
+    }
+    return out;
+  },
+
+  /** Замены применяются к готовой реплике: сначала точные, потом словарные. */
+  text(text) {
+    let t = String(text || '');
+    if (!t) return t;
+    for (const r of this.replaceList()) {
+      if (t.indexOf(r.from) !== -1) t = t.split(r.from).join(r.to);
+    }
+    const fixes = this.wordFixes();
+    if (Object.keys(fixes).length) {
+      t = t.replace(/[\p{L}\p{N}]+/gu, (w) => {
+        if (fixes[w] != null) return fixes[w];
+        const up = w.toUpperCase(), low = w.toLowerCase();
+        if (fixes[up] != null) return /^\p{Lu}/u.test(w) ? fixes[up] : fixes[up].toLowerCase();
+        if (fixes[low] != null) return fixes[low];
+        return w;
+      });
+    }
+    return t;
+  },
+
+  /** Голос из плагинов (движок/голос/скорость) — применяется при запуске. */
+  voice() {
+    const out = { engine: '', voice: '', rate: 0 };
+    for (const p of this.ordered()) {
+      if (!p.voice || typeof p.voice !== 'object') continue;
+      if (typeof p.voice.engine === 'string') out.engine = p.voice.engine;
+      if (typeof p.voice.voice === 'string') out.voice = p.voice.voice;
+      if (Number.isFinite(+p.voice.rate) && +p.voice.rate > 0) out.rate = +p.voice.rate;
+    }
+    return out;
+  },
+
+  /** Что показать человеку в настройках. */
+  describe() {
+    if (!this.present()) return 'Плагинов нет: страница открыта не в приложении.';
+    if (!this.list.length) return 'Плагинов нет. Папка: ' + (this.dir || '—');
+    const names = this.ordered().map(p => (p.name || p.id || 'без имени')
+      + (p._source ? ' [' + p._source + ']' : ''));
+    return 'Плагинов: ' + this.list.length + '\n' + names.join('\n')
+      + (this.problems.length ? '\nОшибки: ' + this.problems.join('; ') : '')
+      + '\nПапка: ' + (this.dir || '—');
+  },
+};
 
 /* ───────────────────────── 3. Библиотека ───────────────────────── */
 const Library = {
@@ -2784,12 +2930,16 @@ const SPEED_NOTES = {
 };
 
 let RULES = { ...DEFAULT_RULES };
-function sanitizeRules(r) {
+function sanitizeRules(r, overrides) {
   const R = { ...DEFAULT_RULES, ...(r || {}) };
   // Профиль скорости главнее сохранённых чисел: иначе старые значения
   // (pageSide 1600 и т. п.) молча отменяли бы выбранный профиль.
   if (!SPEED_PRESETS[R.speed]) R.speed = DEFAULT_RULES.speed;
   Object.assign(R, SPEED_PRESETS[R.speed]);
+  // Правила из JSON-плагинов — ПОСЛЕ профиля скорости: плагин и есть та
+  // правка, которую принесли файлом, чтобы переопределить поведение без
+  // пересборки. Дальше значения всё равно проходят проверки диапазонов.
+  if (overrides && typeof overrides === 'object') Object.assign(R, overrides);
   const num = (k, a, b) => { R[k] = clamp(Number(R[k]) || 0, a, b); };
   num('inkLowPercentile', 0, .5); num('inkHighPercentile', .5, 1); num('inkFlatSpread', 0, 128);
   num('inkCoefficient', 0, .95); num('inkMin', 0, 254); num('inkMax', 1, 255);
@@ -3283,6 +3433,59 @@ const Words = {
    'auto' — нативно, если мост есть и модели скопированы в приложение.
    Если нативный вызов упал, страница НЕ ломается: пишет причину в состояние
    и на этом кадре уходит на WASM. */
+/**
+ * ДВИЖОК ЧТЕНИЯ в приложении (`window.KomaRead`).
+ *
+ * Порядок реплик, склейка слов и полосы — это правила чтения, а не интерфейс.
+ * В АПК их считает Kotlin (ReadEngine.kt), страница только отдаёт строки и
+ * получает готовые реплики. В браузере моста нет — работает прежний путь,
+ * поэтому одна и та же сборка живёт и там, и там.
+ */
+const NativeRead = {
+  bridge() {
+    return (typeof window !== 'undefined' && window.KomaRead
+      && typeof window.KomaRead.plan === 'function') ? window.KomaRead : null;
+  },
+  present() { return !!this.bridge(); },
+
+  /** Строки → реплики в порядке чтения. null, если нативного движка нет. */
+  plan(items, R) {
+    const b = this.bridge();
+    if (!b) return null;
+    try {
+      const rules = {
+        dir: (R && R.readDir) || (typeof Reader !== 'undefined' && Reader.dir) || 'rtl',
+        bubbleGap: (R && R.bubbleGap) || 0.45,
+        mergeHeightRatio: (R && R.mergeHeightRatio) || 1.8,
+        maxBlockHeight: 0.22,
+      };
+      const raw = b.plan(JSON.stringify(items || []), JSON.stringify(rules));
+      const res = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || {}));
+      if (!res || res.ok !== true || !Array.isArray(res.replicas)) return null;
+      return res.replicas;
+    } catch (e) {
+      console.warn('нативный движок чтения не сработал', e);
+      return null;
+    }
+  },
+
+  /** Полосы страницы по видимой доле (0..1). null — нет моста. */
+  bands(frac, R) {
+    const b = this.bridge();
+    if (!b || typeof b.bands !== 'function') return null;
+    try {
+      const raw = b.bands(1, frac, JSON.stringify({
+        dir: (typeof Reader !== 'undefined' && Reader.dir) || 'rtl',
+        bubbleGap: (R && R.bubbleGap) || 0.45,
+        mergeHeightRatio: (R && R.mergeHeightRatio) || 1.8,
+        maxBlockHeight: 0.22,
+      }));
+      const arr = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || []));
+      return Array.isArray(arr) && arr.length ? arr : null;
+    } catch (e) { return null; }
+  },
+};
+
 const NativeOcr = {
   bridge() {
     return (typeof window !== 'undefined' && window.KomaOcr
@@ -4634,13 +4837,16 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // координаты совпадают. Если нативный вызов не удался — не ломаем чтение:
   // говорим причину в состояние и идём прежним, проверенным путём.
   if (!preDet && NativeOcr.chosen() === 'native') {
-    if (onProgress) onProgress('нативный движок', 0, 0);
-    let got = await NativeOcr.scan(src, R, (msg) => { if (onProgress) onProgress(msg, 0, 0); });
+    // Порядок аргументов ровно как у остальных вызовов: (сделано, всего, фаза).
+    // Раньше текст фазы уходил первым аргументом, страница считала
+    // Math.ceil('нативный движок') и в бейдже появлялось «Распознаём… NaN/0».
+    if (onProgress) onProgress(0, 0, 'нативный движок');
+    let got = await NativeOcr.scan(src, R, (msg) => { if (onProgress) onProgress(0, 0, msg); });
     // Ноль строк на нативном проходе — не приговор: порог уверенности движка
     // (0.25) на бледном или мелком кадре отрезает всё подряд. Один повтор с
     // мягким порогом стоит те же ~3 с, но страница не остаётся «пустой».
     if (got && got.ok && !(got.items || []).length) {
-      if (onProgress) onProgress('нативный движок: повтор с мягким порогом', 0, 0);
+      if (onProgress) onProgress(0, 0, 'нативный движок: повтор с мягким порогом');
       const soft = { ...R, minConfidence: 0.05, detRetry: true };
       const again = await NativeOcr.scan(src, soft, null);
       if (again && again.ok && (again.items || []).length) got = again;
@@ -4661,11 +4867,21 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           confidence: +it.confidence || 0,
         };
         if (!item.text || item.bottom <= item.top) continue;
-        if (band && !visible(item)) continue;
+        // ВАЖНО: lineInBand ждёт координаты В ПИКСЕЛЯХ ПОЛОСЫ (внутри неё он сам
+        // прибавляет y0), а item.top/bottom — доли ВСЕЙ страницы. Раньше сюда
+        // отдавались доли, сравнение шло с пикселями, и КАЖДАЯ нативная строка
+        // считалась «вне экрана»: нативный проход возвращал 0 строк, страница
+        // уходила в WASM и читала полосу 20 секунд вместо 3 (телефон 22:41).
+        if (band && !visible({ top: it.top * H, bottom: it.bottom * H, left: item.left, right: item.right })) continue;
         if (item.confidence <= R.minConfidence) continue;
         regions.push(item);
       }
       if (regions.length) {
+        // Порядок и склейку отдаём движку чтения в приложении: он делает те же
+        // шаги (ряды сверху вниз, справа налево, склейка обрывков, облачка), но
+        // в одном месте и без правок страницы. Нет моста — работает прежний путь.
+        let replicas = null;
+        try { replicas = NativeRead.plan(regions, R); } catch (e) { replicas = null; }
         OCR.engine = 'native';
         OCR.detPass = 'native';
         OCR.lastNativeMs = got.ms || 0;
@@ -4675,6 +4891,13 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         // а сумма есть, поэтому страница печатает один замер, а не два.
         return {
           regions,
+          // Готовые реплики (если приложение их собрало) и признак плана: по нему
+          // страница НЕ пересортировывает текст второй раз.
+          replicas: replicas || null,
+          plan: replicas ? 'native' : 'lines',
+          // boxes/regions нужны шторке «Текст страницы»: без них она печатала
+          // «8 строк · undefined блоков» (телефон 22:42).
+          boxes: regions.length, regionsCount: regions.length,
           det: { boxes: regions.length, pass: 'native' },
           ms: got.ms || Math.round(performance.now() - t0),
           detMs: null, recMs: null,
@@ -5263,7 +5486,28 @@ function bubblesOf(group, rtl, R) {
   };
   const flatBlocks = blocks.flatMap(splitTall);
   const lines = flatBlocks.map(block => {
-    const ordered = block.slice().sort((a, b) => rtl ? b.left - a.left : a.left - b.left);
+    // Строки облачка читаются СВЕРХУ ВНИЗ. Раньше они сортировались по X
+    // (справа налево для манги), и в облачке из четырёх строк порядок получался
+    // «снизу вверх»: обрывки склеивались не с теми соседями, слова выходили
+    // корявыми, часть пропадала, а часть читалась дважды (телефон 22:42).
+    // Внутри ОДНОЙ строки (несколько кусков на одной высоте) — по-прежнему
+    // справа налево: так читается сама строка.
+    const rows = [];
+    for (const part of block.slice().sort((a, b) => a.top - b.top)) {
+      const h = Math.max(part.bottom - part.top, 1e-6);
+      const row = rows.find(r => Math.min(r.bottom, part.bottom) - Math.max(r.top, part.top)
+        > Math.min(h, r.height) * 0.5);
+      if (row) {
+        row.parts.push(part);
+        row.top = Math.min(row.top, part.top);
+        row.bottom = Math.max(row.bottom, part.bottom);
+        row.height = row.bottom - row.top;
+      } else {
+        rows.push({ top: part.top, bottom: part.bottom, height: h, parts: [part] });
+      }
+    }
+    rows.sort((a, b) => a.top - b.top);
+    const ordered = rows.flatMap(r => r.parts.sort((a, b) => rtl ? b.left - a.left : a.left - b.left));
     // Склейка частей одной строки ровно как в KomaAutoRead:
     //   «ВЫСО-» + «ЧЕСТВО» → без пробела и без дефиса;
     //   обрывок в 1-2 буквы после буквы → тоже без пробела.
@@ -5298,7 +5542,10 @@ function joinBubbleText(a, b) {
   if (!left) return right;
   if (!right) return left;
   const last = left[left.length - 1];
-  if ('-\u2010\u2011\u2013\u2014\u2015'.includes(last)) return left.slice(0, -1) + right;
+  const hyph = '-\u2010\u2011\u2013\u2014\u2015';
+  if (hyph.includes(last)) return left.slice(0, -1) + right.replace(new RegExp('^[' + hyph + ']+'), '');
+  // Правая часть начинается с дефиса («-ЧЕСТВО»): это перенос того же слова.
+  if (hyph.includes(right[0]) && /\p{L}$/u.test(left)) return left + right.slice(1);
   // «БУДЕ.» + «ТЕ ГОВОРИТЬ» → «БУДЕТЕ ГОВОРИТЬ»: перенос слова OCR читает
   // точкой вместо дефиса. Склеиваем, только если получается слово из словаря.
   if (joinBrokenWord(left, right)) return left.replace(/[.\-]$/, '') + right;
@@ -5469,6 +5716,11 @@ function readingOrder(regions, rtl, onlyCyr, R) {
       const fixed = fixLookalikes(text);
       if (onlyCyr && !isCyr(fixed) && isLookalikeOnly(fixed)) text = fixLookalikesForced(fixed);
       else text = fixed;
+      // Правки из JSON-плагинов: то, что модель исказила системно («ГОВОРЯ.ш»),
+      // человек исправляет файлом, а не новой сборкой.
+      if (typeof Plugins !== 'undefined' && Plugins.list && Plugins.list.length) {
+        try { text = Plugins.text(text); } catch (e) { /* плагин не должен ломать чтение */ }
+      }
       return { ...r, text };
     })
     .filter(r => /[\p{L}\p{N}]/u.test(r.text))
@@ -5572,6 +5824,14 @@ function markLargeText(result, source) {
 
 /* ───────────────────────── 7. Полосы экрана (KomaBands) ───────────────────────── */
 function bandsOf(viewportFraction, R) {
+  // Границы полос — правило чтения: если в АПК есть движок чтения, спрашиваем
+  // его. Ответ проверяем: пустой или битый — считаем как раньше.
+  try {
+    if (typeof NativeRead !== 'undefined' && NativeRead.present() && viewportFraction > 0) {
+      const native = NativeRead.bands(viewportFraction, R);
+      if (native && native.length) return native;
+    }
+  } catch (e) { /* нет моста — обычный путь */ }
   const whole = R.wholeThreshold, overlap = R.bandOverlap, max = Math.round(R.bandsMax);
   if (!viewportFraction || viewportFraction <= 0 || viewportFraction >= whole) {
     return [{ index: 0, top: 0, bottom: 1, whole: true }];
@@ -6424,16 +6684,38 @@ const Reader = {
     try {
       const label = band ? `полосу ${i + 1}` : `страницу ${i + 1}`;
       const res = await recognizePage(c, RULES, (done, total, phase) => {
-        const n = Math.max(1, Math.ceil(done));
-        const t = phase
-          ? `Распознаём… ${phase} ${n}/${total}`
-          : `Распознаём… ${Math.min(total, n)}/${total}`;
+        // Числа проверяем: раньше сюда мог прийти текст фазы вместо числа, и в
+        // бейдже висело «Распознаём… NaN/0» (телефон 22:41).
+        const okDone = Number.isFinite(done), okTotal = Number.isFinite(total) && total > 0;
+        const t = (phase && !okTotal)
+          ? `Распознаём… ${phase}`
+          : (phase
+            ? `Распознаём… ${phase} ${Math.max(1, Math.ceil(done))}/${total}`
+            : (okTotal ? `Распознаём… ${Math.min(total, Math.max(1, Math.ceil(done)))}/${total}` : 'Распознаём…'));
         $('#scanBadge').textContent = t;
-        if (keepSheet) $('#textStats').textContent = `Распознаю ${label} заново… ${done}/${total}`;
+        if (keepSheet) {
+          $('#textStats').textContent = (okDone && okTotal)
+            ? `Распознаю ${label} заново… ${done}/${total}`
+            : `Распознаю ${label} заново…` + (phase ? ' ' + phase : '');
+        }
       }, band, opts.det || null);
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
-      let fresh = readingOrder(res.regions, rtl, true, RULES);
+      let fresh;
+      if (res.plan === 'native' && Array.isArray(res.replicas) && res.replicas.length) {
+        // Порядок и склейку уже сделал движок чтения в приложении. Здесь только
+        // слова: словарь и языковая починка живут в странице (3 МБ словаря).
+        fresh = res.replicas
+          .map(r => ({
+            ...r,
+            text: Words.polish(String(r.text || ''), RULES.junkRatio, r.confidence),
+          }))
+          .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+        OCR.readPlan = 'native';
+      } else {
+        fresh = readingOrder(res.regions, rtl, true, RULES);
+        OCR.readPlan = 'page';
+      }
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -6469,7 +6751,8 @@ const Reader = {
         || secTxt((Number(res.detMs) || 0) + (Number(res.recMs) || 0)) || '?';
       const how = nativePass
         ? `нативно, ${res.crops} строк`
-        : `детектор ${secTxt(res.detMs) || '0.0'} с, распознавание ${secTxt(res.recMs) || '0.0'} с, ${res.crops} строк`;
+        : `детектор ${secTxt(res.detMs) || '0.0'} с, распознавание ${secTxt(res.recMs) || '0.0'} с, ${res.crops} строк`
+          + (OCR.nativeNote ? `, нативно не вышло: ${String(OCR.nativeNote).slice(0, 80)}` : '');
       toast(`${band ? 'Полоса' : 'Страница'} ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${fresh.length} реплик`
         + (parts.length > 1 ? `, всего ${lines.length} на странице` : '')
         + ` · ${totalSec} с (${how})`, 6000);
@@ -6537,6 +6820,12 @@ const Reader = {
     this.spokenDirty = false;
     const k = 'spoken:' + this.book.id;
     DB.put('kv', { k, v: Array.from(this.spoken).slice(-4000) }).catch(() => {});
+  },
+  /** Непрочитанные реплики ВСЕЙ страницы — страховка от «прочитал одну». */
+  unspokenPage() {
+    const data = this.regions.get(this.page);
+    if (!data) return [];
+    return (data.lines || []).filter(l => !this.spoken.has(this.spokenKey(this.page, l.text)));
   },
   /** Непрочитанные реплики текущей полосы. */
   unspokenInBand() {
@@ -6608,6 +6897,30 @@ const Reader = {
     this.band = b;
     return this.unspokenInBand();
   },
+  /**
+   * Прокрутить к реплике, ТОЛЬКО если её не видно (или видно у самого края).
+   * Спокойное чтение вместо дёрганья: если строка уже на экране — не трогаем
+   * ленту вовсе.
+   */
+  scrollToLineIfNeeded(i, line) {
+    try {
+      const sc = $('#strip');
+      const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+      if (!sc || !wrap || !line || this.mode !== 'vertical') return false;
+      const h = wrap.getBoundingClientRect().height || ((this.pageRect(i) || {}).height || 0);
+      if (!h) return false;
+      const viewH = sc.clientHeight || window.innerHeight;
+      const abs = (wrap.offsetTop || 0) + clamp(line.top, 0, 1) * h;   // строка в ленте
+      const rel = abs - sc.scrollTop;                                  // где она на экране
+      // Уже хорошо видно: от 8 % до 80 % экрана — ничего не делаем.
+      if (rel > viewH * 0.08 && rel < viewH * 0.8) return false;
+      const target = Math.max(0, abs - viewH * 0.22);
+      if (Math.abs(target - sc.scrollTop) < 24) return false;
+      SMOOTH.to(target, 240);            // один твин на всех, без спора за ленту
+      return true;
+    } catch (e) { return false; }
+  },
+
   /** Прокрутить ленту ровно к началу полосы (без накопления сдвига). */
   scrollToBand(i, ni, animate = true) {
     const b = (this.bands || [])[ni];
@@ -6616,7 +6929,9 @@ const Reader = {
     if (!b || !wrap || !sc) return false;
     const h = wrap.getBoundingClientRect().height || ((this.pageRect(i) || {}).height || 0);
     if (!h) return false;
-    sc.scrollTo({ top: Math.max(0, (wrap.offsetTop || 0) + b.top * h), behavior: animate ? 'smooth' : 'auto' });
+    const target = Math.max(0, (wrap.offsetTop || 0) + b.top * h);
+    if (animate) SMOOTH.to(target, 260);
+    else { SMOOTH.stop(); sc.scrollTop = target; }
     return true;
   },
   /**
@@ -6818,6 +7133,42 @@ const VOICE = {
     try { return (sw.getVoices() || []).slice(); } catch (e) { return []; }
   },
 
+  /** Движки синтеза, установленные в системе (только в АПК). */
+  engines() {
+    if (!this.native() || typeof window.KomaSpeech.engines !== 'function') return [];
+    try {
+      const raw = window.KomaSpeech.engines();
+      const arr = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || []));
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  },
+  /** Переключить движок синтеза. Пусто — системный по умолчанию. */
+  useEngine(name) {
+    if (!this.native() || typeof window.KomaSpeech.useEngine !== 'function') return false;
+    try { window.KomaSpeech.useEngine(String(name || '')); this._voices = null; return true; }
+    catch (e) { return false; }
+  },
+
+  /** Короткая причина состояния голоса — для честных сообщений человеку. */
+  statusText() {
+    if (!this.native()) {
+      const sw = this.synth();
+      if (!sw) return 'синтеза речи нет';
+      return 'Web Speech: голосов ' + (sw.getVoices() || []).length;
+    }
+    try {
+      const raw = window.KomaSpeech.status();
+      const o = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw || {}));
+      const bits = [];
+      if (o.engine) bits.push(String(o.engine).split('.').pop());
+      bits.push(o.ready ? 'готов' : 'не готов');
+      if (o.ru === false) bits.push('нет русского голоса');
+      if (o.voices) bits.push('голосов ' + o.voices);
+      if (o.error) bits.push(o.error);
+      return bits.join(', ');
+    } catch (e) { return ''; }
+  },
+
   /** Скажет ли нативный движок по-русски; null — не знаем (браузер). */
   nativeReady() {
     if (!this.native()) return null;
@@ -6902,6 +7253,167 @@ const VOICE = {
   },
 };
 
+/* Кадр анимации и время: в браузере requestAnimationFrame/performance,
+   в прогонах без окна — таймер. Обёртки — чтобы не звать браузерные
+   глобалы напрямую (сборка проверяет, что каждый вызов определён). */
+const RAF = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
+  ? window.requestAnimationFrame.bind(window) : null;
+const CAF = (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function')
+  ? window.cancelAnimationFrame.bind(window) : null;
+const nowMs = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+/**
+ * ПЛАВНАЯ ПРОКРУТКА ЛЕНТЫ — один твин за раз.
+ *
+ * Было: три места дёргали `scrollTo({behavior:'smooth'})` независимо
+ * (scrollToLineIfNeeded, followLine, scrollToBand), и на смене реплики они
+ * спорили за ленту. Каждый вызов стартовал свою анимацию, лента бросала
+ * начатую и ехала к другой цели — это и есть «резко дёрнулся, потом ещё
+ * дважды» (телефон 28.10). Родной smooth-scroll в WebView при этом не даёт
+ * ни события «доехал», ни отмены.
+ *
+ * Стало: один requestAnimationFrame-твин. Новая цель во время движения не
+ * запускает вторую анимацию, а просто меняет точку назначения — движение
+ * остаётся непрерывным. `done()` ждёт, пока лента реально встанет, поэтому
+ * голос начинает реплику уже на неподвижной странице.
+ */
+const SMOOTH = {
+  _raf: 0, _to: 0, _wait: [],
+  /** Кадр: в браузере rAF, в тестах и старом WebView — таймер. */
+  _raf2(fn) {
+    if (typeof RAF === 'function') return RAF(fn);
+    return setTimeout(() => fn(nowMs()), 16);
+  },
+  _caf(id) {
+    if (!id) return;
+    try {
+      if (typeof CAF === 'function') CAF(id);
+      else clearTimeout(id);
+    } catch (e) { /* уже отменён */ }
+  },
+  /** Ехать к y (в пикселях ленты). Возвращает false, если ехать некуда. */
+  to(y, ms = 240) {
+    const sc = $('#strip');
+    if (!sc) return false;
+    const from = sc.scrollTop || 0;
+    const to = Math.max(0, Math.round(y));
+    if (Math.abs(to - from) < 2) { this._to = to; return false; }
+    this._to = to;
+    if (this._raf) return true;                 // уже едем — только цель обновилась
+    const start = from, t0 = nowMs();
+    const tick = (t) => {
+      const k = Math.min(1, Math.max(0, (t - t0) / ms));
+      const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;   // easeInOutQuad
+      sc.scrollTop = Math.max(0, start + (this._to - start) * e);
+      if (k < 1) { this._raf = this._raf2(tick); return; }
+      this._raf = 0;
+      sc.scrollTop = Math.max(0, this._to);
+      const w = this._wait; this._wait = [];
+      w.forEach(f => { try { f(); } catch (e) { /* ждём, не падаем */ } });
+    };
+    this._raf = this._raf2(tick);
+    return true;
+  },
+  /** Ждать остановки ленты (сразу, если она стоит). */
+  done() {
+    if (!this._raf) return Promise.resolve();
+    return new Promise(res => this._wait.push(res));
+  },
+  /** Человек сам тронул ленту — анимацию отдаём ему. */
+  stop() {
+    this._caf(this._raf);
+    this._raf = 0;
+    const w = this._wait; this._wait = [];
+    w.forEach(f => { try { f(); } catch (e) { } });
+  },
+};
+
+/**
+ * ИНТЕРФЕЙС ЧТЕНИЯ В АПК.
+ *
+ * В приложении панель чтения нативная (KomaUi): она лежит под страницей, не
+ * ездит вместе с лентой и не пересчитывает свою высоту на каждой реплике.
+ * Страница остаётся владельцем чтения — она лишь рассказывает панели, что
+ * сейчас звучит, и принимает от неё нажатия (`window.KomaUiCmd`). В браузере
+ * моста нет, и всё работает по-старому: своя HTML-панель.
+ */
+const NATIVE_UI = {
+  there() {
+    return !!(typeof window !== 'undefined' && window.KomaUi
+      && typeof window.KomaUi.show === 'function');
+  },
+  /** Отдать панели текущее состояние чтения. */
+  push() {
+    if (!this.there()) return false;
+    try {
+      const cur = (typeof Reader !== 'undefined' && Reader.current) || null;
+      const line = (TTS && (TTS.curLine || cur)) || null;
+      const total = (TTS && TTS.queue) ? TTS.queue.length : 0;
+      const idx = (TTS && TTS.curIdx) ? TTS.curIdx : (total ? 1 : 0);
+      const bands = (typeof Reader !== 'undefined' && Reader.bands) ? Reader.bands.length : 0;
+      const band = (typeof Reader !== 'undefined') ? (Reader.bandIndex | 0) + 1 : 0;
+      let voice = '';
+      try { voice = VOICE.native() ? 'Android TTS' : 'Web Speech'; } catch (e) { voice = ''; }
+      const paused = !!(TTS && TTS.paused);
+      const playing = !!(TTS && !TTS.stopped);
+      if (!playing && !line && !total) { this.hide(); return false; }
+      window.KomaUi.show(JSON.stringify({
+        text: (line && line.text) || '',
+        index: Math.min(idx || 0, total || 0),
+        total: total,
+        band: band, bands: bands,
+        playing: playing, paused: paused,
+        voice: voice,
+        status: paused ? 'пауза' : '',
+      }));
+      return true;
+    } catch (e) { console.warn('KomaUi.show', e); return false; }
+  },
+  hide() {
+    if (!this.there() || typeof window.KomaUi.hide !== 'function') return;
+    try { window.KomaUi.hide(); } catch (e) { /* моста уже нет */ }
+  },
+};
+
+/**
+ * КОМАНДЫ С НАТИВНОЙ ПАНЕЛИ (KomaUiBridge в АПК).
+ *
+ * Панель в приложении только показывает состояние и ловит нажатия; чтением
+ * владеет страница. Поэтому здесь ровно те же действия, что у своих кнопок —
+ * иначе поведение в АПК и в браузере разъехалось бы.
+ */
+if (typeof window !== 'undefined') {
+  window.KomaUiCmd = (cmd) => {
+    try {
+      switch (String(cmd || '')) {
+        case 'toggle':
+          if (TTS.stopped) {
+            TTS.prime();
+            Reader.scanCurrent(false).then(() => TTS.readVisible({ fromStart: true }));
+          } else if (!TTS.paused) {
+            TTS.pauseRead(); TTS.paused = true;
+          } else {
+            TTS.resumeRead(); TTS.paused = false;
+          }
+          break;
+        case 'next':
+          // Пропуск: гасим текущую фразу и сразу идём к следующей реплике.
+          VOICE.cancel();
+          if (!TTS.stopped) TTS.step();
+          break;
+        case 'repeat':
+          TTS.replay();
+          break;
+        case 'stop':
+        default:
+          TTS.stop();
+          break;
+      }
+    } catch (e) { console.warn('KomaUiCmd', e); }
+    NATIVE_UI.push();
+  };
+}
+
 const TTS = {
   voices: [], voice: null, rate: 1, speaking: false, stopped: true, queue: [], idx: 0, primed: false,
   init() {
@@ -6912,20 +7424,50 @@ const TTS = {
         this.voices = all.filter(v => /ru/i.test(v.lang)).concat(all.filter(v => !/ru/i.test(v.lang)));
         const sel = $('#selVoice');
         if (!sel) return;
-        sel.innerHTML = this.voices.length
-          ? this.voices.map((v, i) => `<option value="${i}">${escapeHtml(v.name)} (${v.lang})</option>`).join('')
-          : '<option value="">голосов нет</option>';
-        const saved = localStorage.getItem('koma.voice');
-        if (saved && this.voices[+saved]) sel.value = saved;
-        this.voice = this.voices[+sel.value] || null;
+        // Первый пункт — «системный по умолчанию». Это НЕ заглушка: именно так
+        // читают все, кто настроил голос в Android (Tera TTS и прочие).
+        const savedIdx = localStorage.getItem('koma.voice');
+        const chosen = (savedIdx !== null && savedIdx !== 'default') ? +savedIdx : -1;
+        sel.innerHTML = '<option value="default">системный (как в настройках Android)</option>'
+          + this.voices.map((v, i) =>
+            `<option value="${i}">${escapeHtml(v.name)} (${v.lang})</option>`).join('');
+        sel.value = (chosen >= 0 && this.voices[chosen]) ? String(chosen) : 'default';
+        this.voice = (sel.value === 'default') ? null : (this.voices[+sel.value] || null);
       } catch (e) { console.warn('голоса не заполнились', e); }
     };
     fill();
     const sw = VOICE.synth();
     if (sw) { try { sw.onvoiceschanged = fill; } catch (e) { /* ignore */ } }
+    // Список ДВИЖКОВ синтеза (в АПК): человек может выбрать Tera TTS, даже
+    // если системным по умолчанию стоит другой.
+    try {
+      const selE = $('#selTtsEngine');
+      if (selE && typeof VOICE.engines === 'function') {
+        const list = VOICE.engines();
+        if (list.length) {
+          const savedE = localStorage.getItem('koma.ttsEngine') || '';
+          selE.innerHTML = '<option value="">системный движок</option>'
+            + list.map(e => `<option value="${escapeHtml(e.name)}">${escapeHtml(e.label || e.name)}${e.default ? ' · по умолчанию' : ''}</option>`).join('');
+          selE.value = list.some(e => e.name === savedE) ? savedE : '';
+          selE.onchange = (ev) => {
+            const name = ev.target.value || '';
+            localStorage.setItem('koma.ttsEngine', name);
+            try { VOICE.useEngine(name); } catch (err) { console.warn('движок не переключился', err); }
+            VOICE._voices = null;          // голоса у нового движка свои
+            setTimeout(fill, 400);
+          };
+        }
+      }
+    } catch (e) { /* в браузере движков нет — это нормально */ }
     $('#selVoice').onchange = (e) => {
-      this.voice = this.voices[+e.target.value] || null;
-      localStorage.setItem('koma.voice', e.target.value);
+      // «default» — это выбор системного голоса, а не отсутствие выбора.
+      if (e.target.value === 'default') {
+        this.voice = null;
+        localStorage.setItem('koma.voice', 'default');
+      } else {
+        this.voice = this.voices[+e.target.value] || null;
+        localStorage.setItem('koma.voice', e.target.value);
+      }
     };
     const r = $('#rngRate');
     r.value = +(localStorage.getItem('koma.rate') || (RULES.speechRate || 1));
@@ -6940,6 +7482,22 @@ const TTS = {
     Reader.paintAllFrames();
     $('#playBar').style.display = 'none';
     $('#btnRead').textContent = '▶';
+    this.curLine = null; this.curIdx = 0;
+    NATIVE_UI.hide();
+  },
+  /**
+   * Повторить текущую реплику (кнопка ⟲ на нативной панели).
+   * Отдельный метод, потому что просто «ещё раз speakLine» без остановки
+   * накладывает вторую фразу на первую.
+   */
+  replay() {
+    const line = this.curLine || Reader.current;
+    if (!line || !line.text) return false;
+    VOICE.cancel();
+    this.stopped = false;
+    this.speakLine(line, () => { if (!this.stopped) this.step(); });
+    NATIVE_UI.push();
+    return true;
   },
   /**
    * Держать читаемую реплику в «безопасной» полосе экрана: сверху шапка и
@@ -6974,7 +7532,9 @@ const TTS = {
     const safeBottom = sr.top + sr.height - 170 - nowH;  // панель чтения + лента
     if (top >= safeTop && bottom <= safeBottom) return;
     const want = sr.top + sr.height * 0.3;               // реплику — в верхнюю треть
-    sc.scrollTo({ top: Math.max(0, sc.scrollTop + top - want), behavior: 'smooth' });
+    // Тот же единственный твин: followLine больше не тянет ленту отдельно от
+    // перехода к следующей полосе.
+    SMOOTH.to(Math.max(0, sc.scrollTop + top - want), 220);
   },
   /**
    * Chrome/WebView разрешает озвучку только «из жеста»: если между нажатием и
@@ -6992,19 +7552,21 @@ const TTS = {
       this.primed = true;
     } catch (e) { console.warn('голос не разблокировался', e); }
   },
-  /** Голос из списка, который реально доступен ПРЯМО СЕЙЧАС. */
+  /**
+   * Голос, которым читать.
+   *
+   * Возвращает null, если человек голос НЕ выбирал: тогда говорит системный
+   * голос по умолчанию — тот, что стоит в «Настройки → Синтез речи» (Tera TTS
+   * и любой другой). Раньше здесь брался первый русский голос движка, и это
+   * молча подменяло выбор человека (замечание 28.10 22:4x).
+   */
   pickVoice() {
+    const cur = this.voice;
+    if (!cur) return null;                       // «системный по умолчанию»
     let avail = [];
     try { avail = VOICE.voices() || []; } catch (e) { avail = []; }
-    if (!avail.length) return null;
-    const cur = this.voice;
-    if (cur && avail.some(v => v.voiceURI === cur.voiceURI || v.name === cur.name)) {
-      return avail.find(v => v.voiceURI === cur.voiceURI || v.name === cur.name);
-    }
-    // Сохранённый голос исчез (перезапуск WebView, смена TTS-движка) —
-    // берём русский по умолчанию, но НЕ подменяем выбор пользователя молча:
-    // об этом говорим тостом ниже.
-    return avail.find(v => /^ru/i.test(v.lang)) || null;
+    if (!avail.length) return null;              // список не отдан — пусть решает движок
+    return avail.find(v => v.voiceURI === cur.voiceURI || v.name === cur.name) || null;
   },
   speakLine(line, then) {
     // «Прочитано» отмечаем ТОЛЬКО когда голос реально заговорил (нажатие ▶ не
@@ -7040,10 +7602,20 @@ const TTS = {
       this._voiceTries = 0;
     }
     const chosen = this.pickVoice();
-    if (chosen && this.voice && chosen.voiceURI !== this.voice.voiceURI) {
+    if (this.voice && !chosen) {
+      // Выбранный раньше голос пропал (сменили движок синтеза, перезапустили
+      // TTS). Не подсовываем «первый русский» — возвращаемся к системному и
+      // говорим об этом один раз.
+      toast('Голос «' + (this.voice.name || '') + '» пропал — читаю системным', 5000);
+      this.voice = null;
+    } else if (chosen && this.voice && chosen.voiceURI !== this.voice.voiceURI) {
       toast('Голос «' + (this.voice.name || '') + '» недоступен, читаю ' + chosen.name, 5000);
+      this.voice = chosen;
+    } else if (chosen) {
+      this.voice = chosen;
     }
-    if (chosen) this.voice = chosen;
+    // Явно выбранный голос — только если человек его выбирал. Иначе null:
+    // мост не будет трогать голос и локаль, и заговорит системный (Tera TTS).
     // cancel() «на всякий случай» убивает очередь: следующий вызов уже не
     // запускается. Отменяем только если что-то реально звучит (в браузере) —
     // нативный движок отменять перед каждой репликой не нужно и вредно.
@@ -7094,17 +7666,39 @@ const TTS = {
     // Если синтез не начал говорить и не сообщил ошибку — молчать нельзя:
     // именно это выглядело как «голос по умолчанию молчит».
     clearTimeout(this._watch);
-    this._watch = setTimeout(() => {
-      if (started || this.stopped) return;
-      if (VOICE.native()) {
-        if (VOICE.nativeReady() === false) toast('Android TTS не готов: Настройки → Синтез речи', 6000);
-        return;
-      }
-      const sw = VOICE.synth();
-      if (sw && !sw.speaking && !sw.pending) {
-        toast('Синтез не ответил. Нажмите ⚙ → «Проверить голос»', 6000);
-      }
-    }, 1200);
+    const watchdog = (ms) => {
+      clearTimeout(this._watch);
+      this._watch = setTimeout(() => {
+        if (started || this.stopped) return;
+        if (VOICE.native()) {
+          // Не заговорил — пробуем ещё раз системным голосом БЕЗ выбора
+          // конкретного голоса и без скорости. Раньше при «движок молчит»
+          // страница просто останавливалась, и это выглядело как «голос умер».
+          if ((this._softAgain || 0) < 1) {
+            this._softAgain = (this._softAgain || 0) + 1;
+            try {
+              VOICE.speak(line.text, {
+                lang: 'ru-RU', rate: 1, voice: null,
+                onstart: () => { started = true; },
+                onend: () => { if (then) then(); },
+                onerror: (e) => { console.warn('голос: повтор не удался', e); },
+              });
+            } catch (e) { console.warn('голос: повтор не запустился', e); }
+            watchdog(2200);
+            return;
+          }
+          const st = VOICE.statusText ? VOICE.statusText() : '';
+          toast('Голос не заговорил. ⚙ → «Проверить голос»' + (st ? ': ' + st : ''), 7000);
+          return;
+        }
+        // Браузер: молчание Web Speech видно по speaking/pending.
+        const sw = VOICE.synth();
+        if (sw && !sw.speaking && !sw.pending) {
+          toast('Синтез не ответил. Нажмите ⚙ → «Проверить голос»', 6000);
+        }
+      }, ms);
+    };
+    watchdog(1500);
     // Прокрутка — ПОСЛЕ запуска речи и в try: ошибка геометрии не должна съедать звук.
     try { this.followLine(line); } catch (e) { console.warn('не прокрутил к реплике', e); }
     // Пока звучит эта реплика — тихо распознаём следующую полосу. Так переход
@@ -7114,6 +7708,7 @@ const TTS = {
   /** Пауза: в браузере — настоящая, в АПК — остановка с продолжением реплики заново. */
   pauseRead() {
     const mode = VOICE.pause();
+    setTimeout(() => NATIVE_UI.push(), 0);
     if (mode === 'restart') {
       this.pausedLine = Reader.current;
       toast('В приложении пауза = стоп: продолжу эту реплику сначала', 3500);
@@ -7121,6 +7716,7 @@ const TTS = {
     return mode;
   },
   resumeRead() {
+    setTimeout(() => NATIVE_UI.push(), 0);
     if (VOICE.native()) {
       const line = this.pausedLine;
       this.pausedLine = null;
@@ -7129,7 +7725,12 @@ const TTS = {
     }
     return VOICE.resume();
   },
-  async readVisible() {
+  async readVisible(opts = {}) {
+    // fromStart — человек нажал ▶ сам. Тогда читаем С ВЕРХА видимой полосы,
+    // включая то, что уже было прочитано раньше. Раньше отметки «прочитано»
+    // соблюдались и при явном нажатии: страница молча ждала, пока дойдёшь до
+    // места, где остановился в прошлый раз (жалоба с телефона 22:41).
+    const fromStart = !!opts.fromStart;
     // Если страница ещё не распознана — сначала распознать, потом читать.
     // Раньше в этот момент вылезало «На этой полосе нет распознанного текста»
     // прямо во время сканирования, хотя текст вот он.
@@ -7156,7 +7757,7 @@ const TTS = {
         await Reader.scanCurrent(false, det);        // детекция уже есть — второй раз не гоняем
       }
     }
-    const lines = Reader.unspokenInBand();
+    const lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
     if (!lines.length && Reader.visibleLines().length) {
       // На этой полосе всё прочитано — переходим к следующему куску.
       return this.advanceReading();
@@ -7170,6 +7771,7 @@ const TTS = {
     }
     this.queue = lines.slice();          // только непрочитанное на этой полосе
     this.stopped = false; this.idx = 0;
+    this._softAgain = 0;                 // новый запуск — снова есть право на повтор
     Reader.prefetchNext();               // следующая страница — пока слушаем эту
     $('#playBar').style.display = 'flex';
     $('#btnRead').textContent = '⏸';
@@ -7244,11 +7846,15 @@ const TTS = {
         return;
       }
       $('#playStatus').textContent = '';
+      NATIVE_UI.push();
       this.onQueueEnd();
       return;
     }
     const line = this.queue[this.idx++];
+    this.curLine = line;                       // что звучит — для панели и ⟲
+    this.curIdx = this.idx;
     $('#playStatus').textContent = (RULES.semiManual && State.semi) ? 'ждём прокрутки' : '';
+    NATIVE_UI.push();
     this.speakLine(line, () => { if (!this.stopped) this.step(); });
   },
   /**
@@ -7258,64 +7864,80 @@ const TTS = {
    * распознаём: «страница уже есть в памяти» не значит «есть эта полоса».
    */
   async advanceReading() {
-    // Страницу запоминаем на входе: прокрутка ленты может пересчитать
-    // Reader.page по геометрии, и тогда «следующая страница» перескакивала
-    // через одну (0 → 2 → 4 …).
-    let page = Reader.page;
-    for (let guard = 0; guard < 64; guard++) {
-      if (this.stopped) return;
-      const i = page;
-      Reader.page = i;
-      const bands = Reader.bands || [];
-      const ni = (Reader.bandIndex || 0) + 1;
-      if (ni < bands.length) {
-        // ПОРЯДОК ВАЖЕН: сначала распознаём полосу, потом прокручиваем к ней.
-        // Было наоборот — экран прыгал на ещё не распознанную полосу, голос
-        // молчал, полоса оказывалась пустой, экран прыгал дальше. С телефона
-        // это выглядело как «резко скролит и не читает, а читает спустя
-        // несколько прокруток» (скриншоты 22:11–22:12).
-        const un = await Reader.ensureBandLines(i, ni);
-        if (!un.length) {
-          // Читать нечего — НЕ прокручиваем экран впустую: идём к следующей
-          // полосе так же, заранее, и прокрутим один раз туда, где текст есть.
+    // ОДИН проход за раз. Раньше два вызова (из step и из конвейера) шли
+    // параллельно: каждый считал «следующую полосу» и дёргал ленту — отсюда
+    // «дёрнулся, потом ещё дважды, а прочитал одну реплику» (телефон 28.10).
+    if (this._advancing) return;
+    this._advancing = true;
+    try {
+      let page = Reader.page;
+      for (let guard = 0; guard < 64; guard++) {
+        if (this.stopped) return;
+        Reader.page = page;
+        const bands = Reader.bands || [];
+        let found = null, foundNi = -1;
+        for (let ni = (Reader.bandIndex || 0) + 1; ni < bands.length; ni++) {
+          const un = await Reader.ensureBandLines(page, ni);
+          if (this.stopped) return;
+          if (un.length) { found = un; foundNi = ni; break; }
+          // Полоса пустая после распознавания — идём дальше, но БЕЗ прокрутки.
+        }
+        if (found) {
+          Reader.bandIndex = foundNi;
+          Reader.band = bands[foundNi] || Reader.band;
+          Reader.page = page;
+          Reader.scrollToLineIfNeeded(page, found[0]);
+          // Ждём именно остановки ленты, а не «примерно 160 мс»: раньше голос
+          // начинал реплику, пока страница ещё ехала, и она прыгала под звук.
+          await SMOOTH.done();
+          await sleep(40);
+          Reader.page = page;
+          return this.readQueue(found);
+        }
+        // Полосы кончились, а на странице остались непрочитанные реплики
+        // (например, текст попал в полосу, которую мы не считали текущей):
+        // читаем их, а не прыгаем дальше молча.
+        Reader.bandIndex = bands.length;
+        const rest = Reader.unspokenPage();
+        if (rest.length) { Reader.page = page; return this.readQueue(rest); }
+
+        // Следующая страница. Тоже: распознать, потом листать.
+        if (page < Reader.pages.length - 1) {
+          const next = page + 1;
+          await Reader.ensureLoaded(next);
+          Reader.page = next;
+          Reader.bandIndex = 0;
+          Reader.band = (Reader.bands || [])[0] || null;
+          await Reader.waitIdle();
+          if (!Reader.regions.get(next)) {
+            await Reader.scanPage(next, { full: true, silent: true }).catch(() => {});
+          }
+          Reader.page = next;
+          Reader.band = (Reader.bands || [])[0] || null;
+          const un = Reader.unspokenInBand();
+          if (un.length) {
+            Reader.scrollToLineIfNeeded(next, un[0]);
+            return this.readQueue(un);
+          }
+          const restNext = Reader.unspokenPage();
+          if (restNext.length) return this.readQueue(restNext);
+          page = next;
           continue;
         }
-        Reader.scrollToBand(i, ni);
-        await sleep(260);
-        Reader.page = i;
-        return this.readQueue(un);
+        this.stop();
+        toast('Конец книги', 2500);
+        return;
       }
-      // Полосы кончились — следующая страница. Тоже: распознать, потом листать.
-      if (i < Reader.pages.length - 1) {
-        const next = i + 1;
-        await Reader.ensureLoaded(next);
-        Reader.bandIndex = 0;
-        // И «текущая полоса» тоже должна вернуться к первой: иначе на новой
-        // странице читались реплики ПРОШЛОЙ полосы (пропускался верх страницы).
-        Reader.page = next;
-        Reader.band = (Reader.bands || [])[0] || null;
-        await Reader.waitIdle();
-        if (!Reader.regions.get(next)) await Reader.scanPage(next, { full: true, silent: true }).catch(() => {});
-        Reader.page = next;
-        Reader.bandIndex = 0;
-        Reader.band = (Reader.bands || [])[0] || null;
-        const un = Reader.unspokenInBand();
-        Reader.scrollToPage(next);
-        page = next;                        // дальше читаем уже эту страницу
-        if (un.length) { await sleep(200); return this.readQueue(un); }
-        continue;
-      }
-      this.stop();
-      toast('Конец книги', 2500);
-      return;
+    } finally {
+      this._advancing = false;
     }
-    this.stop();
-    toast('Дальше читать нечего', 2500);
   },
+
   /** Прочитать ровно этот список реплик (без повторного вывода полосы). */
   readQueue(lines) {
     this.queue = lines.slice();
     this.idx = 0;
+    this.curLine = null; this.curIdx = 0;
     this.stopped = false;
     $('#playBar').style.display = 'flex';
     $('#btnRead').textContent = '⏸';
@@ -7510,9 +8132,14 @@ async function renderTextSheet(i) {
       + (data.lensPlaced === 'det' ? 'рамки по облачкам (найдены локально, порядок из Lens)' : 'рамки примерные — полосы')
     : data.cached
     ? `${data.lines.length} реплик · из буфера (без повторного распознавания)`
-    : `${raw.length} строк · ${data.boxes} блоков · ${data.crops} кропов · `
-      + `итого ${(data.ms / 1000).toFixed(1)} с = детектор ${(data.detMs / 1000).toFixed(1)} с `
-      + `+ распознавание ${(data.recMs / 1000).toFixed(1)} с`
+    : `${raw.length} строк · ${Number.isFinite(data.boxes) ? data.boxes : raw.length} блоков · ${data.crops || 0} кропов · `
+      // Нативный проход неделим (детектор и распознавание — один вызов), поэтому
+      // вместо двух чисел печатаем одно и слово «нативно». Раньше здесь были
+      // подстановки undefined → «NaN с» и «0.0 с» (телефон 22:42).
+      + ((data.detPass === 'native' || data.via === 'native')
+        ? `итого ${(Number(data.ms) || 0) / 1000 < 0.05 ? '?' : ((Number(data.ms) || 0) / 1000).toFixed(1)} с нативно (одним проходом)`
+        : `итого ${((Number(data.ms) || 0) / 1000).toFixed(1)} с = детектор ${((Number(data.detMs) || 0) / 1000).toFixed(1)} с `
+          + `+ распознавание ${((Number(data.recMs) || 0) / 1000).toFixed(1)} с`)
       + (data.bands > 1 ? ` · полос: ${data.bands}` : '')
       + (data.detPass && data.detPass !== 'normal'
         ? ' · детектор нашёл со 2-й попытки: ' + ({
@@ -7795,6 +8422,12 @@ async function pickModels() {
 function watchScroll() {
   const strip = $('#strip');
   let t = null, raf = 0;
+  // Человек тронул ленту пальцем — отдаём прокрутку ему, анимация чтения
+  // уступает и не «догоняет» под пальцем.
+  try {
+    strip.addEventListener('touchstart', () => SMOOTH.stop(), { passive: true });
+    strip.addEventListener('wheel', () => SMOOTH.stop(), { passive: true });
+  } catch (e) { /* не критично */ }
   const busy = () => {
     Reader.scrollBusy = true;
     clearTimeout(t);
@@ -8515,7 +9148,35 @@ function bindUI() {
     const i = (Reader.textPage ?? Reader.page);
     await Reader.scanPage(i, { keepSheet: false });
     closeSheets();
-    TTS.readVisible();
+    // Человек нажал сам — читаем с начала того, что на экране, а не с того
+    // места, где остановились в прошлый раз.
+    TTS.readVisible({ fromStart: true });
+  };
+  const btnAdd = $('#btnPluginsAdd');
+  if (btnAdd) btnAdd.onclick = () => {
+    try {
+      if (Plugins.present() && typeof window.KomaPlugins.pick === 'function') {
+        window.KomaPlugins.pick();
+        toast('Выберите .json-файл плагина', 4000);
+        return;
+      }
+    } catch (e) { /* нет моста */ }
+    toast('Добавлять плагины можно только в приложении', 4000);
+  };
+  // В приложении панель нативная — своя HTML-панель в это время не нужна:
+  // две панели на экране и были источником «прыжков» (28.10).
+  if (NATIVE_UI.there()) document.body.classList.add('native-ui');
+
+  const btnPlug = $('#btnPluginsReload');
+  if (btnPlug) btnPlug.onclick = () => {
+    try {
+      if (Plugins.present() && typeof window.KomaPlugins.reload === 'function') {
+        window.KomaPlugins.reload();
+        toast('Перечитываю плагины…', 2000);
+        return;
+      }
+    } catch (e) { /* нет моста — покажем, что есть */ }
+    Plugins.load().then(syncPluginsUI);
   };
   $('#btnFrames').onclick = () => {
     Reader.frames = !Reader.frames;
@@ -8530,7 +9191,9 @@ function bindUI() {
   $('#btnRead').onclick = () => {
     if (TTS.stopped) {
       TTS.prime();                       // разблокировать голос в жесте
-      Reader.scanCurrent(false).then(() => TTS.readVisible());
+      // Явное нажатие ▶ = «читай отсюда и с начала», а не «продолжай с того
+      // места, где я остановился в прошлый раз» (жалоба 28.10 22:41).
+      Reader.scanCurrent(false).then(() => TTS.readVisible({ fromStart: true }));
     } else { TTS.stop(); }
   };
   // Стартовая карточка: страница сама ничего не запускает.
@@ -8713,6 +9376,20 @@ function syncSettingsUI() {
   $('#cbAuto').checked = !TTS.stopped;
 }
 
+/**
+ * Блок «Плагины» в настройках: сколько их, откуда и что не прочиталось.
+ * Без этого человек не узнал бы, что его JSON вообще подхватился.
+ */
+function syncPluginsUI() {
+  const box = $('#pluginsState');
+  if (!box) return;
+  try {
+    box.textContent = Plugins.describe();
+  } catch (e) {
+    box.textContent = 'плагины не показались: ' + ((e && e.message) || e);
+  }
+}
+
 /* ───────────────────────── 13. Старт ───────────────────────── */
 // Ошибки не должны прятаться в консоли: иначе кнопка «молчит», и непонятно почему.
 window.addEventListener('error', (e) => {
@@ -8780,10 +9457,28 @@ async function selfCheck() {
   await step('словарь', () => Words.load().catch(e => console.warn('словарь не загрузился', e)));
   await step('прокрутка', () => watchScroll());
   await step('голос', () => TTS.init());
+  await step('голос из плагинов', () => {
+    if (typeof Plugins === 'undefined' || !Plugins.present()) return;
+    const v = Plugins.voice();
+    if (v.engine) { try { VOICE.useEngine(v.engine); } catch (e) {} }
+    if (v.rate > 0) { TTS.rate = v.rate; const r = $('#rngRate'); if (r) r.value = v.rate; }
+    if (v.voice) {
+      TTS.voice = (VOICE.voices() || []).find(x => x.name === v.voice) || null;
+    }
+  });
+  await step('плагины: перечитать по событию', () => {
+    if (typeof window === 'undefined' || !window.addEventListener) return;
+    window.addEventListener('koma-plugins', async () => {
+      await Plugins.load();
+      toast('Плагины перечитаны: ' + Plugins.list.length, 3000);
+      syncPluginsUI();
+    });
+  });
   // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
   // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
   await step('движок', () => LENS.load());
   await step('вид движка', () => syncEngineUI());
+  await step('плагины', () => Plugins.load());
   await step('правила', async () => {
     const saved = await DB.get('kv', 'rules');
     // Правила прогоняем через sanitizeRules ВСЕГДА, даже без сохранённых:
@@ -8791,7 +9486,13 @@ async function selfCheck() {
     // (pageSide 1280, без перебора) оставалось только словом в настройках.
     let parsedRules = {};
     if (saved) { try { parsedRules = JSON.parse(saved.v) || {}; } catch (e) { console.warn(e); } }
-    RULES = sanitizeRules(parsedRules);
+    // Плагины главнее сохранённых настроек: это правка, которую принесли файлом.
+    const fromPlugins = (typeof Plugins !== 'undefined') ? Plugins.rules() : {};
+    const fixes = (typeof Plugins !== 'undefined') ? Plugins.wordFixes() : {};
+    RULES = sanitizeRules(parsedRules, fromPlugins);
+    if (Object.keys(fixes).length) {
+      RULES.wordFixes = { ...(RULES.wordFixes || {}), ...fixes };
+    }
   });
   await step('рамки', () => {
     // Раньше эта настройка жила только в памяти Reader: после перезапуска
@@ -8821,6 +9522,7 @@ async function selfCheck() {
     }
   });
   await step('сведения о правилах', () => renderRulesInfo());
+  await step('плагины: показать', () => syncPluginsUI());
   await step('подсказка о движке', () => {
     if (LENS.isLens()) toast('Движок из прошлой сессии — Google Lens. Чтобы вернуть офлайн, откройте ⚙ → Модели', 7000);
   });

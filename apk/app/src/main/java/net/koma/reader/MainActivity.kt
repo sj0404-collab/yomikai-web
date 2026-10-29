@@ -44,6 +44,9 @@ class MainActivity : android.app.Activity() {
     private lateinit var engine: GlensEngine
     private lateinit var speech: KomaSpeechBridge
     private lateinit var plugins: KomaPluginsBridge
+    // Интерфейс чтения — нативный: полоса под страницей, а не HTML поверх ленты.
+    private lateinit var ui: KomaUiBridge
+    private val readEngine = KomaReadBridge()
     private lateinit var ocrEngine: OcrEngine
     private lateinit var ocr: KomaOcrBridge
     private var fileCallback: ValueCallback<Array<Uri>>? = null
@@ -55,6 +58,8 @@ class MainActivity : android.app.Activity() {
     private val RC_FILES = 1001
     // Отдельный выбор — для НАТИВНЫХ моделей (они копируются в приложение).
     private val RC_MODELS = 1002
+    // И ещё один — для плагинов (.json): их кладут в приложение из «Файлов».
+    private val RC_PLUGIN = 1003
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,7 +89,19 @@ class MainActivity : android.app.Activity() {
         plugins = KomaPluginsBridge(this) { web }
 
         web = WebView(this)
-        setContentView(web, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // Страница и панель чтения — в одной колонке: страница сверху (занимает
+        // всё свободное место), нативная панель снизу. Так панель никогда не
+        // ложится на облачко с текстом и не пересчитывает высоту на каждой
+        // реплике — то, из-за чего страница «дёргалась» (28.10).
+        ui = KomaUiBridge(this) { web }
+        val root = android.widget.LinearLayout(this)
+        root.orientation = android.widget.LinearLayout.VERTICAL
+        root.addView(web, android.widget.LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(ui.view, android.widget.LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        setContentView(root, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         with(web.settings) {
             javaScriptEnabled = true
@@ -172,6 +189,8 @@ class MainActivity : android.app.Activity() {
         web.addJavascriptInterface(speech, "KomaSpeech")
         web.addJavascriptInterface(ocr, "KomaOcr")
         web.addJavascriptInterface(plugins, "KomaPlugins")
+        web.addJavascriptInterface(readEngine, "KomaRead")
+        web.addJavascriptInterface(ui, "KomaUi")
         web.addJavascriptInterface(
             KomaAppBridge(updater, engine, appVersion, { web }) { reason -> runOnUiThread { reload(reason) } },
             "KomaApp"
@@ -239,6 +258,21 @@ class MainActivity : android.app.Activity() {
     }
 
     /** Системный выбор файлов моделей для нативного движка. */
+    /** Системный выбор файлов плагина (.json). */
+    fun pickPluginFiles() {
+        try {
+            val it = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream"))
+            }
+            startActivityForResult(it, RC_PLUGIN)
+        } catch (e: Exception) {
+            runOnUiThread { Toast.makeText(this, "Выбор файлов не открылся: ${e.message}", Toast.LENGTH_LONG).show() }
+        }
+    }
+
     private fun pickModelFiles() {
         try {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -270,6 +304,27 @@ class MainActivity : android.app.Activity() {
             web.evaluateJavascript(
                 "try{window.dispatchEvent(new CustomEvent('koma-models',{detail:" +
                 JSONObject.quote(res.toString()) + "}));}catch(e){}", null)
+            return
+        }
+        if (requestCode == RC_PLUGIN) {
+            val uris = ArrayList<Uri>()
+            try {
+                val clip = data?.clipData
+                if (clip != null) for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+                else data?.data?.let { uris.add(it) }
+            } catch (e: Exception) { /* ниже скажем, что ничего не выбрано */ }
+            val res = plugins.importUris(uris)
+            runOnUiThread {
+                Toast.makeText(this,
+                    if (res.optBoolean("ok")) "Плагин добавлен: " + res.optJSONArray("saved")
+                    else "Плагин не добавлен: " + res.optString("error"),
+                    Toast.LENGTH_LONG).show()
+            }
+            web.post {
+                web.evaluateJavascript(
+                    "try{window.dispatchEvent(new CustomEvent('koma-plugins',{detail:" +
+                    JSONObject.quote(res.toString()) + "}));}catch(e){}", null)
+            }
             return
         }
         if (requestCode != RC_FILES) return
