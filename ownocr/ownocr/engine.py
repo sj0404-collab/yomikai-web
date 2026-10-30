@@ -166,18 +166,27 @@ class OwnOCR:
     def __init__(self, model_dir: str, vocab_path: str | None = DEFAULT_VOCAB,
                  vocab_size: int = 40000):
         from .model import OwnClassifier
-        meta = json.load(open(os.path.join(model_dir, 'ownocr.npz.json'), encoding='utf-8'))
+        meta_name = next(f for f in ('ownocr-latest.npz.json', 'ownocr.npz.json')
+                         if os.path.exists(os.path.join(model_dir, f)))
+        meta = json.load(open(os.path.join(model_dir, meta_name), encoding='utf-8'))
         self.classes = list(meta['classes'])
         self.case = meta.get('case', 'upper')
         self.model = OwnClassifier(meta['dim'], len(self.classes), hidden=meta.get('hidden', 192))
-        self.model.load(os.path.join(model_dir, 'ownocr.npz'))
+        # курс обучения кладёт модель как ownocr-latest.npz, старые скрипты — ownocr.npz
+        weights = [f for f in ('ownocr-latest.npz', 'ownocr.npz') if
+                   os.path.exists(os.path.join(model_dir, f))]
+        if not weights:
+            raise FileNotFoundError(f'в {model_dir} нет ни ownocr-latest.npz, ни ownocr.npz')
+        self.model.load(os.path.join(model_dir, weights[0]))
         self.vocab = {}
+        self.vocab_by_first = {}
         if vocab_path and os.path.exists(vocab_path):
             with open(vocab_path, encoding='utf-8') as f:
                 for rank, line in enumerate(f):
                     w = line.strip().upper()
                     if w and len(w) <= 24:
                         self.vocab[w] = rank
+                        self.vocab_by_first.setdefault(w[0], []).append(w)
                     if len(self.vocab) >= vocab_size:
                         break
 
@@ -251,8 +260,31 @@ class OwnOCR:
         conf = float(np.mean([g['prob'] for g in glyphs])) if glyphs else 0.0
         return {'text': text, 'glyphs': glyphs, 'conf': conf}
 
+    def _near_word(self, word: str, by_first: dict) -> int:
+        """Частота ближайшего слова с одной заменой (для «почти слова»)."""
+        cands = by_first.get(word[:1], [])
+        best = -1
+        for w in cands:
+            if abs(len(w) - len(word)) > 1:
+                continue
+            if len(w) == len(word):
+                diff = sum(1 for a, b in zip(word, w) if a != b)
+                if diff > 1:
+                    continue
+            else:
+                longer, shorter = (word, w) if len(word) > len(w) else (w, word)
+                if not any(longer[:i] + longer[i + 1:] == shorter for i in range(len(longer))):
+                    continue
+            r = self.vocab.get(w, 10 ** 6)
+            if best < 0 or r < best:
+                best = r
+        return best
+
     def _decode_word(self, probs, order, idxs, beam: int = 16):
         """Свой beam search: буквы по вероятностям + бонус словарю за слово."""
+        # слова-кандидаты по первому символу: с ними бонус словарю работает не
+        # только для идеального совпадения, но и для «почти слова»
+        by_first = self.vocab_by_first or None
         beams = [('', 0.0, [])]
         for i in idxs:
             cand = []
@@ -275,7 +307,12 @@ class OwnOCR:
                 # бонус за известное слово: чем чаще слово, тем выше (log частоты)
                 score += 2.0 + 0.6 * math.log(1 + 40000.0 / (1 + self.vocab[key]))
             elif self.vocab and len(key) >= 3:
-                score -= 0.5
+                near = self._near_word(key, by_first) if by_first else -1
+                if near >= 0:
+                    # «почти слово»: отличаемся одной буквой — половина бонуса
+                    score += 0.5 * (2.0 + 0.6 * math.log(1 + 40000.0 / (1 + near)))
+                else:
+                    score -= 0.5
             if score > best_score:
                 best_score, best = score, (text, score, detail)
         text, _, detail = best

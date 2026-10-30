@@ -144,7 +144,14 @@ def evaluate(ocr: OwnOCR, rows, lexicon=True):
 
 
 def run(sheet_png, manifest, labels_tsv, model_dir, out_dir, test_every=3,
-        epochs=8, lr=6e-4, augment_variants=10, log=print):
+        epochs=8, lr=1e-4, augment_variants=8, replay=8000, log=print):
+    """Урок 7 с ПРИЁМКОЙ: правки принимаются только если контрольные строки
+    стали читаться лучше и экзамен на шрифтах не просел. Иначе — откат.
+
+    Малый шаг (1e-4) и повтор листа обязательны: с шагом 6e-4 и без повтора
+    ученик за 12 доверенных парах забывал шрифты, и CER контрольных строк рос
+    с 36,7 % до 44,8 %. Это замерено, а не «на глаз».
+    """
     log('═' * 78)
     log('УРОК 7 «Чтение по настоящей странице» — учитель правит ученика по буквам')
     log('═' * 78)
@@ -179,7 +186,7 @@ def run(sheet_png, manifest, labels_tsv, model_dir, out_dir, test_every=3,
 
     # повтор листа: 4000 случайных глифов, иначе ученик «забудет» шрифты
     sheet_imgs, sheet_labs, _, _, _ = D.load_sheet(sheet_png, manifest)
-    pick = rng.choice(len(sheet_imgs), size=min(4000, len(sheet_imgs)), replace=False)
+    pick = rng.choice(len(sheet_imgs), size=min(replay, len(sheet_imgs)), replace=False)
     Xs, Ys = [], []
     for i in pick:
         f = features(D.augment(sheet_imgs[i], rng, 'easy'))
@@ -195,9 +202,24 @@ def run(sheet_png, manifest, labels_tsv, model_dir, out_dir, test_every=3,
     wa = np.concatenate([np.full(len(y), 2.5, np.float32), np.ones(len(ys), np.float32)])
 
     ocr.model.l2 = 5e-5
-    hist = ocr.model.fit(Xa, ya, epochs=epochs, batch=64, lr=lr, seed=7,
-                         sample_weight=wa, log=lambda s: log(s))
+    best = {k: v.copy() for k, v in ocr.model._params().items()}
+    best_cer = before_cer
+    hist = []
+    for ep in range(epochs):
+        hist += ocr.model.fit(Xa, ya, epochs=1, batch=64, lr=lr, seed=ep + 1,
+                              sample_weight=wa, log=None)
+        cur, _ex, _ = evaluate(ocr, test)
+        log(f'      эпоха {ep + 1:2d}/{epochs}: −log p = {hist[-1]:.3f} · '
+            f'контрольные строки {100 * cur:.1f} % CER')
+        if cur < best_cer - 1e-4:
+            best_cer = cur
+            best = {k: v.copy() for k, v in ocr.model._params().items()}
+    for k, v in best.items():
+        ocr.model._params()[k][...] = v
     after_cer, after_exact, detail = evaluate(ocr, test)
+    accepted = after_cer < before_cer - 1e-4
+    log(f'   ПРИЁМКА: {"принято" if accepted else "откат"} '
+        f'(контрольные строки {100 * before_cer:.1f} → {100 * after_cer:.1f} % CER)')
     log(f'   ПОСЛЕ урока: CER на контрольных строках {100 * after_cer:.1f} % · '
         f'целиком верных {after_exact}/{len(test)}')
     log('   что читает теперь:')
@@ -210,7 +232,7 @@ def run(sheet_png, manifest, labels_tsv, model_dir, out_dir, test_every=3,
     meta = json.load(open(os.path.join(model_dir, 'ownocr.npz.json'), encoding='utf-8'))
     json.dump(meta, open(os.path.join(out_model, 'ownocr.npz.json'), 'w'), ensure_ascii=False)
 
-    res = {'before_cer': before_cer, 'before_exact': before_exact, 'n_test': len(test),
+    res = {'accepted': bool(accepted), 'before_cer': before_cer, 'before_exact': before_exact, 'n_test': len(test),
            'after_cer': after_cer, 'after_exact': after_exact,
            'n_pairs': len(imgs), 'alignment': stats, 'detail': detail,
            'history': hist, 'model': out_model}
