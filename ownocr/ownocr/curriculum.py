@@ -270,12 +270,23 @@ class Curriculum:
             bw = binarize(gray)
             y0, y1 = line_band(bw)
             gray, bw = gray[y0:y1], binarize(gray[y0:y1])
-            boxes = boxes_of(bw)
-            feats = [features(gray[max(0, b[1]):b[3], max(0, b[0]):b[2]]) for b in boxes]
-            good = [(b, f) for b, f in zip(boxes, feats) if f is not None]
+            from .segment import pieces_as_boxes
+            boxes, probs, _ = pieces_as_boxes(self, gray, bw)
+            good = None
+            if boxes:
+                feats = [features(gray[max(0, b[1]):b[3], max(0, b[0]):b[2]]) for b in boxes]
+                good = [(b, f) for b, f in zip(boxes, feats) if f is not None]
+                if good:
+                    boxes = [b for b, _ in good]
+                    probs = self.model.predict_proba(np.stack([f for _, f in good]))
             if not good:
-                continue
-            probs = self.model.predict_proba(np.stack([f for _, f in good]))
+                boxes = boxes_of(bw)
+                feats = [features(gray[max(0, b[1]):b[3], max(0, b[0]):b[2]]) for b in boxes]
+                good = [(b, f) for b, f in zip(boxes, feats) if f is not None]
+                if not good:
+                    continue
+                boxes = [b for b, _ in good]
+                probs = self.model.predict_proba(np.stack([f for _, f in good]))
             text = ''.join(c for c in ref.upper() if c.isalnum())
             pairs = align([b for b, _ in good], text, probs, self.classes)
             if len(pairs) < 0.8 * len(text):

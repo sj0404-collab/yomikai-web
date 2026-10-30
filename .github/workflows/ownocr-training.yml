@@ -76,6 +76,22 @@ jobs:
           python scripts/06_curriculum.py --budget-minutes "$BUDGET" --out model \
             ${STAGES:+--stages "$STAGES"} 2>&1 | tee out/curriculum-console.txt
 
+      - name: 'урок 7 — настоящая страница, с приёмкой'
+        run: |
+          cd ownocr
+          python scripts/04_lesson_real.py --epochs 10 2>&1 | tee out/lesson-real-console.txt
+          python - <<'PY'
+          import json, os, shutil
+          r = json.load(open('out/lesson-real.json', encoding='utf-8'))
+          print('приёмка:', r['accepted'], '· CER', round(100 * r['before_cer'], 1), '→',
+                round(100 * r['after_cer'], 1), '%')
+          if r['accepted']:
+              shutil.copy('out/ownocr-real/ownocr.npz', 'model/ownocr-latest.npz')
+              print('правки приняты и встали в модель')
+          else:
+              print('правки не приняты — модель осталась зачётной')
+          PY
+
       - name: 'итоговая проверка'
         run: |
           cd ownocr
@@ -93,6 +109,8 @@ jobs:
             ownocr/out/metrics-final.json
             ownocr/out/metrics-console.txt
             ownocr/out/curriculum-console.txt
+            ownocr/out/lesson-real.json
+            ownocr/out/lesson-real-console.txt
           retention-days: 30
 
       - name: 'зафиксировать в ветке ownocr-model'

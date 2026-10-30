@@ -97,15 +97,28 @@ def crops_from_lines(rows, ocr: OwnOCR, log=print):
         if gray is None:
             continue
         bw = binarize(gray)
-        boxes = boxes_of(bw)
-        if not boxes:
-            continue
-        feats = [features(gray[max(0, b[1]):b[3], max(0, b[0]):b[2]]) for b in boxes]
-        good = [(b, f) for b, f in zip(boxes, feats) if f is not None]
+        # Куски разреза «по узнаванию» — чище пятен: рукописные буквы касаются,
+        # и связная компонента захватывает две-три сразу. Если разрез не удался,
+        # откатываемся на пятна.
+        from .segment import pieces_as_boxes
+        boxes, probs, _ = pieces_as_boxes(ocr, gray, bw)
+        good = None
+        if boxes:
+            feats = [features(gray[max(0, b[1]):b[3], max(0, b[0]):b[2]]) for b in boxes]
+            good = [(b, f) for b, f in zip(boxes, feats) if f is not None]
+            if good:
+                boxes = [b for b, _ in good]
+                probs = ocr.model.predict_proba(np.stack([f for _, f in good]))
         if not good:
-            continue
-        boxes = [b for b, _ in good]
-        probs = ocr.model.predict_proba(np.stack([f for _, f in good]))
+            boxes = boxes_of(bw)
+            if not boxes:
+                continue
+            feats = [features(gray[max(0, b[1]):b[3], max(0, b[0]):b[2]]) for b in boxes]
+            good = [(b, f) for b, f in zip(boxes, feats) if f is not None]
+            if not good:
+                continue
+            boxes = [b for b, _ in good]
+            probs = ocr.model.predict_proba(np.stack([f for _, f in good]))
         text = ''.join(c for c in ref.upper() if c.isalnum())
         pairs = align(boxes, text, probs, ocr.classes)
         got = ''.join(text[j] for _, j in pairs)

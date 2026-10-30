@@ -192,13 +192,51 @@ class OwnOCR:
 
     # ── чтение одной строки ──────────────────────────────────────────────────
     def read_line(self, gray: np.ndarray, lexicon: bool = True, topk: int = 5,
-                  band: bool = True):
+                  band: bool = True, method: str = 'auto'):
         bw = binarize(gray)
         if band:
             y0, y1 = line_band(bw)
             if y1 - y0 >= 6 and y1 - y0 < gray.shape[0]:
                 gray = gray[y0:y1]
                 bw = binarize(gray)
+        if method == 'auto':
+            a = self._read_by_boxes(gray, bw, lexicon, topk)
+            if a is not None and self._sure(a):
+                return a                       # дешёвый путь уверен — не тратим время
+            if bw.shape[1] > 900:              # не настоящая строка, а полоса листа
+                return a or {'text': '', 'glyphs': [], 'conf': 0.0}
+            b = self._read_by_segmentation(gray, bw, lexicon, topk)
+            if a is None:
+                return b or {'text': '', 'glyphs': [], 'conf': 0.0}
+            if b is None:
+                return a
+            return b if self._line_score(b) > self._line_score(a) else a
+        if method == 'segment':
+            r = self._read_by_segmentation(gray, bw, lexicon, topk)
+            if r is not None:
+                return r
+        return self._read_by_boxes(gray, bw, lexicon, topk)
+
+    def _sure(self, r) -> bool:
+        """Дешёвое чтение можно принять без разреза по узнаванию?"""
+        text = (r.get('text') or '').upper()
+        words = [w for w in text.split() if len(w) >= 2]
+        if not words or r.get('conf', 0) < 0.88:
+            return False
+        known = sum(1 for w in words if w in self.vocab)
+        return known / len(words) >= 0.75
+
+    def _line_score(self, r) -> float:
+        """Оценка прочтения: уверенность букв + знакомость слов (выше — лучше)."""
+        text = r.get('text') or ''
+        letters = sum(1 for c in text if c.isalnum())
+        if not letters:
+            return -9.0
+        words = [w for w in text.upper().split() if len(w) >= 2]
+        known = sum(1 for w in words if w in self.vocab)
+        return float(r.get('conf', 0.0)) + 0.15 * (known / len(words) if words else 0)
+
+    def _read_by_boxes(self, gray: np.ndarray, bw: np.ndarray, lexicon: bool, topk: int):
         boxes = boxes_of(bw)
         if not boxes:
             return {'text': '', 'glyphs': [], 'conf': 0.0}
@@ -280,7 +318,52 @@ class OwnOCR:
                 best = r
         return best
 
-    def _decode_word(self, probs, order, idxs, beam: int = 16):
+    def _read_by_segmentation(self, gray, bw, lexicon, topk):
+        """Чтение через разрез по узнаванию (segment.py). None — если не вышло."""
+        from .segment import segment_line
+        try:
+            pieces = segment_line(self, gray, bw, topk=topk)
+        except Exception:
+            return None
+        if not pieces:
+            return None
+        # куски отдают только топ-k, поэтому собираем полную матрицу классов
+        # (57 столбцов): иначе декодер принимает номер в топе за номер класса
+        probs = np.zeros((len(pieces), len(self.classes)), np.float32)
+        for i, pc in enumerate(pieces):
+            probs[i, pc[2]] = pc[3]
+        # куски без вероятностей отбрасываем (бывает на пустом крае)
+        glyphs, words = [], []
+        boxes = [(x, 0, y, gray.shape[0]) for x, y, _, _, _ in pieces]
+        # пробелы уже расставлены разрезом (см. segment.py: start_of_word)
+        groups, group = [], []
+        for i, pc in enumerate(pieces):
+            if pc[4] and group:
+                groups.append(group)
+                group = []
+            group.append(i)
+        if group:
+            groups.append(group)
+        for g in groups:
+            if lexicon and len(g) >= 2:
+                word, detail = self._decode_word(probs, None, g, topk=max(topk, 5))
+            else:
+                word, detail = '', []
+                for i in g:
+                    word += self.classes[int(probs[i].argmax())]
+                    detail.append({'char': self.classes[int(probs[i].argmax())],
+                                   'prob': float(probs[i].max())})
+            for pos, item in enumerate(detail):
+                item['box'] = boxes[g[pos]] if pos < len(g) else None
+            words.append(word)
+            glyphs.extend(detail)
+        text = ' '.join(w for w in words if w)
+        if self.case == 'upper':
+            text = text.upper()
+        conf = float(np.mean([g['prob'] for g in glyphs])) if glyphs else 0.0
+        return {'text': text, 'glyphs': glyphs, 'conf': conf}
+
+    def _decode_word(self, probs, order, idxs, beam: int = 16, topk: int = 5):
         """Свой beam search: буквы по вероятностям + бонус словарю за слово."""
         # слова-кандидаты по первому символу: с ними бонус словарю работает не
         # только для идеального совпадения, но и для «почти слова»
@@ -288,10 +371,14 @@ class OwnOCR:
         beams = [('', 0.0, [])]
         for i in idxs:
             cand = []
+            if order is not None:
+                row = [(int(order[i, r]), float(probs[i, int(order[i, r])]))
+                       for r in range(order.shape[1])]
+            else:
+                top = np.argsort(-probs[i])[:topk]
+                row = [(int(k), float(probs[i, int(k)])) for k in top]
             for prefix, score, detail in beams:
-                for rank in range(order.shape[1]):
-                    k = order[i, rank]
-                    p = float(probs[i, k])
+                for k, p in row:
                     if p < 1e-3:
                         continue
                     ch = self.classes[k]
