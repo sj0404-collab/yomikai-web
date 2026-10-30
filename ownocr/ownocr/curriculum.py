@@ -107,6 +107,10 @@ class Curriculum:
         # 97,9 → 93,2 % после «детского сада», и зачёты валились по пересдаче.
         self.rehearsal_X: list[np.ndarray] = []
         self.rehearsal_y: list[np.ndarray] = []
+        # уровень целиком (маска листа) — из него повторение собирается заново
+        # в широком наборе режимов: узкий набор (один 'easy') не держит старый
+        # экзамен, который рисуется в другом режиме.
+        self.rehearsal_stages: list[dict] = []
         self.rehearsal_n = 0
         self.rehearsal_cap = 60000
         self.resumed = False
@@ -136,7 +140,9 @@ class Curriculum:
         for st in STAGES:
             old = self.prev.get(st['key'])
             if old and old.get('passed'):
-                st['target'] = max(st['target'], min(0.97, old['exam'] - 0.005))
+                n_old = max(1, int(old.get('n_examples', 1000)))
+                tol = max(0.012, 2.0 * np.sqrt(2 * old['exam'] * (1 - old['exam']) / n_old))
+                st['target'] = max(st['target'], min(0.97, old['exam'] - tol))
                 self.say(f'   планка «{st["name"]}» поднята до {100 * st["target"]:.1f} % '
                          f'(в прошлый раз было {100 * old["exam"]:.1f} %)')
         # экзамены сданных ступеней собираем заново: набор детерминированный
@@ -154,7 +160,7 @@ class Curriculum:
                 self.say(f'   экзамен «{st["name"]}» не восстановить: {e}')
                 continue
             self.exams[st['key']] = (Xp, Yp)
-            self._remember(Xp, Yp)
+            self._remember_stage(st, self.stage_mask(st))
             self.say(f'   экзамен «{st["name"]}» собран заново: {len(Yp)} примеров в повторение')
 
     # ── журнал ───────────────────────────────────────────────────────────────
@@ -198,7 +204,7 @@ class Curriculum:
         self.feat_cache[key] = bank
         return bank
 
-    def exam(self, font_list, chars=None, mode='clean', n_max=1500, seed=51) -> tuple[np.ndarray, np.ndarray]:
+    def exam(self, font_list, chars=None, mode='clean', n_max=2500, seed=51) -> tuple[np.ndarray, np.ndarray]:
         """Экзаменационный набор: шрифты, которых ученик на этом уровне не видел."""
         sel = np.isin(self.fonts, list(font_list))
         if chars:
@@ -248,29 +254,26 @@ class Curriculum:
             X = np.vstack([X, extra_X])
             Y = np.concatenate([Y, extra_y])
             self.say(f'   + из настоящей страницы: {len(extra_y)}')
-        # повторение пройденного: 25 % банка — примеры прошлых уровней
-        if self.rehearsal_X:
-            # поровну на КАЖДЫЙ пройденный уровень, а не пропорционально размеру:
-            # иначе маленькие «ясли» (288 букв) тонут в 36 тысячах старших классов,
-            # и алфавит забывается (97,1 → 93,5 % на пересдаче).
-            take = int(0.35 * len(Y))
-            per = max(1, take // len(self.rehearsal_y))
-            rng = np.random.default_rng(len(self.rehearsal_y) + 100)
+        # повторение пройденного: часть банка — примеры прошлых уровней
+        n_new = len(Y)
+        if self.rehearsal_stages:
+            share = float(os.environ.get('OWNOCR_REH_SHARE', 0.5))
+            take = int(share * len(Y))
+            per = max(int(os.environ.get('OWNOCR_REH_MIN', 1200)), take // len(self.rehearsal_stages))
+            rng = np.random.default_rng(len(self.rehearsal_stages) + 100)
             parts_x, parts_y = [], []
-            for bx, by in zip(self.rehearsal_X, self.rehearsal_y):
+            for item in self.rehearsal_stages:
+                bx, by = self._rehearsal_bank(item)
                 if len(by) == 0:
                     continue
-                k = min(per, len(by)) if len(by) >= per else per
-                j = rng.choice(len(by), k, replace=k > len(by))
+                j = rng.choice(len(by), per, replace=len(by) < per)
                 parts_x.append(bx[j])
                 parts_y.append(by[j])
             Xr = np.vstack(parts_x)
             yr = np.concatenate(parts_y)
-            take = len(yr)
-            idx = np.arange(take)
-            X = np.vstack([X, Xr[idx]])
-            Y = np.concatenate([Y, yr[idx]])
-            self.say(f'   + повторение пройденного: {take} примеров из прошлых уровней')
+            X = np.vstack([X, Xr])
+            Y = np.concatenate([Y, yr])
+            self.say(f'   + повторение пройденного: {len(yr)} примеров из прошлых уровней')
 
         if self.model is None:
             self.model = OwnClassifier(X.shape[1], len(self.classes), hidden=384, seed=7)
@@ -283,6 +286,17 @@ class Curriculum:
         pass_exam = self.exam(exam_fonts, st.get('chars'), mode='italic', seed=77)
         hard_exam = self.exam(exam_fonts, st.get('chars'), mode='hard', seed=78)
 
+        # дистилляция: ответы прежнего ученика на повторяемом материале —
+        # мягкие цели. Так новый уровень учится, не ломая старое (без этого
+        # «ясли» проседали 97,2 → 92,9 % и пересдача валила зачёт). Экзамены
+        # при этом остаются незнакомыми: они в обучение не попадают.
+        soft = lam = None
+        if self.model is not None and len(Y) > n_new:
+            soft = np.zeros((len(Y), len(self.classes)), np.float32)
+            soft[n_new:] = self.model.predict_proba(X[n_new:]).astype(np.float32)
+            lam = np.zeros(len(Y), np.float32)
+            lam[n_new:] = 0.9
+            self.say(f'   дистилляция: {len(Y) - n_new} строк держим на ответах прежнего ученика')
         t = time.time()
         best_acc, best_state, best_ep = -1.0, None, 0
         best_key = (-1.0, -1.0)
@@ -291,7 +305,7 @@ class Curriculum:
             lr = min(lr, 1.2e-3)   # продолжаем учёбу, а не начинаем заново
         for ep in range(st['epochs']):
             hist = self.model.fit(X, Y, epochs=1, batch=128, lr=lr,
-                                  seed=ep + 1, log=None)
+                                  seed=ep + 1, log=None, soft=soft, lam=lam)
             acc_clean = self.score(Xe, Ye)
             acc_hard = 0.5 * (self.score(*pass_exam) + self.score(*hard_exam))
             # выбираем эпоху не только по новому экзамену: считаем, насколько
@@ -302,8 +316,9 @@ class Curriculum:
                 was = next((d['exam'] for d in self.diploma if d['key'] == key), None)
                 if was is None:
                     continue
-                drop = max(drop, was - self.score(Xp, Yp))
-            ok_now = acc_clean >= st['target'] and drop <= 0.012
+                se = np.sqrt(2 * max(1e-6, was * (1 - was)) / max(1, len(Yp)))
+                drop = max(drop, was - self.score(Xp, Yp) - max(0.012, 2.0 * se))
+            ok_now = acc_clean >= st['target'] and drop <= 0.0
             key_ep = (1 if ok_now else 0, acc_clean - 1.2 * max(0.0, drop))
             if key_ep > (-1.0, -1.0) and (best_state is None or key_ep > best_key):
                 best_key = key_ep
@@ -325,15 +340,21 @@ class Curriculum:
         for key, (Xp, Yp) in self.exams.items():
             now = self.score(Xp, Yp)
             was = next((d['exam'] for d in self.diploma if d['key'] == key), now)
-            if now < was - 0.012:
-                regress.append((key, was, now))
+            # допуск = две стандартные ошибки разности двух замеров на наборе
+            # такого размера: на 960 примерах это ±1,8 п.п., на 2500 — ±1,1.
+            # Меньший провал — это шум замера, а не забывание.
+            se = np.sqrt(2 * max(1e-6, was * (1 - was)) / max(1, len(Yp)))
+            tol = max(0.012, 2.0 * se)
+            if now < was - tol:
+                regress.append((key, was, now, tol))
         passed = acc >= st['target'] and not regress
         self.exams[st['key']] = (Xe, Ye)
         self.say(f'   ДОМАШНЕЕ ЗАДАНИЕ: экзамен {100 * acc:.1f} % (цель {100 * st["target"]:.0f} %) · '
                  f'с наклоном {100 * acc_hard:.1f} % · время {dt:.0f} с')
         if regress:
             self.say('   пересдача: просели прошлые экзамены — '
-                     + ', '.join(f'{k} {100 * was:.1f}→{100 * now:.1f} %' for k, was, now in regress))
+                     + ', '.join(f'{k} {100 * w:.1f}→{100 * n:.1f} % (допуск {100 * t:.1f})'
+                                 for k, w, n, t in regress))
         self.say(f'   ЗАЧЁТ {"СДАН" if passed else "НЕ СДАН"} · осталось {self.left():.0f} мин')
 
         rec = {'key': st['key'], 'name': name, 'exam': acc, 'exam_hard': acc_hard,
@@ -342,10 +363,32 @@ class Curriculum:
                'epochs_best': best_ep}
         if passed:
             self.diploma.append(rec)
-            self._remember(X, Y)
-            self._remember(Xe, Ye)
+            self._remember_stage(st, mask)
             self.save(self.workdir, st['key'])
         return rec
+
+    def _rehearsal_bank(self, item: dict) -> tuple[np.ndarray, np.ndarray]:
+        """Материал уровня для повторения: широкий набор режимов, но не экзамен."""
+        if item.get('bank') is not None:
+            return item['bank']
+        mask = item['mask']
+        n_glyph = int(mask.sum())
+        variants = int(max(2, min(8, 20000 // max(1, n_glyph))))
+        modes = ['clean', 'easy', 'small', 'italic', 'hard']
+        bank = self._feat_bank(mask, modes, variants, seed=333 + len(item['key']))
+        if len(bank[1]) > 8000:
+            idx = np.random.default_rng(7).choice(len(bank[1]), 8000, replace=False)
+            bank = (bank[0][idx], bank[1][idx])
+        item['bank'] = bank
+        self.say(f'   повторение уровня «{item["key"]}»: {len(bank[1])} примеров '
+                 f'({variants} режима) — материал собран')
+        return bank
+
+    def _remember_stage(self, st, mask: np.ndarray):
+        """Запомнить уровень для повторения на следующих ступенях."""
+        mask = mask.copy()
+        mask &= np.array([lab in set(self.labels[mask]) for lab in self.labels])
+        self.rehearsal_stages.append({'key': st['key'], 'mask': mask, 'bank': None})
 
     def _remember(self, X: np.ndarray, Y: np.ndarray, every: int = 1):
         """Запомнить материал уровня для повторения на следующих ступенях."""

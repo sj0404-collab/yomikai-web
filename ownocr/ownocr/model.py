@@ -54,7 +54,15 @@ class OwnClassifier:
         h, _, logp = self._forward(X)
         return np.exp(logp)
 
-    def loss_and_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray | None = None):
+    def loss_and_grad(self, X: np.ndarray, y: np.ndarray, w: np.ndarray | None = None,
+                      soft: np.ndarray | None = None, lam: np.ndarray | None = None):
+        """Перекрёстная энтропия (+ необязательная дистилляция от учителя).
+
+        soft/lam — мягкие цели старой модели и вес дистилляции по строке. Смысл:
+        новый материал тянет веса на себя, а дистилляция держит ответы на старом
+        материале такими, какими они были у учителя, — тогда ученик не забывает
+        пройденное, даже не видя старых экзаменов.
+        """
         n = len(y)
         h, z1, logp = self._forward(X)
         p = np.exp(logp)
@@ -67,6 +75,12 @@ class OwnClassifier:
         # градиент перекрёстной энтропии по логитам
         dz2 = p.copy()
         dz2[np.arange(n), y] -= 1.0
+        if soft is not None and lam is not None:
+            # KL(q‖p) по строкам, где q — ответы учителя
+            eps = 1e-8
+            kl = (soft * (np.log(soft + eps) - logp)).sum(axis=1)
+            loss = loss + float((lam * kl).mean())
+            dz2 += lam[:, None] * (p - soft)
         if w is not None:
             dz2 *= (w * n)[:, None]
         dz2 /= n
@@ -89,7 +103,7 @@ class OwnClassifier:
 
     # ── обучение ─────────────────────────────────────────────────────────────
     def fit(self, X, y, epochs=6, batch=256, lr=1e-3, seed=0, log=None,
-            sample_weight=None, on_epoch=None):
+            sample_weight=None, on_epoch=None, soft=None, lam=None):
         rng = np.random.default_rng(seed)
         n = len(y)
         hist = []
@@ -99,7 +113,9 @@ class OwnClassifier:
             for i in range(0, n - batch + 1, batch):
                 idx = order[i:i + batch]
                 w = None if sample_weight is None else sample_weight[idx]
-                loss, grads = self.loss_and_grad(X[idx], y[idx], w)
+                so = None if soft is None else soft[idx]
+                la = None if lam is None else lam[idx]
+                loss, grads = self.loss_and_grad(X[idx], y[idx], w, so, la)
                 self.adam(grads, lr)
                 total += loss * len(idx)
                 seen += len(idx)
