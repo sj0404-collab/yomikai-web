@@ -233,10 +233,24 @@ class Curriculum:
             self.say(f'   + из настоящей страницы: {len(extra_y)}')
         # повторение пройденного: 25 % банка — примеры прошлых уровней
         if self.rehearsal_X:
-            Xr = np.vstack(self.rehearsal_X)
-            yr = np.concatenate(self.rehearsal_y)
+            # поровну на КАЖДЫЙ пройденный уровень, а не пропорционально размеру:
+            # иначе маленькие «ясли» (288 букв) тонут в 36 тысячах старших классов,
+            # и алфавит забывается (97,1 → 93,5 % на пересдаче).
             take = int(0.30 * len(Y))
-            idx = np.random.default_rng(11).choice(len(yr), take, replace=len(yr) < take)
+            per = max(1, take // len(self.rehearsal_y))
+            rng = np.random.default_rng(len(self.rehearsal_y) + 100)
+            parts_x, parts_y = [], []
+            for bx, by in zip(self.rehearsal_X, self.rehearsal_y):
+                if len(by) == 0:
+                    continue
+                k = min(per, len(by)) if len(by) >= per else per
+                j = rng.choice(len(by), k, replace=k > len(by))
+                parts_x.append(bx[j])
+                parts_y.append(by[j])
+            Xr = np.vstack(parts_x)
+            yr = np.concatenate(parts_y)
+            take = len(yr)
+            idx = np.arange(take)
             X = np.vstack([X, Xr[idx]])
             Y = np.concatenate([Y, yr[idx]])
             self.say(f'   + повторение пройденного: {take} примеров из прошлых уровней')
