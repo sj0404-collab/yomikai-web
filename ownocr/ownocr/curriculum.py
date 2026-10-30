@@ -111,6 +111,7 @@ class Curriculum:
         self.rehearsal_y: list[np.ndarray] = []
         self.rehearsal_n = 0
         self.rehearsal_cap = 45000
+        self.resumed = False
 
     def _resume(self):
         """Продолжить с прошлой зачётной ступени: ученик помнит, что сдал."""
@@ -234,8 +235,8 @@ class Curriculum:
         if self.rehearsal_X:
             Xr = np.vstack(self.rehearsal_X)
             yr = np.concatenate(self.rehearsal_y)
-            take = min(len(yr), max(4000, int(0.25 * len(Y))))
-            idx = np.random.default_rng(11).choice(len(yr), take, replace=False)
+            take = int(0.30 * len(Y))
+            idx = np.random.default_rng(11).choice(len(yr), take, replace=len(yr) < take)
             X = np.vstack([X, Xr[idx]])
             Y = np.concatenate([Y, yr[idx]])
             self.say(f'   + повторение пройденного: {take} примеров из прошлых уровней')
@@ -253,8 +254,11 @@ class Curriculum:
 
         t = time.time()
         best_acc, best_state, best_ep = -1.0, None, 0
+        lr = st['lr']
+        if len(self.diploma) or self.resumed:
+            lr = min(lr, 1.2e-3)   # продолжаем учёбу, а не начинаем заново
         for ep in range(st['epochs']):
-            hist = self.model.fit(X, Y, epochs=1, batch=128, lr=st['lr'],
+            hist = self.model.fit(X, Y, epochs=1, batch=128, lr=lr,
                                   seed=ep + 1, log=None)
             acc_clean = self.score(Xe, Ye)
             acc_hard = 0.5 * (self.score(*pass_exam) + self.score(*hard_exam))
@@ -298,7 +302,7 @@ class Curriculum:
             self.save(self.workdir, st['key'])
         return rec
 
-    def _remember(self, X: np.ndarray, Y: np.ndarray, every: int = 4):
+    def _remember(self, X: np.ndarray, Y: np.ndarray, every: int = 1):
         """Запомнить материал уровня для повторения на следующих ступенях."""
         if len(Y) == 0:
             return

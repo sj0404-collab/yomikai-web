@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Прочитать ЦЕЛУЮ страницу своим движком и нарисовать, что он видит.
+"""ЭКСПЕРИМЕНТ: прочитать целую страницу своим движком и нарисовать, что он видит.
+
+ЧЕСТНО О РЕЗУЛЬТАТЕ: этот путь пока сырой. Свой разрез страницы (фильтр графики →
+XY-разрез → полосы строк) на настоящей манге приносит куски рисунка, и движок
+читает из них мусор. Надёжно он читает СТРОКИ, а находить строки на странице —
+работа детектора (в приложении для этого есть обученная модель). Поэтому все
+метрики в README считаются на строках, а не на этом скрипте.
 
 Отличие от метрик: там 41 размеченная строка, а здесь — вся страница как есть:
 сам находим строки, читаем, расставляем по порядку и рисуем поверх картинки.
@@ -19,6 +25,24 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from ownocr.engine import OwnOCR, binarize   # noqa: E402
+
+
+def looks_like_text(mask: np.ndarray, orig_bw: np.ndarray, box) -> bool:
+    """Похож ли кусок страницы на текст: плотность низкая, много мелких пятен.
+
+    Рисунок даёт большую плотность чернил и мало «буквенных» пятен; облачко с
+    текстом — ровно наоборот. Без такого фильтра XY-разрез приносит куски
+    картинки, и движок читает из них мусор («АЖ И2-АЖ--У ! !!!;)З%!»).
+    """
+    x0, y0, x1, y1 = box
+    sub = mask[y0:y1, x0:x1]
+    if sub.size == 0:
+        return False
+    density = float((sub > 0).mean())
+    n, _, stats, _ = cv2.connectedComponentsWithStats(sub, 8)
+    parts = [stats[i][4] for i in range(1, n)]
+    small = sum(1 for a in parts if a < 0.02 * sub.size)
+    return density < 0.42 and small >= 3 and len(parts) >= 4
 
 
 def text_mask(bw: np.ndarray) -> np.ndarray:
@@ -41,6 +65,58 @@ def text_mask(bw: np.ndarray) -> np.ndarray:
             continue
         keep[labels == i] = 255
     return keep
+
+
+def xy_cut(mask: np.ndarray, depth: int = 0, min_side: int = 14, max_depth: int = 7):
+    """Рекурсивный XY-разрез: сначала по пустым строкам, потом по пустым столбцам.
+
+    Классика вёрстки: страница делится по самым широким промежуткам пустоты, и в
+    конце остаются отдельные куски текста (облачка), а не «полосы на всю ширину»,
+    где рядом стоящие реплики сливаются в одну строку.
+    """
+    rows = (mask > 0).sum(axis=1)
+    cols = (mask > 0).sum(axis=0)
+    ys = np.where(rows > 0)[0]
+    xs = np.where(cols > 0)[0]
+    if len(ys) < 2 or len(xs) < 2:
+        return []
+    sub = mask[ys[0]:ys[-1] + 1, xs[0]:xs[-1] + 1]
+    if sub.shape[0] < min_side or sub.shape[1] < min_side or depth >= max_depth:
+        return [(int(xs[0]), int(ys[0]), int(xs[-1]) + 1, int(ys[-1]) + 1)]
+    r = (sub > 0).sum(axis=1)
+    c = (sub > 0).sum(axis=0)
+    # ищем самый широкий пустой промежуток: сначала между строками, потом столбцами
+    def widest(profile):
+        empty, best_gap, best_at = 0, 0, -1
+        for i, v in enumerate(profile):
+            if v == 0:
+                empty += 1
+            else:
+                if empty > best_gap:
+                    best_gap, best_at = empty, i - empty // 2
+                empty = 0
+        if empty > best_gap:
+            best_gap, best_at = empty, len(profile) - empty // 2
+        return best_gap, best_at
+    gr, ar = widest(r)
+    gc, ac = widest(c)
+    if max(gr, gc) < 2:
+        return [(int(xs[0]), int(ys[0]), int(xs[-1]) + 1, int(ys[-1]) + 1)]
+    out = []
+    if gr >= gc and gr >= 2:                     # режем по строкам
+        top = sub[:ar]
+        bottom = sub[ar:]
+        out += xy_cut(top, depth + 1, min_side, max_depth)
+        for (x0, y0, x1, y1) in xy_cut(bottom, depth + 1, min_side, max_depth):
+            out.append((x0, y0 + ar, x1, y1 + ar))
+    else:                                        # режем по столбцам
+        left = sub[:, :ac]
+        right = sub[:, ac:]
+        out += xy_cut(left, depth + 1, min_side, max_depth)
+        for (x0, y0, x1, y1) in xy_cut(right, depth + 1, min_side, max_depth):
+            out.append((x0 + ac, y0, x1 + ac, y1))
+    return [(x0 + int(xs[0]), y0 + int(ys[0]), x1 + int(xs[0]), y1 + int(ys[0]))
+            for (x0, y0, x1, y1) in out]
 
 
 def split_lines(gray: np.ndarray, min_gap: int = 3):
@@ -74,10 +150,30 @@ def main():
     gray = cv2.imread(a.image, cv2.IMREAD_GRAYSCALE)
     if gray is None:
         raise SystemExit(f'не читается картинка: {a.image}')
-    bands = split_lines(gray)
+    mask = text_mask(binarize(gray))
+    blocks = [b for b in xy_cut(mask)
+              if (b[2] - b[0]) > 18 and (b[3] - b[1]) > 10
+              and looks_like_text(mask, mask, b)]
+    blocks.sort(key=lambda b: (b[1], -b[0]))
+    bands = []
+    for (bx0, by0, bx1, by1) in blocks:
+        sub = mask[by0:by1, bx0:bx1]
+        rows = (sub > 0).sum(axis=1)
+        start, prev = None, None
+        for y, v in enumerate(rows):
+            if v > 0:
+                if start is None:
+                    start = y
+                prev = y
+            elif start is not None and y - prev > 2:
+                if prev - start >= 7:
+                    bands.append((by0 + start, by0 + prev, bx0, bx1))
+                start = None
+        if start is not None and prev - start >= 7:
+            bands.append((by0 + start, by0 + prev, bx0, bx1))
     lines = []
-    for (y0, y1) in bands:
-        sub = gray[max(0, y0 - 2):y1 + 3]
+    for (y0, y1, bx0, bx1) in bands:
+        sub = gray[max(0, y0 - 2):y1 + 3, bx0:bx1]
         # по горизонтали режем на куски-облачка: пустые столбцы длиной > 3 % ширины
         bw = text_mask(binarize(sub))
         cols = (bw > 0).sum(axis=0)
@@ -100,7 +196,7 @@ def main():
                 continue
             if r['conf'] < a.min_conf:
                 continue
-            lines.append({'y': [int(y0), int(y1)], 'x': [int(x0), int(x1)],
+            lines.append({'y': [int(y0), int(y1)], 'x': [int(bx0 + x0), int(bx0 + x1)],
                           'text': r['text'], 'conf': r['conf']})
 
     os.makedirs(os.path.dirname(a.out) or '.', exist_ok=True)
