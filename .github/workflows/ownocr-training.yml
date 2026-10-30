@@ -70,10 +70,23 @@ jobs:
           python ownocr/scripts/02_make_sheet.py --fonts "$FONTS_DIR" --px 30 --out ownocr/out
           ls -l ownocr/out/sheet.png
 
+      - name: 'взять прошлую зачётную ступень из ветки ownocr-model'
+        run: |
+          git fetch origin ownocr-model --depth 1 2>/dev/null || true
+          mkdir -p ownocr/model
+          if git cat-file -e origin/ownocr-model:ownocr-latest.npz 2>/dev/null; then
+            git show origin/ownocr-model:ownocr-latest.npz > ownocr/model/ownocr-latest.npz
+            git show origin/ownocr-model:ownocr-latest.npz.json > ownocr/model/ownocr-latest.npz.json 2>/dev/null || true
+            git show origin/ownocr-model:diploma.json > ownocr/model/diploma.json 2>/dev/null || true
+            echo "продолжаем с прошлой модели: $(ls -l ownocr/model/ownocr-latest.npz | awk '{print $5}') Б"
+          else
+            echo "прошлой модели нет — начинаем с чистого листа"
+          fi
+
       - name: 'курс обучения'
         run: |
           cd ownocr
-          python scripts/06_curriculum.py --budget-minutes "$BUDGET" --out model \
+          python scripts/06_curriculum.py --budget-minutes "$BUDGET" --out model --resume \
             ${STAGES:+--stages "$STAGES"} 2>&1 | tee out/curriculum-console.txt
 
       - name: 'урок 7 — настоящая страница, с приёмкой'

@@ -73,7 +73,7 @@ STAGES = [
 
 class Curriculum:
     def __init__(self, sheet: str, manifest: str, out_dir: str, log_path: str | None = None,
-                 budget_min: float = 40.0, workdir: str | None = None):
+                 budget_min: float = 40.0, workdir: str | None = None, resume: bool = False):
         self.out = out_dir
         self.workdir = workdir or os.path.join(out_dir, 'curriculum')
         os.makedirs(self.workdir, exist_ok=True)
@@ -99,8 +99,38 @@ class Curriculum:
                  f'{len(self.classes)} классов · отложено {len(self.holdout_fonts)} шрифтов')
         self.model: OwnClassifier | None = None
         self.diploma: list[dict] = []
+        self.prev: dict = {}
+        if resume:
+            self._resume()
         self.exams: dict[str, np.ndarray] = {}
         self.feat_cache: dict[tuple, tuple] = {}
+
+    def _resume(self):
+        """Продолжить с прошлой зачётной ступени: ученик помнит, что сдал."""
+        weights = os.path.join(self.out, 'ownocr-latest.npz')
+        meta_path = os.path.join(self.out, 'ownocr-latest.npz.json')
+        dip_path = os.path.join(self.out, 'diploma.json')
+        if not (os.path.exists(weights) and os.path.exists(meta_path)):
+            self.say('продолжение: прошлой модели нет — ученик новый')
+            return
+        meta = json.load(open(meta_path, encoding='utf-8'))
+        self.model = OwnClassifier(meta['dim'], len(meta['classes']),
+                                   hidden=meta.get('hidden', 384), seed=7)
+        self.model.load(weights)
+        if os.path.exists(dip_path):
+            old = json.load(open(dip_path, encoding='utf-8'))
+            self.prev = {d['key']: d for d in old.get('diploma', [])}
+            self.say('продолжение: зачётная книжка найдена — ' +
+                     ', '.join(f'{k} {100 * v["exam"]:.1f} %' for k, v in self.prev.items())
+                     if self.prev else 'продолжение: книжка пуста')
+        self.say(f'продолжение: ученик загружен ({self.model.W1.size + self.model.W2.size} чисел)')
+        # закрепляем планку: новый уровень считается сданным, только если он не хуже прошлого
+        for st in STAGES:
+            old = self.prev.get(st['key'])
+            if old and old.get('passed'):
+                st['target'] = max(st['target'], min(0.97, old['exam'] - 0.005))
+                self.say(f'   планка «{st["name"]}» поднята до {100 * st["target"]:.1f} % '
+                         f'(в прошлый раз было {100 * old["exam"]:.1f} %)')
 
     # ── журнал ───────────────────────────────────────────────────────────────
     def say(self, text: str = ''):

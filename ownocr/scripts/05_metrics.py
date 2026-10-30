@@ -26,7 +26,11 @@ from ownocr.engine import binarize, boxes_of       # noqa: E402
 
 OUT = os.path.join(ROOT, 'out')
 MODEL = os.path.join(ROOT, 'model')
-FONTS = '/var/tmp/ownocr/fonts'
+FONTS = os.environ.get('FONTS_DIR', '/var/tmp/ownocr/fonts')
+for _cand in ('/home/runner/fonts', '/var/tmp/ownocr/fonts', os.path.join(ROOT, 'fonts')):
+    if os.path.isdir(_cand) and glob.glob(os.path.join(_cand, '*.ttf')):
+        FONTS = _cand
+        break
 
 
 def glyph_metrics(ocr: OwnOCR, manifest: str, sheet: str, mode='clean'):
@@ -59,6 +63,8 @@ def prose_metrics(ocr: OwnOCR, manifest: str):
     hold = sorted({g['font'] for g in meta['glyphs'] if g['holdout']})[:12]
     paths = {os.path.splitext(os.path.basename(p))[0].replace('_', ' '): p
              for p in glob.glob(os.path.join(FONTS, '*.ttf'))}
+    if not paths:
+        print('   (шрифтов для прозы не нашлось — пропускаю; FONTS=' + FONTS + ')')
     phrases = ['ПОЖАЛУЙСТА, СНИМИ С ХАНЫ ЭТО ПРОКЛЯТИЕ',
                'Я РАССЧИТЫВАЮ НА ВАС, ДУХИ',
                'ГОТОВО, НЕ ЗНАЮ, ПОМОЖЕТ ЛИ ЭТО']
@@ -75,6 +81,8 @@ def prose_metrics(ocr: OwnOCR, manifest: str):
             arr = cv2.GaussianBlur(np.array(img), (3, 3), 0.5)
             r = ocr.read_line(arr, lexicon=True)
             rows.append({'font': fon, 'ref': ph, 'hyp': r['text'], 'cer': cer(ph, r['text'])})
+    if not rows:
+        return {'n': 0, 'cer': 0.0, 'exact': 0, 'rows': []}
     return {'n': len(rows), 'cer': float(np.mean([r['cer'] for r in rows])),
             'exact': sum(1 for r in rows if r['cer'] == 0), 'rows': rows}
 

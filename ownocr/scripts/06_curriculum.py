@@ -25,12 +25,13 @@ def main():
     ap.add_argument('--manifest', default=os.path.join(ROOT, 'out', 'sheet-manifest.json'))
     ap.add_argument('--out', default=os.path.join(ROOT, 'model'))
     ap.add_argument('--labels', default=default_labels())
-    ap.add_argument('--page', default=os.path.join(ROOT, '..', 'koma-lab', 'dense-a.jpg'))
+    ap.add_argument('--page', default=os.path.join(ROOT, '..', 'koma-lab', 'dense-b.jpg'))
     ap.add_argument('--budget-minutes', type=float, default=40.0)
     ap.add_argument('--stages', default='')
+    ap.add_argument('--resume', action='store_true', help='продолжить с прошлой зачётной ступени')
     a = ap.parse_args()
     stages = [s for s in a.stages.split(',') if s.strip()] or None
-    c = Curriculum(a.sheet, a.manifest, a.out, budget_min=a.budget_minutes)
+    c = Curriculum(a.sheet, a.manifest, a.out, budget_min=a.budget_minutes, resume=a.resume)
     diploma = c.run(stages, labels_tsv=a.labels, page=a.page if os.path.exists(a.page) else None)
     json.dump(diploma, open(os.path.join(a.out, 'diploma-final.json'), 'w'),
               ensure_ascii=False, indent=1)
