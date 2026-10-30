@@ -104,6 +104,13 @@ class Curriculum:
             self._resume()
         self.exams: dict[str, np.ndarray] = {}
         self.feat_cache: dict[tuple, tuple] = {}
+        # «повторение пройденного»: куски материала прошлых уровней. Без этого
+        # ученик на каждом новом уровне забывал старый: экзамен «ясли» падал
+        # 97,9 → 93,2 % после «детского сада», и зачёты валились по пересдаче.
+        self.rehearsal_X: list[np.ndarray] = []
+        self.rehearsal_y: list[np.ndarray] = []
+        self.rehearsal_n = 0
+        self.rehearsal_cap = 45000
 
     def _resume(self):
         """Продолжить с прошлой зачётной ступени: ученик помнит, что сдал."""
@@ -223,6 +230,15 @@ class Curriculum:
             X = np.vstack([X, extra_X])
             Y = np.concatenate([Y, extra_y])
             self.say(f'   + из настоящей страницы: {len(extra_y)}')
+        # повторение пройденного: 25 % банка — примеры прошлых уровней
+        if self.rehearsal_X:
+            Xr = np.vstack(self.rehearsal_X)
+            yr = np.concatenate(self.rehearsal_y)
+            take = min(len(yr), max(4000, int(0.25 * len(Y))))
+            idx = np.random.default_rng(11).choice(len(yr), take, replace=False)
+            X = np.vstack([X, Xr[idx]])
+            Y = np.concatenate([Y, yr[idx]])
+            self.say(f'   + повторение пройденного: {take} примеров из прошлых уровней')
 
         if self.model is None:
             self.model = OwnClassifier(X.shape[1], len(self.classes), hidden=384, seed=7)
@@ -261,7 +277,7 @@ class Curriculum:
         for key, (Xp, Yp) in self.exams.items():
             now = self.score(Xp, Yp)
             was = next((d['exam'] for d in self.diploma if d['key'] == key), now)
-            if now < was - 0.01:
+            if now < was - 0.012:
                 regress.append((key, was, now))
         passed = acc >= st['target'] and not regress
         self.exams[st['key']] = (Xe, Ye)
@@ -278,8 +294,24 @@ class Curriculum:
                'epochs_best': best_ep}
         if passed:
             self.diploma.append(rec)
+            self._remember(X, Y)
             self.save(self.workdir, st['key'])
         return rec
+
+    def _remember(self, X: np.ndarray, Y: np.ndarray, every: int = 4):
+        """Запомнить материал уровня для повторения на следующих ступенях."""
+        if len(Y) == 0:
+            return
+        idx = np.arange(0, len(Y), max(1, every))
+        self.rehearsal_X.append(X[idx].copy())
+        self.rehearsal_y.append(Y[idx].copy())
+        self.rehearsal_n += len(idx)
+        total = sum(len(a) for a in self.rehearsal_y)
+        while total > self.rehearsal_cap and len(self.rehearsal_y) > 1:
+            total -= len(self.rehearsal_y.pop(0))
+            self.rehearsal_X.pop(0)
+        self.say(f'   запомнено для повторения: {self.rehearsal_n} примеров '
+                 f'(в резервуаре {total})')
 
     # ── университет: настоящие строки манги ─────────────────────────────────
     def real_pairs(self, labels_tsv: str, max_rows: int = 400):

@@ -1,0 +1,353 @@
+{
+ "accepted": true,
+ "before_cer": 0.31336401693544547,
+ "before_exact": 5,
+ "n_test": 14,
+ "after_cer": 0.17525331811046096,
+ "after_exact": 7,
+ "n_pairs": 48,
+ "alignment": [
+  {
+   "file": "01.png",
+   "ref": "ПОДОЙДЕТ",
+   "aligned": "ПЙДЕТ",
+   "boxes": 6,
+   "pairs": 5,
+   "trusted": false,
+   "nll": 1.08
+  },
+  {
+   "file": "03.png",
+   "ref": "ДЛЯ ПОД",
+   "aligned": "ЯД",
+   "boxes": 4,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 2.5
+  },
+  {
+   "file": "05.png",
+   "ref": "ДА,",
+   "aligned": "Д",
+   "boxes": 2,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 1.01
+  },
+  {
+   "file": "06.png",
+   "ref": "ПОЧЕМУ",
+   "aligned": "П",
+   "boxes": 3,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.0
+  },
+  {
+   "file": "09.png",
+   "ref": "НЕТ?",
+   "aligned": "Т",
+   "boxes": 4,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.0
+  },
+  {
+   "file": "10.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ЛУЙА",
+   "boxes": 6,
+   "pairs": 4,
+   "trusted": false,
+   "nll": 2.89
+  },
+  {
+   "file": "12.png",
+   "ref": "С ЭТОЙ СТРАШНОЙ",
+   "aligned": "ЭО",
+   "boxes": 9,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 2.25
+  },
+  {
+   "file": "13.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ОЖУА",
+   "boxes": 5,
+   "pairs": 4,
+   "trusted": false,
+   "nll": 1.64
+  },
+  {
+   "file": "15.png",
+   "ref": "ПОЗВОЛЬ МНЕ",
+   "aligned": "ПВОЬМНЕ",
+   "boxes": 10,
+   "pairs": 7,
+   "trusted": false,
+   "nll": 0.29
+  },
+  {
+   "file": "16.png",
+   "ref": "ДО ОТВАЛА",
+   "aligned": "ДООТВА",
+   "boxes": 7,
+   "pairs": 6,
+   "trusted": false,
+   "nll": 0.39
+  },
+  {
+   "file": "18.png",
+   "ref": "С ХАНОЙ.",
+   "aligned": "СН",
+   "boxes": 4,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 0.04
+  },
+  {
+   "file": "19.png",
+   "ref": "ПОЕСТЬ",
+   "aligned": "Е",
+   "boxes": 3,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.71
+  },
+  {
+   "file": "21.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ЖАА",
+   "boxes": 4,
+   "pairs": 3,
+   "trusted": false,
+   "nll": 1.74
+  },
+  {
+   "file": "22.png",
+   "ref": "Я СДЕЛАЮ ЧТО",
+   "aligned": "ЯСДЕЛАЮЧТ",
+   "boxes": 11,
+   "pairs": 9,
+   "trusted": true,
+   "nll": 0.67
+  },
+  {
+   "file": "24.png",
+   "ref": "ЭТА ШТУКА",
+   "aligned": "ЭТАШТУКА",
+   "boxes": 8,
+   "pairs": 8,
+   "trusted": true,
+   "nll": 0.1
+  },
+  {
+   "file": "25.png",
+   "ref": "ОТЦЕПИЛАСЬ",
+   "aligned": "ОТЦЕПИАСЬ",
+   "boxes": 9,
+   "pairs": 9,
+   "trusted": true,
+   "nll": 0.47
+  },
+  {
+   "file": "28.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ЖА",
+   "boxes": 3,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 2.13
+  },
+  {
+   "file": "29.png",
+   "ref": "СНИМИ С ХАНЫ",
+   "aligned": "НИМС",
+   "boxes": 8,
+   "pairs": 4,
+   "trusted": false,
+   "nll": 2.17
+  },
+  {
+   "file": "31.png",
+   "ref": "И ПОМОГИ МНЕ.",
+   "aligned": "ИПОМИМНЕ",
+   "boxes": 11,
+   "pairs": 8,
+   "trusted": true,
+   "nll": 0.75
+  },
+  {
+   "file": "32.png",
+   "ref": "ГОТОВО...",
+   "aligned": "ГОТОВО",
+   "boxes": 7,
+   "pairs": 6,
+   "trusted": true,
+   "nll": 0.11
+  },
+  {
+   "file": "34.png",
+   "ref": "ОНА",
+   "aligned": "А",
+   "boxes": 4,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 3.5
+  },
+  {
+   "file": "35.png",
+   "ref": "Я РАССЧИ-",
+   "aligned": "ЯА",
+   "boxes": 3,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 0.19
+  },
+  {
+   "file": "37.png",
+   "ref": "ВСЁ ЕЩЁ",
+   "aligned": "В",
+   "boxes": 2,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.64
+  },
+  {
+   "file": "38.png",
+   "ref": "ТЫВАЮ",
+   "aligned": "ТВАЮ",
+   "boxes": 5,
+   "pairs": 4,
+   "trusted": true,
+   "nll": 0.52
+  },
+  {
+   "file": "41.png",
+   "ref": "НА ВАС,",
+   "aligned": "",
+   "boxes": 4,
+   "pairs": 0,
+   "trusted": false,
+   "nll": 99.0
+  },
+  {
+   "file": "42.png",
+   "ref": "ШЕПЧЕТ",
+   "aligned": "ШЕЕТ",
+   "boxes": 6,
+   "pairs": 4,
+   "trusted": false,
+   "nll": 0.08
+  },
+  {
+   "file": "44.png",
+   "ref": "ДУХИ.",
+   "aligned": "ДУХИ",
+   "boxes": 4,
+   "pairs": 4,
+   "trusted": true,
+   "nll": 0.43
+  }
+ ],
+ "detail": [
+  {
+   "file": "00.png",
+   "ref": "5 ЙЕН",
+   "hyp": "А: ,ИЫ;! Е",
+   "cer": 1.0
+  },
+  {
+   "file": "04.png",
+   "ref": "НОШЕНИЯ?",
+   "hyp": "КЮШЕНИЯ?",
+   "cer": 0.2857142857142857
+  },
+  {
+   "file": "08.png",
+   "ref": "БЫ И",
+   "hyp": "БЫ И",
+   "cer": 0.0
+  },
+  {
+   "file": "11.png",
+   "ref": "СДЕЛАЙ ЧТО-НИБУДЬ",
+   "hyp": "СДЕЛАЙ СПО-НИБУДЬ",
+   "cer": 0.13333333333333333
+  },
+  {
+   "file": "14.png",
+   "ref": "ШТУКОЙ, КОТОРАЯ",
+   "hyp": "ШТУКОИ, КОТОРАЯ",
+   "cer": 0.07692307692307693
+  },
+  {
+   "file": "17.png",
+   "ref": "СТОИТ РЯДОМ",
+   "hyp": "СТОИТ РЯДОМ",
+   "cer": 0.0
+  },
+  {
+   "file": "20.png",
+   "ref": "ВКУСНОЙ ЕДЫ",
+   "hyp": "ВКУСНОЙ Е№Ё",
+   "cer": 0.2
+  },
+  {
+   "file": "23.png",
+   "ref": "УГОДНО, ЧТОБЫ",
+   "hyp": "УГОДНЯ ЧТОБЫ",
+   "cer": 0.09090909090909091
+  },
+  {
+   "file": "27.png",
+   "ref": "ОТ ХАНЫ.",
+   "hyp": "ОТ ХАНЫ",
+   "cer": 0.0
+  },
+  {
+   "file": "30.png",
+   "ref": "ЭТО ПРОКЛЯТИЕ",
+   "hyp": "ЭТО ПРОКЛЯТИЕ",
+   "cer": 0.0
+  },
+  {
+   "file": "33.png",
+   "ref": "НЕ ЗНАЮ,",
+   "hyp": "НЕ ЭИКЪ",
+   "cer": 0.6666666666666666
+  },
+  {
+   "file": "36.png",
+   "ref": "ПОМОЖЕТ",
+   "hyp": "ПОМОЖЕТ",
+   "cer": 0.0
+  },
+  {
+   "file": "39.png",
+   "ref": "ЛИ ЭТО,",
+   "hyp": "ЛИ ЭТО,",
+   "cer": 0.0
+  },
+  {
+   "file": "43.png",
+   "ref": "НО...",
+   "hyp": "НО\"",
+   "cer": 0.0
+  }
+ ],
+ "history": [
+  0.30366712936665863,
+  0.2849594244325999,
+  0.27359043317846954,
+  0.2654886028612964,
+  0.2587729435763322,
+  0.25412894267356023,
+  0.24898810836020857,
+  0.24483773118117824,
+  0.242029347573407,
+  0.23728346955613233
+ ],
+ "model": "/home/runner/work/yomikai-web/yomikai-web/ownocr/out/ownocr-real"
+}

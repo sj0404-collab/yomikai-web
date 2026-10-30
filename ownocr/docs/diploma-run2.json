@@ -1,0 +1,115 @@
+{
+ "diploma": [
+  {
+   "key": "nursery",
+   "name": "ясли",
+   "exam": 0.8416666666666667,
+   "exam_hard": 0.6986444212721585,
+   "target": 0.65,
+   "passed": true,
+   "seconds": 0.1,
+   "n_examples": 288,
+   "fonts_taught": 4,
+   "epochs_best": 10
+  },
+  {
+   "key": "kindergarten",
+   "name": "детский сад",
+   "exam": 0.8606666666666667,
+   "exam_hard": 0.7244829886591061,
+   "target": 0.8,
+   "passed": true,
+   "seconds": 0.4,
+   "n_examples": 3563,
+   "fonts_taught": 12,
+   "epochs_best": 12
+  },
+  {
+   "key": "primary",
+   "name": "начальная школа",
+   "exam": 0.8746666666666667,
+   "exam_hard": 0.7728494623655914,
+   "target": 0.84,
+   "passed": true,
+   "seconds": 0.5,
+   "n_examples": 4248,
+   "fonts_taught": 12,
+   "epochs_best": 12
+  },
+  {
+   "key": "middle",
+   "name": "средняя школа",
+   "exam": 0.946,
+   "exam_hard": 0.8689516129032258,
+   "target": 0.91,
+   "passed": true,
+   "seconds": 6.9,
+   "n_examples": 25787,
+   "fonts_taught": 60,
+   "epochs_best": 13
+  },
+  {
+   "key": "high",
+   "name": "старшая школа",
+   "exam": 0.9613333333333334,
+   "exam_hard": 0.8897849462365591,
+   "target": 0.94,
+   "passed": true,
+   "seconds": 34.3,
+   "n_examples": 77585,
+   "fonts_taught": 180,
+   "epochs_best": 12
+  },
+  {
+   "key": "graduate",
+   "name": "выпускной",
+   "exam": 0.962,
+   "exam_hard": 0.8991935483870968,
+   "target": 0.95,
+   "passed": true,
+   "seconds": 76.1,
+   "n_examples": 120961,
+   "fonts_taught": 236,
+   "epochs_best": 13
+  },
+  {
+   "key": "university",
+   "name": "университет",
+   "exam": 0.9626666666666667,
+   "exam_hard": 0.8998655913978495,
+   "target": 0.94,
+   "passed": true,
+   "seconds": 59.6,
+   "n_examples": 121473,
+   "fonts_taught": 236,
+   "epochs_best": 5
+  },
+  {
+   "key": "postgrad",
+   "name": "аспирантура",
+   "exam": 0.962,
+   "exam_hard": 0.9012096774193549,
+   "target": 0.94,
+   "passed": true,
+   "seconds": 48.5,
+   "n_examples": 120977,
+   "fonts_taught": 236,
+   "epochs_best": 4
+  },
+  {
+   "key": "revision",
+   "name": "повторение ×55",
+   "exam": 0.972,
+   "exam_hard": 0.9110807113543091,
+   "target": 0.0,
+   "passed": true,
+   "seconds": 0,
+   "n_examples": 155686,
+   "fonts_taught": 0,
+   "epochs_best": 0,
+   "kept": 2,
+   "dropped": 53
+  }
+ ],
+ "left_min": 5.0
+}
