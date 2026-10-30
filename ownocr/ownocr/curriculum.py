@@ -100,18 +100,18 @@ class Curriculum:
         self.model: OwnClassifier | None = None
         self.diploma: list[dict] = []
         self.prev: dict = {}
-        if resume:
-            self._resume()
         self.exams: dict[str, np.ndarray] = {}
         self.feat_cache: dict[tuple, tuple] = {}
-        # «повторение пройденного»: куски материала прошлых уровней. Без этого
-        # ученик на каждом новом уровне забывал старый: экзамен «ясли» падал
+        # «повторение пройденного»: материал прошлых уровней. Без этого ученик
+        # на каждом новом уровне забывал старый: экзамен «ясли» падал
         # 97,9 → 93,2 % после «детского сада», и зачёты валились по пересдаче.
         self.rehearsal_X: list[np.ndarray] = []
         self.rehearsal_y: list[np.ndarray] = []
         self.rehearsal_n = 0
-        self.rehearsal_cap = 45000
+        self.rehearsal_cap = 60000
         self.resumed = False
+        if resume:
+            self._resume()
 
     def _resume(self):
         """Продолжить с прошлой зачётной ступени: ученик помнит, что сдал."""
@@ -139,6 +139,23 @@ class Curriculum:
                 st['target'] = max(st['target'], min(0.97, old['exam'] - 0.005))
                 self.say(f'   планка «{st["name"]}» поднята до {100 * st["target"]:.1f} % '
                          f'(в прошлый раз было {100 * old["exam"]:.1f} %)')
+        # экзамены сданных ступеней собираем заново: набор детерминированный
+        # (те же шрифты, тот же seed), поэтому пересдача после продолжения
+        # проверяет то же самое, что и в прошлый раз, а сам материал экзамена
+        # идёт в повторение — ровно та проверка ДЗ, о которой речь.
+        exam_fonts = [f for f in self.holdout_fonts][:40]
+        for st in STAGES:
+            old = self.prev.get(st['key'])
+            if not (old and old.get('passed')):
+                continue
+            try:
+                Xp, Yp = self.exam(exam_fonts, st.get('chars'))
+            except Exception as e:            # noqa: BLE001
+                self.say(f'   экзамен «{st["name"]}» не восстановить: {e}')
+                continue
+            self.exams[st['key']] = (Xp, Yp)
+            self._remember(Xp, Yp)
+            self.say(f'   экзамен «{st["name"]}» собран заново: {len(Yp)} примеров в повторение')
 
     # ── журнал ───────────────────────────────────────────────────────────────
     def say(self, text: str = ''):
@@ -236,7 +253,7 @@ class Curriculum:
             # поровну на КАЖДЫЙ пройденный уровень, а не пропорционально размеру:
             # иначе маленькие «ясли» (288 букв) тонут в 36 тысячах старших классов,
             # и алфавит забывается (97,1 → 93,5 % на пересдаче).
-            take = int(0.30 * len(Y))
+            take = int(0.35 * len(Y))
             per = max(1, take // len(self.rehearsal_y))
             rng = np.random.default_rng(len(self.rehearsal_y) + 100)
             parts_x, parts_y = [], []
@@ -268,6 +285,7 @@ class Curriculum:
 
         t = time.time()
         best_acc, best_state, best_ep = -1.0, None, 0
+        best_key = (-1.0, -1.0)
         lr = st['lr']
         if len(self.diploma) or self.resumed:
             lr = min(lr, 1.2e-3)   # продолжаем учёбу, а не начинаем заново
@@ -276,7 +294,19 @@ class Curriculum:
                                   seed=ep + 1, log=None)
             acc_clean = self.score(Xe, Ye)
             acc_hard = 0.5 * (self.score(*pass_exam) + self.score(*hard_exam))
-            if acc_clean > best_acc:
+            # выбираем эпоху не только по новому экзамену: считаем, насколько
+            # просели прошлые (иначе на выходе — ученик, сдавший новое и забывший
+            # старое). Годится эпоха, где новый экзамен сдан и просадки нет.
+            drop = 0.0
+            for key, (Xp, Yp) in self.exams.items():
+                was = next((d['exam'] for d in self.diploma if d['key'] == key), None)
+                if was is None:
+                    continue
+                drop = max(drop, was - self.score(Xp, Yp))
+            ok_now = acc_clean >= st['target'] and drop <= 0.012
+            key_ep = (1 if ok_now else 0, acc_clean - 1.2 * max(0.0, drop))
+            if key_ep > (-1.0, -1.0) and (best_state is None or key_ep > best_key):
+                best_key = key_ep
                 best_acc = acc_clean
                 best_state = {k: v.copy() for k, v in self.model._params().items()}
                 best_ep = ep + 1
@@ -313,6 +343,7 @@ class Curriculum:
         if passed:
             self.diploma.append(rec)
             self._remember(X, Y)
+            self._remember(Xe, Ye)
             self.save(self.workdir, st['key'])
         return rec
 
