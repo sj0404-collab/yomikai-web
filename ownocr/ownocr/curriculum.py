@@ -291,11 +291,11 @@ class Curriculum:
         # «ясли» проседали 97,2 → 92,9 % и пересдача валила зачёт). Экзамены
         # при этом остаются незнакомыми: они в обучение не попадают.
         soft = lam = None
-        if self.model is not None and len(Y) > n_new:
+        if self.model is not None and len(Y) > n_new and float(os.environ.get('OWNOCR_DISTILL', 0.0)) > 0:
             soft = np.zeros((len(Y), len(self.classes)), np.float32)
             soft[n_new:] = self.model.predict_proba(X[n_new:]).astype(np.float32)
             lam = np.zeros(len(Y), np.float32)
-            lam[n_new:] = 0.9
+            lam[n_new:] = float(os.environ.get('OWNOCR_DISTILL', 0.0))
             self.say(f'   дистилляция: {len(Y) - n_new} строк держим на ответах прежнего ученика')
         t = time.time()
         best_acc, best_state, best_ep = -1.0, None, 0
@@ -373,8 +373,8 @@ class Curriculum:
             return item['bank']
         mask = item['mask']
         n_glyph = int(mask.sum())
-        variants = int(max(2, min(8, 20000 // max(1, n_glyph))))
-        modes = ['clean', 'easy', 'small', 'italic', 'hard']
+        variants = int(max(2, min(int(os.environ.get('OWNOCR_REH_VAR', 4)), 20000 // max(1, n_glyph))))
+        modes = os.environ.get('OWNOCR_REH_MODES', 'clean,easy').split(',')
         bank = self._feat_bank(mask, modes, variants, seed=333 + len(item['key']))
         if len(bank[1]) > 8000:
             idx = np.random.default_rng(7).choice(len(bank[1]), 8000, replace=False)

@@ -127,7 +127,9 @@ def crops_from_lines(rows, ocr: OwnOCR, log=print):
         # учить по такому примеру только портить модель.
         nll = float(np.mean([-np.log(np.clip(probs[i, ocr.classes.index(text[j].upper())], 1e-6, 1.0))
                              for i, j in pairs])) if pairs else 99.0
-        trusted = (len(pairs) >= 0.7 * len(text)) and (nll < 3.4)
+        need = float(os.environ.get('OWNOCR_PAIR_COVER', 0.7))
+        nll_max = float(os.environ.get('OWNOCR_PAIR_NLL', 3.4))
+        trusted = (len(pairs) >= need * len(text)) and (nll < nll_max)
         stats.append({'file': os.path.basename(name), 'ref': ref, 'aligned': got,
                       'boxes': len(boxes), 'pairs': len(pairs), 'trusted': bool(trusted),
                       'nll': round(nll, 2)})

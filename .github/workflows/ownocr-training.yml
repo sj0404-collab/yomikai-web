@@ -92,7 +92,7 @@ jobs:
       - name: 'урок 7 — настоящая страница, с приёмкой'
         run: |
           cd ownocr
-          python scripts/04_lesson_real.py --epochs 10 2>&1 | tee out/lesson-real-console.txt
+          python scripts/04_lesson_real.py --epochs 18 2>&1 | tee out/lesson-real-console.txt
           python - <<'PY'
           import json, os, shutil
           r = json.load(open('out/lesson-real.json', encoding='utf-8'))
