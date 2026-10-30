@@ -131,6 +131,11 @@ def speed(ocr: OwnOCR, manifest: str):
     return {'line_ms': ms, 'line_px': [x1 - x0, y1 - y0]}
 
 
+def labels_path():
+    own = os.path.join(ROOT, 'data-real', 'labels.tsv')
+    return own if os.path.exists(own) else os.path.join(ROOT, '..', 'data', 'lines-real', 'labels.tsv')
+
+
 def main():
     ocr = OwnOCR(MODEL)
     manifest = os.path.join(OUT, 'sheet-manifest.json')
@@ -144,7 +149,7 @@ def main():
         'sheet_small': glyph_metrics(ocr, manifest, sheet, 'small'),
         'sheet_italic': glyph_metrics(ocr, manifest, sheet, 'italic'),
         'prose': prose_metrics(ocr, manifest),
-        'manga': manga_metrics(ocr, os.path.join(ROOT, 'data-real', 'labels.tsv')),
+        'manga': manga_metrics(ocr, labels_path()),
         'speed': speed(ocr, manifest),
     }
     json.dump(res, open(os.path.join(OUT, 'metrics.json'), 'w'), ensure_ascii=False, indent=1)
