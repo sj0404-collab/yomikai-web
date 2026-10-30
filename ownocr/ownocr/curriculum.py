@@ -113,6 +113,8 @@ class Curriculum:
         self.rehearsal_stages: list[dict] = []
         self.rehearsal_n = 0
         self.rehearsal_cap = 60000
+        self.labels_tsv = None
+        self._real_bank = None
         self.resumed = False
         if resume:
             self._resume()
@@ -255,6 +257,16 @@ class Curriculum:
             Y = np.concatenate([Y, extra_y])
             self.say(f'   + из настоящей страницы: {len(extra_y)}')
         # повторение пройденного: часть банка — примеры прошлых уровней
+        # и настоящие строки манги. Без настоящих строк лестница вымывает
+        # почерк: курс учится на синтетике, и чтение страницы ухудшается.
+        if (self.labels_tsv and self._real_bank is None
+                and os.environ.get('OWNOCR_REAL_REH', '0') == '1'):
+            Xr, Yr = self.real_pairs(self.labels_tsv)
+            if Xr is not None and len(Yr):
+                self._real_bank = (Xr, Yr)
+                self.rehearsal_stages.append({'key': 'real', 'mask': None,
+                                              'bank': (Xr, Yr)})
+                self.say(f'   настоящие строки в повторении: {len(Yr)} пар «картинка–буква»')
         n_new = len(Y)
         if self.rehearsal_stages:
             share = float(os.environ.get('OWNOCR_REH_SHARE', 0.5))
@@ -571,6 +583,7 @@ class Curriculum:
 
     # ── весь курс ────────────────────────────────────────────────────────────
     def run(self, stages=None, labels_tsv: str | None = None, page: str | None = None):
+        self.labels_tsv = labels_tsv if (labels_tsv and os.path.exists(labels_tsv)) else None
         keys = stages or [s['key'] for s in STAGES]
         for st in STAGES:
             if st['key'] not in keys:

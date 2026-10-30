@@ -1,0 +1,122 @@
+{
+ "diploma": [
+  {
+   "key": "nursery",
+   "name": "ясли",
+   "exam": 0.9791666666666666,
+   "exam_hard": 0.9322210636079249,
+   "target": 0.8366666666666667,
+   "passed": true,
+   "seconds": 0.1,
+   "n_examples": 288,
+   "fonts_taught": 4,
+   "epochs_best": 1
+  },
+  {
+   "key": "kindergarten",
+   "name": "детский сад",
+   "exam": 0.95,
+   "exam_hard": 0.8899266177451635,
+   "target": 0.8556666666666667,
+   "passed": false,
+   "seconds": 0.2,
+   "n_examples": 3561,
+   "fonts_taught": 12,
+   "epochs_best": 4,
+   "conditional": true
+  },
+  {
+   "key": "primary",
+   "name": "начальная школа",
+   "exam": 0.9486666666666667,
+   "exam_hard": 0.883736559139785,
+   "target": 0.8696666666666667,
+   "passed": false,
+   "seconds": 0.3,
+   "n_examples": 4244,
+   "fonts_taught": 12,
+   "epochs_best": 1,
+   "conditional": true
+  },
+  {
+   "key": "middle",
+   "name": "средняя школа",
+   "exam": 0.962,
+   "exam_hard": 0.8978494623655914,
+   "target": 0.941,
+   "passed": false,
+   "seconds": 1.8,
+   "n_examples": 25769,
+   "fonts_taught": 60,
+   "epochs_best": 6,
+   "conditional": true
+  },
+  {
+   "key": "high",
+   "name": "старшая школа",
+   "exam": 0.9633333333333334,
+   "exam_hard": 0.905241935483871,
+   "target": 0.9563333333333334,
+   "passed": false,
+   "seconds": 5.2,
+   "n_examples": 77588,
+   "fonts_taught": 180,
+   "epochs_best": 7,
+   "conditional": true
+  },
+  {
+   "key": "graduate",
+   "name": "выпускной",
+   "exam": 0.964,
+   "exam_hard": 0.9045698924731183,
+   "target": 0.957,
+   "passed": false,
+   "seconds": 9.0,
+   "n_examples": 120905,
+   "fonts_taught": 236,
+   "epochs_best": 5,
+   "conditional": true
+  },
+  {
+   "key": "university",
+   "name": "университет",
+   "exam": 0.962,
+   "exam_hard": 0.9092741935483871,
+   "target": 0.9576666666666667,
+   "passed": false,
+   "seconds": 6.8,
+   "n_examples": 121600,
+   "fonts_taught": 236,
+   "epochs_best": 6,
+   "conditional": true
+  },
+  {
+   "key": "postgrad",
+   "name": "аспирантура",
+   "exam": 0.9613333333333334,
+   "exam_hard": 0.9065860215053764,
+   "target": 0.957,
+   "passed": false,
+   "seconds": 5.7,
+   "n_examples": 120905,
+   "fonts_taught": 236,
+   "epochs_best": 4,
+   "conditional": true
+  },
+  {
+   "key": "revision",
+   "name": "повторение ×261",
+   "exam": 0.9746666666666667,
+   "exam_hard": 0.9165526675786594,
+   "target": 0.0,
+   "passed": true,
+   "seconds": 0,
+   "n_examples": 155358,
+   "fonts_taught": 0,
+   "epochs_best": 0,
+   "kept": 2,
+   "dropped": 259
+  }
+ ],
+ "left_min": 5.0
+}
