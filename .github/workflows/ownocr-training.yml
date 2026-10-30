@@ -1,0 +1,116 @@
+name: обучение своего OCR (детсад → университет)
+
+# Зачем на раннере: обучение — это счёт, ему нужны ядра, а не браузер.
+# Раннер GitHub даёт 4 ядра и 16 ГБ, поэтому курс из 8 уровней с проверкой
+# домашних заданий и «повторением до звонка» укладывается в 40 минут.
+on:
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: 'бюджет обучения, минут'
+        default: '38'
+      stages:
+        description: 'какие уровни (пусто = все)'
+        default: ''
+  push:
+    paths:
+      - 'ownocr/ownocr/**'
+      - 'ownocr/scripts/**'
+      - '.github/workflows/ownocr-training.yml'
+
+concurrency:
+  group: ownocr-training
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      BUDGET: ${{ github.event.inputs.budget || '38' }}
+      STAGES: ${{ github.event.inputs.stages || '' }}
+      FONTS_DIR: /home/runner/fonts
+      PYTHONUNBUFFERED: '1'
+      OMP_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: зависимости (лёгкие: без torch, без onnx)
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy opencv-python-headless pillow
+          python -c "import numpy, cv2, PIL; print('numpy', numpy.__version__, 'cv2', cv2.__version__)"
+
+      - name: шрифты (кэш между запусками)
+        id: fonts
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/fonts
+          key: cyr-fonts-296-v1
+
+      - name: скачать 296 кириллических шрифтов
+        if: steps.fonts.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$FONTS_DIR"
+          python ownocr/scripts/01_fetch_fonts.py --limit 300 --out "$FONTS_DIR" --layout /tmp/ownocr
+          ls "$FONTS_DIR" | wc -l
+
+      - name: лист (296 шрифтов на одной странице)
+        run: |
+          python ownocr/scripts/02_make_sheet.py --fonts "$FONTS_DIR" --px 30 --out ownocr/out
+          ls -l ownocr/out/sheet.png
+
+      - name: курс обучения (дедлайн — бюджет минус запас)
+        run: |
+          cd ownocr
+          python scripts/06_curriculum.py --budget-minutes "$BUDGET" ${STAGES:+--stages "$STAGES"} \
+            --out model 2>&1 | tee out/curriculum-console.txt
+
+      - name: итоговая проверка (глифы, проза, настоящая страница)
+        run: |
+          cd ownocr
+          python scripts/05_metrics.py --model model --out out/metrics-final.json 2>&1 | tee out/metrics-console.txt
+
+      - name: артефакты (модель, диплом, журналы)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ownocr-model
+          path: |
+            ownocr/model
+            ownocr/out/curriculum-log.txt
+            ownocr/out/diploma-final.json
+            ownocr/out/metrics-final.json
+            ownocr/out/metrics-console.txt
+            ownocr/out/curriculum-console.txt
+          retention-days: 30
+
+      - name: зафиксировать результат в ветке ownocr-model
+        if: always()
+        run: |
+          mkdir -p /tmp/bank
+          cp -a ownocr/model/. /tmp/bank/ 2>/dev/null || true
+          cp ownocr/out/curriculum-log.txt /tmp/bank/ 2>/dev/null || true
+          cp ownocr/out/metrics-final.json /tmp/bank/ 2>/dev/null || true
+          cd /tmp/bank
+          git init -q -b ownocr-model
+          git config user.email "actions@github.com"
+          git config user.name "ownocr-training"
+          cat > README.md <<EOF
+          Зачётная книжка своего OCR (обновляется обучением на раннере).
+          Модель: ownocr-latest.npz · диплом: diploma.json · журнал: curriculum-log.txt
+          Запуск: ${GITHUB_RUN_ID} · ${GITHUB_SHA}
+          EOF
+          git add -A
+          git commit -q -m "ownocr: курс ${GITHUB_RUN_ID}" || true
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" ownocr-model

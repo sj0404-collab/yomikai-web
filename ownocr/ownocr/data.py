@@ -43,7 +43,17 @@ def _has_glyph(font: ImageFont.FreeTypeFont, ch: str) -> bool:
 def render_sheet(font_paths, out_png: str, out_manifest: str, px: int = 30,
                  holdout_every: int = 5) -> dict:
     """Нарисовать один лист и вернуть манифест (где какая буква)."""
-    label_font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 15)
+    label_font = None
+    for cand in ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                 '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+                 '/usr/share/fonts/truetype/freefont/FreeSans.ttf'):
+        try:
+            label_font = ImageFont.truetype(cand, 15)
+            break
+        except Exception:
+            continue
+    if label_font is None:
+        label_font = ImageFont.load_default()
     rows = []
     for i, path in enumerate(font_paths):
         try:

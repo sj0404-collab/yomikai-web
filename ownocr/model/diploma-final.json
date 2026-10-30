@@ -1,0 +1,50 @@
+[
+ {
+  "key": "nursery",
+  "name": "ясли",
+  "exam": 0.8364583333333333,
+  "exam_hard": 0.7174139728884255,
+  "target": 0.65,
+  "passed": true,
+  "seconds": 0.2,
+  "n_examples": 288,
+  "fonts_taught": 4,
+  "epochs_best": 11
+ },
+ {
+  "key": "kindergarten",
+  "name": "детский сад",
+  "exam": 0.868,
+  "exam_hard": 0.7104736490993996,
+  "target": 0.8,
+  "passed": true,
+  "seconds": 0.6,
+  "n_examples": 3565,
+  "fonts_taught": 12,
+  "epochs_best": 11
+ },
+ {
+  "key": "primary",
+  "name": "начальная школа",
+  "exam": 0.878,
+  "exam_hard": 0.7721774193548387,
+  "target": 0.84,
+  "passed": true,
+  "seconds": 1.0,
+  "n_examples": 4226,
+  "fonts_taught": 12,
+  "epochs_best": 10
+ },
+ {
+  "key": "middle",
+  "name": "средняя школа",
+  "exam": 0.9433333333333334,
+  "exam_hard": 0.8561827956989247,
+  "target": 0.91,
+  "passed": true,
+  "seconds": 8.6,
+  "n_examples": 25742,
+  "fonts_taught": 60,
+  "epochs_best": 8
+ }
+]

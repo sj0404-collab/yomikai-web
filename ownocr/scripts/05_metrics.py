@@ -3,6 +3,7 @@
 
   python3 scripts/05_metrics.py
 """
+import argparse
 import csv
 import glob
 import json
@@ -137,13 +138,19 @@ def labels_path():
 
 
 def main():
-    ocr = OwnOCR(MODEL)
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--model', default=MODEL)
+    ap.add_argument('--out', default=os.path.join(OUT, 'metrics.json'))
+    a = ap.parse_args()
+    ocr = OwnOCR(a.model)
     manifest = os.path.join(OUT, 'sheet-manifest.json')
     sheet = os.path.join(OUT, 'sheet.png')
     res = {
         'classes': len(ocr.classes),
         'vocab': len(ocr.vocab),
-        'model_size_kb': round(os.path.getsize(os.path.join(MODEL, 'ownocr.npz')) / 1024, 1),
+        'model_size_kb': round(os.path.getsize(
+            os.path.join(a.model, 'ownocr-latest.npz' if os.path.exists(
+                os.path.join(a.model, 'ownocr-latest.npz')) else 'ownocr.npz')) / 1024, 1),
         'params': int(ocr.model.W1.size + ocr.model.b1.size + ocr.model.W2.size + ocr.model.b2.size),
         'sheet_clean': glyph_metrics(ocr, manifest, sheet, 'clean'),
         'sheet_small': glyph_metrics(ocr, manifest, sheet, 'small'),
@@ -152,7 +159,8 @@ def main():
         'manga': manga_metrics(ocr, labels_path()),
         'speed': speed(ocr, manifest),
     }
-    json.dump(res, open(os.path.join(OUT, 'metrics.json'), 'w'), ensure_ascii=False, indent=1)
+    os.makedirs(os.path.dirname(a.out) or '.', exist_ok=True)
+    json.dump(res, open(a.out, 'w'), ensure_ascii=False, indent=1)
 
     print(f'классов {res["classes"]} · словарь {res["vocab"]} слов · '
           f'модель {res["model_size_kb"]} КБ · {res["params"]} чисел')
