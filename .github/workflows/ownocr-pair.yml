@@ -1,0 +1,93 @@
+name: проверка связки «детектор + свой OCR»
+
+# Быстрая проверка (2–4 минуты): детектор приложения находит текст на странице,
+# свой ученик (прошедший курс и урок 7) читает строки, реплики собираются в
+# порядке чтения. Модели детектора и CTC лежат в репозитории (models/).
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ownocr/ownocr/page_det.py'
+      - 'ownocr/scripts/10_pair_page.py'
+      - '.github/workflows/ownocr-pair.yml'
+
+jobs:
+  pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: зависимости
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy pillow opencv-python-headless onnxruntime
+
+      - name: взять зачётную модель из ветки ownocr-model
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: ownocr-model
+          path: trained
+
+      - name: модель на место
+        run: |
+          mkdir -p ownocr/model
+          if [ -f trained/ownocr-latest.npz ]; then
+            cp trained/ownocr-latest.npz ownocr/model/
+            cp trained/ownocr-latest.npz.json ownocr/model/
+            echo "взята зачётная модель из ветки ownocr-model"
+          else
+            echo "::warning::зачётной модели нет — берём ту, что в репозитории"
+          fi
+          ls -la ownocr/model
+
+      - name: детектор + свой распознаватель на целой странице
+        run: |
+          cd ownocr
+          python scripts/10_pair_page.py \
+            --page ../data/real/dense.jpg \
+            --det ../models/koma_det.onnx \
+            --ctc ../models/koma_rec.onnx \
+            --dict ../models/koma_dict.txt \
+            --model model \
+            --json out/pair-ci.json \
+            --out out/pair-ci.png 2>&1 | tee out/pair-console.txt
+
+      - name: итог
+        run: |
+          cd ownocr
+          python - <<'PY'
+          import json
+          d = json.load(open('out/pair-ci.json', encoding='utf-8'))
+          own, ctc = d['own'], d.get('ctc', {})
+          print(f"свой ученик: реплик {len(own['replies'])} · "
+                f"боксов {own['boxes']} · строк {own['lines']} · {own['seconds']} с")
+          if ctc:
+              print(f"CTC приложения: реплик {len(ctc['replies'])} · {ctc['seconds']} с")
+          with open('docs/pair-ci.md', 'w', encoding='utf-8') as f:
+              f.write('# Связка «детектор + свой OCR» (прогон на раннере)\n\n')
+              f.write(f"страница {d['page']} {d['size'][1]}×{d['size'][0]}\n\n")
+              f.write('| кто читает | реплик | боксов детектора | строк | время |\n|---|---|---|---|---|\n')
+              f.write(f"| свой ученик | {len(own['replies'])} | {own['boxes']} | {own['lines']} | {own['seconds']} с |\n")
+              if ctc:
+                  f.write(f"| CTC приложения | {len(ctc['replies'])} | {ctc['boxes']} | {ctc['lines']} | {ctc['seconds']} с |\n")
+              f.write('\nчто прочитал свой ученик:\n\n')
+              for i, line in enumerate(own['replies'], 1):
+                  f.write(f'{i}. {line}\n')
+          PY
+
+      - name: артефакты
+        uses: actions/upload-artifact@v4
+        with:
+          name: ownocr-pair
+          path: |
+            ownocr/out/pair-ci.json
+            ownocr/out/pair-ci.png
+            ownocr/out/pair-console.txt
+            ownocr/docs/pair-ci.md
+          if-no-files-found: warn
