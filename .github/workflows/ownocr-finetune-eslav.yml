@@ -1,0 +1,102 @@
+name: дообучение эслава на домене манги
+
+# Зачем на раннере: 22 эпохи × 200 шагов CTC — это счёт на CPU, ~25 минут на
+# 4 ядрах. В браузере и на телефоне такое не сделать, а раннер GitHub даёт
+# 4 ядра бесплатно.
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'эпох'
+        default: '22'
+      seed:
+        description: 'зерно'
+        default: '3'
+  push:
+    paths:
+      - 'ownocr/ownocr/eslav.py'
+      - 'ownocr/ownocr/synth.py'
+      - 'ownocr/scripts/16_finetune_ctc.py'
+      - 'ownocr/scripts/17_export_ctc.py'
+      - 'ownocr/data-real/**'
+      - '.github/workflows/ownocr-finetune-eslav.yml'
+
+concurrency:
+  group: ownocr-finetune-eslav
+  cancel-in-progress: false
+
+jobs:
+  finetune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EPOCHS: ${{ github.event.inputs.epochs || '22' }}
+      SEED: ${{ github.event.inputs.seed || '3' }}
+      FONTS_DIR: /home/runner/fonts
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 'зависимости — torch только CPU'
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy opencv-python-headless pillow
+          python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --quiet onnx onnxruntime onnxscript
+          python -c "import torch, onnx, onnxruntime; print('torch', torch.__version__)"
+
+      - name: 'шрифты из кэша'
+        id: fonts
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/fonts
+          key: cyr-fonts-300-v1
+
+      - name: 'скачать шрифты'
+        if: steps.fonts.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$FONTS_DIR"
+          python ownocr/scripts/01_fetch_fonts.py --limit 300 --out "$FONTS_DIR" --layout /tmp/ownocr
+          ls "$FONTS_DIR" | wc -l
+
+      - name: 'базовые веса на месте'
+        run: |
+          test -f ownocr/model/eslav/base.onnx || { echo 'нет ownocr/model/eslav/base.onnx'; exit 1; }
+          ls -l ownocr/model/eslav/
+
+      - name: 'дообучение'
+        run: |
+          cd ownocr
+          mkdir -p out
+          python scripts/16_finetune_ctc.py --epochs "$EPOCHS" --steps 200 --lr 2.5e-4 --seed "$SEED" 2>&1 | tee out/finetune-console.txt
+
+      - name: 'экспорт в ONNX и сверка'
+        run: |
+          cd ownocr
+          python scripts/17_export_ctc.py 2>&1 | tee out/export-console.txt
+          grep -q 'расхождение' out/export-console.txt
+
+      - name: 'замер: кто точнее на настоящих строках'
+        run: |
+          cd ownocr
+          python scripts/18_compare_readers.py --eslav out/eslav-ft.onnx 2>&1 | tee out/compare-console.txt
+
+      - name: 'артефакты'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslav-ft
+          path: |
+            ownocr/out/eslav-ft.onnx
+            ownocr/out/eslav-ft.pt
+            ownocr/out/eslav-ft.json
+            ownocr/out/finetune-console.txt
+            ownocr/out/export-console.txt
+            ownocr/out/compare-console.txt
+          retention-days: 30

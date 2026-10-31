@@ -65,6 +65,13 @@ def cer(ref: str, hyp: str) -> float:
 
 VOWELS = set('АЕЁИОУЫЭЮЯ')
 
+# Накладки самого приложения-читалки, которые попадают в скриншот: «Справа
+# налево», «Загрузка», счётчик страниц и т.п. Это не реплики страницы, и в
+# приёмке их быть не должно. Список намеренно узкий: только служебные слова.
+UI_WORDS = {'СПРАВА', 'НАЛЕВО', 'СЛЕВА', 'НАПРАВО', 'ЗАГРУЗКА', 'СКАЧАТЬ',
+            'ПОВТОРИТЬ', 'ОШИБКА', 'СТРАНИЦА', 'ПРОКРУТКА', 'МЕНЮ', 'OCR'}
+UI_BIGRAMS = {'СПРАВА НАЛЕВО', 'СЛЕВА НАПРАВО', 'ОШИБКА OCR'}
+
 
 def is_junk_word(word: str) -> bool:
     """Контролёр: «слово» из обрывка штриховки, которого в русском быть не может."""
@@ -209,6 +216,9 @@ def _vote_words(seen: list[tuple[str, float]]) -> tuple[str, float]:
 TIDY = os.environ.get('OWNOCR_TIDY', '1') == '1'
 CREW = os.environ.get('OWNOCR_CREW', '1') == '1'
 RESCUE = os.environ.get('OWNOCR_RESCUE', '1') == '1'
+ESLAV_STRETCH = float(os.environ.get('OWNOCR_ESLAV_STRETCH', '1.1'))
+ESLAV_WIDE = int(os.environ.get('OWNOCR_ESLAV_WIDE', '160'))
+ESLAV_CONF = float(os.environ.get('OWNOCR_ESLAV_CONF', '0.6'))
 OTSU = os.environ.get('OWNOCR_OTSU', '0') == '1'
 DARK_FRAC = float(os.environ.get('OWNOCR_DARK', '0.55'))   # доля тёмного, при которой пробуем перевернуть
 JUNK_IN_WORD = '»«"“”„%№$|\\/~^`*+=<>[]{}'
@@ -235,6 +245,38 @@ def tidy(text: str) -> str:
             body = ''.join(c for c in body if c not in JUNK_IN_WORD)
         out.append((lead + body + trail) if body else lead)
     return ' '.join(out)
+
+
+class CtcLineReader:
+    """Работник «эслав»: строчный CTC-распознаватель, дообученный на нашем домене.
+
+    Читает кроп целиком как строку (1×32×W), поэтому его ошибки не похожи на
+    ошибки посимвольного ученика: он видит слово целиком и не рвёт его на
+    отдельные пятна. В бригаде отвечает за слова, где ученик путает буквы.
+    """
+
+    def __init__(self, path: str):
+        import onnxruntime as ort
+        from . import eslav as E
+        self.E = E
+        self.sess = ort.InferenceSession(path, providers=['CPUExecutionProvider'])
+        self.name = self.sess.get_inputs()[0].name
+
+    def read(self, gray: np.ndarray, stretch: float = 1.0) -> tuple[str, float]:
+        x = self.E.prepare(gray)
+        if abs(stretch - 1.0) > 1e-3:
+            import cv2
+            w = max(8, int(round(x.shape[-1] * stretch)))
+            img = (x[0, 0] + 1.0) * 127.5
+            img = cv2.resize(img, (w, x.shape[2]), interpolation=cv2.INTER_LINEAR)
+            x = (img / 127.5 - 1.0)[None, None].astype('float32')
+        out = np.asarray(self.sess.run(None, {self.name: x})[0]).reshape(-1, self.E.NUM_CLASSES)
+        # уверенность: средняя вероятность выбранных классов (без «пусто»)
+        mx = out.max(axis=1)
+        idx = out.argmax(axis=1)
+        keep = idx != self.E.BLANK
+        conf = float(np.exp(np.log(np.clip(np.exp(mx[keep]), 1e-6, 1.0))).mean()) if keep.any() else 0.0
+        return self.E.decode_logits(out), float(np.clip(conf, 0.0, 1.0))
 
 
 class OwnReader:
@@ -278,6 +320,19 @@ class OwnReader:
         # Бригада: у каждого работника своя зона ответственности, бригадир
         # сводит голоса пословно (см. ownocr/crew.py). Редактор и контролёр —
         # те же функции, что уже отлажены в движке.
+        # Работник «эслав» подключается, если есть дообученная модель.
+        # «Эславов» может быть несколько: дообученный на нашем домене и исходные
+        # чужие. Список задаётся через запятую — каждый становится отдельным
+        # работником бригады со своим голосом.
+        self.eslavs = []
+        for path in os.environ.get('OWNOCR_ESLAV_MODEL', '').split(','):
+            path = path.strip()
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                self.eslavs.append(CtcLineReader(path))
+            except Exception as exc:                      # модель есть, но битая
+                print(f'эслав не подключён ({path}): {exc}')
         self.foreman = Foreman(
             getattr(self.ocr, 'vocab', set()),
             fix=lambda w: self.ocr._fix_word(w) if hasattr(self.ocr, '_fix_word') else w,
@@ -397,6 +452,27 @@ class OwnReader:
             # дали одно и то же слово в слово, следующий ничего не изменит.
             if self.vote and len(seen) >= 2 and len({t for t, _ in seen}) == 1:
                 break
+        # «Эслав» читает строку на нескольких растяжениях: на настоящих кропах
+        # растяжение 1.1 дало 20.0 % против 24.3 % при 1.0 (замер на отложенных
+        # строках). Каждое растяжение — отдельный голос работника.
+        for k, ctc in enumerate(self.eslavs if not harsh else []):
+            # растяжение включаем только для длинных строк: на коротком кропе
+            # оно растягивает сами буквы и портит результат (замер: dense-page
+            # 2.9 → 13.8 % при включённом растяжении на всех кропах)
+            wide = g.shape[1] >= ESLAV_WIDE
+            variants = [(1.0, 'eslav')] + ([(ESLAV_STRETCH, 'eslav1')] if wide else [])
+            for st, name in variants:
+                try:
+                    etext, econf = ctc.read(g, stretch=st)
+                    if etext.strip():
+                        # Доверие CTC-модели берём ФИКСИРОВАННЫМ: после
+                        # дообучения она выдаёт вероятности ~0,99 почти всегда, и
+                        # в голосовании перебивала ученика, хотя ошибается не
+                        # реже (замер: CER страниц 3,7 → 16,1 % на её родных 0,99).
+                        seen.append((etext, ESLAV_CONF))
+                        self._last_workers.append(name if k == 0 else f'{name}_{k}')
+                except Exception:
+                    pass
         if CREW and seen and not harsh:
             props = [Proposal(worker, WEIGHTS.get(worker, 0.9), text, conf)
                      for worker, (text, conf) in zip(self._last_workers, seen)]
@@ -471,6 +547,16 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     # 40 %. Второе условие отсекает служебные надписи приложения и подписи
     # картинок: «ОШИБКА ОСР САППО1 СОЕГСЕ УАТ ЧЕ ТО» — одно словарное слово из
     # семи, это не реплика.
+    def _ui(text: str) -> bool:
+        """Накладка приложения, а не речь страницы."""
+        words = [w.strip('.,!?…—«»"():;%').upper() for w in text.split()]
+        words = [w for w in words if w]
+        if not words:
+            return False
+        if ' '.join(words) in UI_BIGRAMS:
+            return True
+        return all(w in UI_WORDS or w.isdigit() for w in words)
+
     def _readable(text: str) -> bool:
         # Считаем только слова от трёх букв: «ЧЕ» и «ТО» — словарные, но их
         # наличие не делает репликой служебную надпись «ОШИБКА ОСР САППО1…».
@@ -489,7 +575,7 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
         # даёт одно слово из пяти — отсекается.
         return known >= 2 or share >= 0.5
 
-    kept = [line for line in lines if _readable(line.text)]
+    kept = [line for line in lines if _readable(line.text) and not _ui(line.text)]
     # Правки на уровне готовой реплики: слова склеиваются из переносов
     # («РАССЧИ-» + «ТЬВАЮ»), и каждая половина по отдельности ни в какие
     # правила не попадает — только целое слово. Заодно убираем мусорные
