@@ -155,6 +155,7 @@ def _vote_words(seen: list[tuple[str, float]]) -> tuple[str, float]:
 
 
 TIDY = os.environ.get('OWNOCR_TIDY', '1') == '1'
+DARK_FRAC = float(os.environ.get('OWNOCR_DARK', '0.55'))   # доля тёмного, при которой пробуем перевернуть
 JUNK_IN_WORD = '»«"“”„%№$|\\/~^`*+=<>[]{}'
 
 
@@ -221,6 +222,7 @@ class OwnReader:
         g = np.asarray(gray)
         if g.ndim == 3:
             g = cv2.cvtColor(g, cv2.COLOR_RGB2GRAY)
+
         # Обрезаем кроп по чернилам: в кроп от детектора попадает фон и
         # соседние штрихи, из-за них строка читается хуже.
         ys, xs = np.where(g < 160)
@@ -233,6 +235,34 @@ class OwnReader:
             h, w = g.shape[:2]
             py, px = max(1, int(round(h * self.pad))), max(1, int(round(w * self.pad)))
             g = cv2.copyMakeBorder(g, py, py, px, px, cv2.BORDER_CONSTANT, value=255)
+        # Белый текст на чёрной плашке (нарратив в манге): без переворота такой
+        # кроп читается мусором и отбрасывается («ОНО ЧТО-ТО СДЕЛАЛО СО МНОЙ…»
+        # на page16 не появлялось вовсе). Но переворачивать всё тёмное нельзя —
+        # на dense-b тёмный рисунок дал лишнюю «реплику» и CER 102 %. Поэтому
+        # читаем оба варианта и берём тот, где больше словарных слов.
+        best = self._read_scales(g, harsh)
+        # Перевёрнутый вариант пробуем только когда обычное чтение не дало ни
+        # одного словарного слова: так плашка с белым текстом спасается, а
+        # тёмный рисунок не порождает лишнюю «реплику» (на dense-b это давало
+        # 10 реплик вместо 9 и CER 102 %).
+        if g.size and known_words(best[0]) == 0 and float((g < 96).mean()) >= DARK_FRAC:
+            alt = self._read_scales(255 - g, harsh)
+            # Критерий — не число слов, а их доля: строка плашки короткая
+            # («ОНО»), и по числу она проигрывает служебной надписи со края
+            # страницы («СГЮАВА НАЛЕВО» — одно слово из двух). Здесь наоборот:
+            # у плашки все слова словарные, у надписи — половина.
+            words = [w for w in alt[0].split() if w.strip(EDGE_PUNCT)]
+            share = sum(1 for w in words if _word_ok(w)) / len(words) if words else 0.0
+            if share >= 0.9 and alt[1] >= 0.85:
+                return alt
+        # Выравнивание контраста по перцентилям для цветной манхвы проверялось:
+        # строки читаются не лучше («ДАБЫ ТЕМ САМЫ» вместо «ДАБЫ ТЕМ САМЫМ»),
+        # поэтому подстраховка убрана — она только тратит время.
+        return best
+
+    def _read_scales(self, g, harsh):
+        import cv2
+
         best: tuple[str, float] = ('', -1.0)
         scales = self.scales_harsh if harsh else self.scales
         seen: list[tuple[str, float]] = []
@@ -261,8 +291,26 @@ class OwnReader:
         return best
 
 
+def colour_page(rgb: np.ndarray) -> bool:
+    """Страница цветная (манхва) или чёрно-белая (типографская манга)?
+
+    На цветных страницах буквы нарисованы от руки, и словарь нужен шире: там
+    путаются не только метки, но и сами буквы (О↔С). Замер: починка по парам
+    даёт на манхве 25,9 → 24,8 % и склеивает строки пузыря в одну реплику, а на
+    типографской манге она же портит текст (11,0 → 11,8 %). Поэтому режим
+    выбирается по странице, а не один на всё.
+    """
+    import cv2
+
+    small = cv2.resize(rgb, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+    sat = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)[:, :, 1]
+    return float(np.mean(sat)) > 8.0
+
+
 def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     harsh = is_harsh_page(rgb)
+    if hasattr(reader, 'ocr'):
+        reader.ocr.REPAIR = 'marksmall' if colour_page(rgb) else 'marksdigits'
     rgb = normalize_page(rgb)
     gray = np.array(Image.fromarray(rgb).convert('L'))
     H, W = gray.shape

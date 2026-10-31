@@ -331,6 +331,23 @@ class OwnOCR:
                         if cand in self.vocab:
                             return cand
             return word
+        if self.REPAIR in ('marksmall', 'marksdigits') and not any(c.isdigit() for c in up):
+            # Рукописные буквы (манхва): «СВОИХ» читается «ОВОИХ», «АБСОЛЮТОМ» —
+            # «АБООЛЮТОМ». Правим ОДНУ замену, и только в знакомых парах —
+            # словарь тут не «угадывает слово», а возвращает букву по форме.
+            best = None
+            # ищем по длине, а не по первой букве: путаница О↔С меняет и первую
+            for w in self.vocab_by_len.get(len(up), []):
+                diff = [i for i, (a, b) in enumerate(zip(up, w)) if a != b]
+                if len(diff) != 1:
+                    continue
+                i = diff[0]
+                if not any((up[i] == a and w[i] == b) for a, b in self.CONFUSABLE):
+                    continue
+                rank = self.vocab.get(w, 10 ** 6)
+                if best is None or rank < best[0]:
+                    best = (rank, w)
+            return best[1] if best else word
         if self.REPAIR == 'marksdigits' and any(c.isdigit() for c in up):
             # Цифра внутри слова — почти всегда потерянная буква («УТОДН2» →
             # «УГОДНО», «Р5ИОМ» → «РЯДОМ»). Здесь словарь разрешаю шире, чем для
@@ -339,8 +356,8 @@ class OwnOCR:
             # словарь начнёт переписывать верные слова.
             digits = [i for i, c in enumerate(up) if c.isdigit()]
             best = None
-            for w in self.vocab_by_first.get(up[0], []):
-                if len(w) != len(up) or any(w[i].isdigit() for i in digits):
+            for w in self.vocab_by_len.get(len(up), []):
+                if any(w[i].isdigit() for i in digits):
                     continue
                 diff = [i for i, (a, b) in enumerate(zip(up, w)) if a != b]
                 if len(diff) > 2 or not set(diff) - set(digits) == set(diff) - set(digits):
