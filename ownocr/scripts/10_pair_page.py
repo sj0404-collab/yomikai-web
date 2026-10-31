@@ -22,6 +22,7 @@ import os
 import sys
 import time
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -29,8 +30,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from ownocr.engine import OwnOCR                     # noqa: E402
-from ownocr.page_det import (PageDetector, Region, bubbles_of,  # noqa: E402
-                             split_panels, text_lines)
+from ownocr.page_det import PageDetector  # noqa: E402, F401
 
 
 def cer(ref: str, hyp: str) -> float:
@@ -46,111 +46,8 @@ def cer(ref: str, hyp: str) -> float:
     return prev[-1] / len(ref)
 
 
-VOCAB = set(w.strip().upper() for w in
-             open(os.path.join(ROOT, 'ownocr', 'vocab-ru.txt'), encoding='utf-8'))
-
-
-def known_words(text: str) -> int:
-    """Сколько слов реплики есть в словаре (25 000 частых русских слов)."""
-    words = [w.strip('.,!?…—«»"():;%') for w in text.upper().replace('-', ' ').split()]
-    return sum(1 for w in words if len(w) >= 3 and w in VOCAB)
-
-
-def clean(text: str) -> str:
-    return ''.join(c for c in text.upper() if c.isalnum() or c == ' ').strip()
-
-
-class CtcReader:
-    """Распознаватель приложения (PP-OCR CTC) — для честного сравнения."""
-
-    def __init__(self, model: str, dictionary: str):
-        import onnxruntime as ort
-        self.sess = ort.InferenceSession(model, providers=['CPUExecutionProvider'])
-        self.name = self.sess.get_inputs()[0].name
-        letters = open(dictionary, encoding='utf-8').read().splitlines()
-        self.dictionary = [''] + letters + [' ']
-
-    def read(self, rgb: np.ndarray) -> tuple[str, float]:
-        ch, cw = rgb.shape[:2]
-        width = int(np.clip(round(48 * cw / ch), 8, 960))
-        canvas = np.full((48, max(320, width), 3), 128, dtype=np.uint8)
-        canvas[:, :width] = np.array(Image.fromarray(rgb).resize((width, 48), Image.BILINEAR))
-        x = np.transpose((canvas.astype(np.float32) / 255.0 - 0.5) / 0.5, (2, 0, 1))[None]
-        logits = self.sess.run(None, {self.name: x})[0][0]
-        text, score, count, prev = [], 0.0, 0, 0
-        for row in logits:
-            best = int(np.argmax(row))
-            if best != 0 and best != prev:
-                text.append(self.dictionary[best] if best < len(self.dictionary) else '')
-                score += float(row[best])
-                count += 1
-            prev = best
-        return ''.join(text), (score / count if count else 0.0)
-
-
-class OwnReader:
-    """Свой ученик: читает строку целиком (boxes/segment/auto внутри движка).
-
-    Строка со страницы мельче, чем глифы листа (на манге высота буквы ~20 px,
-    на листе 30 px), поэтому кроп увеличивается. Один масштаб — лотерея: на ×2
-    «ПОЖАЛУЙСТА» читается «ПОЖАЛУ№П%», на ×3 — «ПОЖАЛУЙСТА». Берём оба и
-    оставляем прочтение с большей уверенностью; если на ×2 ученик уже уверен
-    (≥ 0,8), ×3 не запускаем — страница читается вдвое быстрее.
-    """
-
-    def __init__(self, model_dir: str, scales=(2.0, 3.0), sure: float = 0.8):
-        self.ocr = OwnOCR(model_dir)
-        self.scales, self.sure = tuple(scales), float(sure)
-
-    def read(self, gray: np.ndarray) -> tuple[str, float]:
-        import cv2
-
-        g = np.asarray(gray)
-        if g.ndim == 3:
-            g = cv2.cvtColor(g, cv2.COLOR_RGB2GRAY)
-        best: tuple[str, float] = ('', -1.0)
-        for i, k in enumerate(self.scales):
-            big = cv2.resize(g, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC) if k > 1.01 else g
-            r = self.ocr.read_line(big, lexicon=True)
-            conf = float(r.get('conf', 0.0))
-            if conf > best[1]:
-                best = (r['text'], conf)
-            if i == 0 and conf >= self.sure:
-                break
-        return best
-
-
-def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
-    gray = np.array(Image.fromarray(rgb).convert('L'))
-    H, W = gray.shape
-    t0 = time.time()
-    boxes = det.detect_page(rgb)
-    n_boxes = len(boxes)
-    regions, n_lines = [], 0
-    for box in boxes[:400]:
-        for (x0, y0, x1, y1) in text_lines(rgb, box):
-            n_lines += 1
-            crop = rgb[y0:y1, x0:x1]
-            if crop.size == 0:
-                continue
-            if crop.shape[0] > crop.shape[1] * 1.8:          # вертикальная надпись
-                crop = np.rot90(crop, k=-1)
-            if hasattr(reader, 'ocr'):
-                text, score = reader.read(np.array(Image.fromarray(crop).convert('L')))
-            else:
-                text, score = reader.read(crop)
-            text = text.strip()
-            alnum = sum(c.isalnum() for c in text)
-            if text and score >= minconf and alnum >= 2 and alnum / max(1, len(text)) >= 0.5:
-                regions.append(Region(text, x0 / W, y0 / H, x1 / W, y1 / H, score))
-    lines = [line for panel in split_panels(regions, True) for line in bubbles_of(panel, True)]
-    # Отбраковка «неречи» на уровне собранной реплики, а не отдельных кусков:
-    # если фильтровать куски, мусор с рисунка перестаёт склеивать облачка и одна
-    # реплика рвётся на две. Реплика без единого словарного слова — это подпись
-    # рисунка, водяной знак или штриховка, прочитанная как буквы.
-    kept = [line for line in lines if known_words(line.text) >= 1]
-    return {'replies': kept, 'dropped': len(lines) - len(kept), 'boxes': n_boxes,
-            'lines': n_lines, 'seconds': time.time() - t0}
+from ownocr.pair import (VOCAB, CtcReader, OwnReader, cer, clean,  # noqa: E402
+                         is_harsh_page, known_words, normalize_page, read_page)
 
 
 def draw(page_path: str, out_png: str, boxes, lines):
