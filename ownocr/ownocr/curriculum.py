@@ -121,9 +121,15 @@ class Curriculum:
 
     def _resume(self):
         """Продолжить с прошлой зачётной ступени: ученик помнит, что сдал."""
-        weights = os.path.join(self.out, 'ownocr-latest.npz')
-        meta_path = os.path.join(self.out, 'ownocr-latest.npz.json')
-        dip_path = os.path.join(self.out, 'diploma.json')
+        # модель ищется и рядом с --out, и в рабочей папке курса (out/curriculum):
+        # раньше продолжение не находило модель, если пути были разными.
+        cand = []
+        for d in (self.out, self.workdir):
+            cand += [os.path.join(d, 'ownocr-latest.npz'),
+                     os.path.join(d, 'ownocr.npz')]
+        weights = next((w for w in cand if os.path.exists(w)), cand[0])
+        meta_path = weights + '.json'
+        dip_path = os.path.join(os.path.dirname(weights), 'diploma.json')
         if not (os.path.exists(weights) and os.path.exists(meta_path)):
             self.say('продолжение: прошлой модели нет — ученик новый')
             return
@@ -259,8 +265,8 @@ class Curriculum:
         # повторение пройденного: часть банка — примеры прошлых уровней
         # и настоящие строки манги. Без настоящих строк лестница вымывает
         # почерк: курс учится на синтетике, и чтение страницы ухудшается.
-        if (self.labels_tsv and self._real_bank is None
-                and os.environ.get('OWNOCR_REAL_REH', '0') == '1'):
+        if (self.labels_tsv and self._real_bank is None and self.model is not None
+                and os.environ.get('OWNOCR_REAL_REH', '1') == '1'):
             Xr, Yr = self.real_pairs(self.labels_tsv)
             if Xr is not None and len(Yr):
                 self._real_bank = (Xr, Yr)
@@ -418,14 +424,21 @@ class Curriculum:
                  f'(в резервуаре {total})')
 
     # ── университет: настоящие строки манги ─────────────────────────────────
-    def real_pairs(self, labels_tsv: str, max_rows: int = 400):
-        """Пары «картинка–буква» из настоящих строк (выравнивание как в уроке 7)."""
+    def real_pairs(self, labels_tsv: str, max_rows: int = 400, skip_every: int = 3):
+        """Пары «картинка–буква» из настоящих строк (выравнивание как в уроке 7).
+
+        Строки, отложенные на контроль в уроке 7 (каждая skip_every-я), сюда НЕ
+        попадают: иначе курс учился бы на том же, чем его потом проверяют, и
+        цифры урока 7 были бы завышены.
+        """
         from .engine import binarize, boxes_of, line_band
         from .lesson_real import align, read_rows
         if not labels_tsv or not os.path.exists(labels_tsv):
             return None, None
         base = os.path.dirname(labels_tsv)
         rows = [(os.path.join(base, n), t) for n, t in read_rows(labels_tsv)]
+        if skip_every > 1:
+            rows = [r for i, r in enumerate(rows) if i % skip_every != 0]
         rng = np.random.default_rng(11)
         X, Y = [], []
         used = 0

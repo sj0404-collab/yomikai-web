@@ -244,7 +244,11 @@ def run(sheet_png, manifest, labels_tsv, model_dir, out_dir, test_every=3,
     out_model = os.path.join(out_dir, 'ownocr-real')
     os.makedirs(out_model, exist_ok=True)
     ocr.model.save(os.path.join(out_model, 'ownocr.npz'))
-    meta = json.load(open(os.path.join(model_dir, 'ownocr.npz.json'), encoding='utf-8'))
+    # метаданные берём тем же поиском, что и движок: ownocr-latest → ownocr
+    meta_name = next((f for f in ('ownocr-latest.npz.json', 'ownocr.npz.json')
+                      if os.path.exists(os.path.join(model_dir, f))), None)
+    meta = (json.load(open(os.path.join(model_dir, meta_name), encoding='utf-8'))
+            if meta_name else {})
     json.dump(meta, open(os.path.join(out_model, 'ownocr.npz.json'), 'w'), ensure_ascii=False)
 
     res = {'accepted': bool(accepted), 'before_cer': before_cer, 'before_exact': before_exact, 'n_test': len(test),
