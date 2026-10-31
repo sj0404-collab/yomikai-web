@@ -51,7 +51,8 @@ jobs:
           cd ownocr
           mkdir -p out docs
           python scripts/10_pair_page.py \
-            --page ../data/real/dense.jpg \
+            --page ../data/real/dense-a.jpg \
+            --expected ../data/real/dense-a-expected.json \
             --det ../models/koma_det.onnx \
             --ctc ../models/koma_rec.onnx \
             --dict ../models/koma_dict.txt \
