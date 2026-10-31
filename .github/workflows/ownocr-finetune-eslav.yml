@@ -83,6 +83,9 @@ jobs:
           grep -q 'расхождение' out/export-console.txt
 
       - name: 'замер: кто точнее на настоящих строках'
+        # Сравнение зовёт собственного чтеца (npz), а его может не быть в чекауте
+        # — это не повод считать обучение провалившимся.
+        continue-on-error: true
         run: |
           cd ownocr
           python scripts/18_compare_readers.py --eslav out/eslav-ft.onnx 2>&1 | tee out/compare-console.txt
