@@ -49,6 +49,7 @@ jobs:
       - name: детектор + свой распознаватель на целой странице
         run: |
           cd ownocr
+          mkdir -p out docs
           python scripts/10_pair_page.py \
             --page ../data/real/dense.jpg \
             --det ../models/koma_det.onnx \

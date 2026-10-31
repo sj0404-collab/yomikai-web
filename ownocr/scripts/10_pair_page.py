@@ -120,7 +120,7 @@ class OwnReader:
         return best
 
 
-def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.7):
+def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     gray = np.array(Image.fromarray(rgb).convert('L'))
     H, W = gray.shape
     t0 = time.time()
@@ -180,7 +180,7 @@ def main():
     ap.add_argument('--expected', default='')
     ap.add_argument('--out', default=os.path.join(ROOT, 'out', 'pair-page.png'))
     ap.add_argument('--json', default='')
-    ap.add_argument('--minconf', type=float, default=0.7,
+    ap.add_argument('--minconf', type=float, default=0.8,
                     help='порог уверенности своего ученика (CTC проверяется своим, 0.25)')
     a = ap.parse_args()
 
