@@ -202,20 +202,95 @@ class OwnOCR:
         if method == 'auto':
             a = self._read_by_boxes(gray, bw, lexicon, topk)
             if a is not None and self._sure(a):
+                if lexicon and a.get('text'):
+                    a['text'] = self.repair_marks(a['text'])
                 return a                       # дешёвый путь уверен — не тратим время
             if bw.shape[1] > 900:              # не настоящая строка, а полоса листа
                 return a or {'text': '', 'glyphs': [], 'conf': 0.0}
             b = self._read_by_segmentation(gray, bw, lexicon, topk)
             if a is None:
-                return b or {'text': '', 'glyphs': [], 'conf': 0.0}
-            if b is None:
-                return a
-            return b if self._line_score(b) > self._line_score(a) else a
+                best = b or {'text': '', 'glyphs': [], 'conf': 0.0}
+            elif b is None:
+                best = a
+            else:
+                best = b if self._line_score(b) > self._line_score(a) else a
+            if lexicon and best.get('text'):
+                best['text'] = self.repair_marks(best['text'])
+            return best
         if method == 'segment':
             r = self._read_by_segmentation(gray, bw, lexicon, topk)
             if r is not None:
                 return r
         return self._read_by_boxes(gray, bw, lexicon, topk)
+
+    # ── починка потерянных меток ─────────────────────────────────────────────
+    # Замер по настоящей странице: «Й» читалась как «И» в 42 % случаев, «Ё» как
+    # «Е» — в 100 %. Все случаи — на месте, где краткая и точки меньше пикселя:
+    # буква в манге набрана кеглем ~12 px, метка на ней не рисуется вовсе.
+    # Признаки и адресное дообучение это не лечат (проверено, оба варианта хуже),
+    # а сверка со словарём — лечит: «ПОЖАЛУИСТА» в словаре нет, «ПОЖАЛУЙСТА» есть.
+    MARK_SWAPS = [('И', 'Й'), ('Е', 'Ё'), ('0', 'О'), ('2', 'О'), ('4', 'Ч'),
+                  ('O', 'О'), ('A', 'А'), ('B', 'В'), ('H', 'Н'), ('K', 'К'),
+                  ('M', 'М'), ('T', 'Т'), ('X', 'Х'), ('C', 'С'), ('P', 'Р'),
+                  ('Y', 'У'), ('3', 'З'), ('6', 'Б'), ('8', 'В')]
+
+    REPAIR = os.environ.get('OWNOCR_REPAIR', 'marks')   # marks | general | off
+
+    def _repair_word(self, word: str, max_subs: int = 1) -> str:
+        """Если слово не из словаря — взять ближайшее словарное той же длины.
+
+        Не «подогнать под словарь что угодно», а именно вернуть потерянную
+        метку: правим только слова, которых в словаре нет, и только если
+        найденное слово отличается на 1–2 символа. Из кандидатов берём самое
+        частое (у него меньший номер в частотном списке).
+        """
+        if not self.vocab or len(word) < 3:
+            return word
+        up = word.upper()
+        if up in self.vocab:
+            return word
+        if self.REPAIR == 'marks':
+            # только метки: одна замена из списка похожих пар. Общий поиск
+            # «ближайшего слова» проверялся — он ломает верные слова
+            # («СДЕЛАИ» → «СДЕЛАЛ» вместо «СДЕЛАЙ»), поэтому по умолчанию
+            # работает осторожный вариант.
+            for i, ch in enumerate(up):
+                for src, dst in self.MARK_SWAPS:
+                    if ch == src:
+                        cand = up[:i] + dst + up[i + 1:]
+                        if cand in self.vocab:
+                            return cand
+            return word
+        cands = self.vocab_by_first.get(up[0], [])
+        best = None
+        for w in cands:
+            if len(w) != len(up):
+                continue
+            diff = [i for i, (a, b) in enumerate(zip(up, w)) if a != b]
+            if len(diff) > max_subs:
+                continue
+            # цифра внутри слова — почти всегда потерянная буква, а не цифра
+            digits = any(c.isdigit() for c in up)
+            if len(diff) == 2 and not (digits or len(up) >= 9):
+                continue
+            rank = self.vocab.get(w, 10 ** 6)
+            if best is None or rank < best[0]:
+                best = (rank, w)
+        return best[1] if best else word
+
+    def repair_marks(self, text: str) -> str:
+        """Починить метки во всей строке (слова от трёх букв)."""
+        if not self.vocab or not text or self.REPAIR == 'off':
+            return text
+        out, changed = [], False
+        for word in text.split(' '):
+            core = word.strip('.,!?…—«»"():;%')
+            fixed = self._repair_word(core) if core else core
+            if fixed != core:
+                changed = True
+                word = word.replace(core, fixed)
+            out.append(word)
+        return ' '.join(out) if changed else text
 
     def _sure(self, r) -> bool:
         """Дешёвое чтение можно принять без разреза по узнаванию?"""

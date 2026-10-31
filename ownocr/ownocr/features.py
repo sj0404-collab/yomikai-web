@@ -25,7 +25,21 @@ ORIENT = 8         # направлений штриха
 HOG_CELLS = 3      # 3×3 клетки для направлений
 PROJ = 12          # отсчётов в каждом профиле
 
-DIM = GRID * GRID + HOG_CELLS * HOG_CELLS * ORIENT + 2 * PROJ + 3   # 135
+TOP_BAND = SIDE // 4        # верхняя четверть: точки у «Ё», краткая у «Й»
+MARK_PROJ = 12              # отсчётов в профиле верхней полосы
+N_PARTS = 3                 # сколько отдельных пятен: всего / сверху / снизу
+
+# Замер по странице: Й читалось как И в 42 % случаев, Ё как Е — в 100 %.
+# Причина в этих признаках: глиф вписывается в квадрат вместе с точками и
+# краткой, а сетка плотности 6×6 (клетка 4 px) эти метки размывает в ноль.
+# Отдельные признаки для меток сделаны, но с ними пришлось переучивать ученика
+# с нуля — и он вышел хуже (манга 24,5 % против 19,1 %). Поэтому по умолчанию
+# их нет, включаются флагом OWNOCR_MARKS=1 для будущих опытов.
+import os
+USE_MARKS = os.environ.get('OWNOCR_MARKS', '0') == '1'
+
+DIM = (GRID * GRID + HOG_CELLS * HOG_CELLS * ORIENT + 2 * PROJ + 3
+       + (MARK_PROJ + N_PARTS if USE_MARKS else 0))                  # 135 / 150
 
 
 def _normalize(gray: np.ndarray) -> np.ndarray | None:
@@ -91,7 +105,25 @@ def features(gray: np.ndarray) -> np.ndarray | None:
     holes = cv2.connectedComponents((canvas > 128).astype(np.uint8), 4)[0] - 1
     holes = min(3, max(0, holes)) / 3.0
 
-    return np.concatenate([density, hog, prof, np.array([aspect, fill, holes], np.float32)]).astype(np.float32)
+    # 5) метки над и под буквой: точки «Ё/Й», хвост «Щ/Ц», подчёркивание
+    #    Профиль верхней полосы берётся СВОИМ разрешением 12 отсчётов — на нём
+    #    видно, что метка одна (краткая) или две (точки) и где они стоят.
+    top = ink[:TOP_BAND]
+    band_cols = cv2.resize(top.sum(axis=0)[None, :], (MARK_PROJ, 1),
+                           interpolation=cv2.INTER_AREA).ravel()
+    band_cols /= (band_cols.max() + 1e-6)
+    # сколько отдельных пятен: у «Й» краткая не касается тела, у «И» — одно пятно
+    body = (ink > 0.35).astype(np.uint8)
+    n_all = cv2.connectedComponents(body, 8)[0] - 1
+    n_top = cv2.connectedComponents(body[:TOP_BAND], 8)[0] - 1
+    n_bot = cv2.connectedComponents(body[SIDE - TOP_BAND:], 8)[0] - 1
+    parts = np.array([min(4, n_all), min(4, n_top), min(4, n_bot)], np.float32) / 4.0
+
+    base = np.concatenate([density, hog, prof,
+                           np.array([aspect, fill, holes], np.float32)])
+    if not USE_MARKS:
+        return base.astype(np.float32)
+    return np.concatenate([base, band_cols, parts]).astype(np.float32)
 
 
 def describe(gray: np.ndarray) -> str:
@@ -101,7 +133,8 @@ def describe(gray: np.ndarray) -> str:
         return 'пусто'
     dens = f[:36].reshape(6, 6)
     hog = f[36:36 + 72].reshape(3, 3, 8)
-    asp, fill, holes = f[-3:]
+    asp, fill, holes = (f[-3 - MARK_PROJ - N_PARTS:-MARK_PROJ - N_PARTS] if USE_MARKS
+                        else f[-3:])
     return (f'плотность {dens.mean():.2f}±{dens.std():.2f} · '
             f'штрих по X {hog[..., 0].sum():.2f} по Y {hog[..., 2].sum():.2f} · '
             f'пропорция {asp * 2:.2f} · заливка {fill:.2f} · дырок {int(round(holes * 3))}')
