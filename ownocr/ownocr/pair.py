@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .crew import Foreman, Proposal, WEIGHTS
 from .engine import OwnOCR
 from .page_det import PageDetector, Region, bubbles_of, split_panels, text_lines
 
@@ -63,6 +64,18 @@ def cer(ref: str, hyp: str) -> float:
 
 
 VOWELS = set('АЕЁИОУЫЭЮЯ')
+
+
+def is_junk_word(word: str) -> bool:
+    """Контролёр: «слово» из обрывка штриховки, которого в русском быть не может."""
+    core = word.strip('.,!?…—«»"():;%').upper()
+    if not core or any(ch.isdigit() for ch in core):
+        return False
+    if core in VOCAB:
+        return False
+    doubled = any(core[i] == core[i + 1] and core[i] in 'ЁЪЬЙ' for i in range(len(core) - 1))
+    no_vowel = not (set(core) & VOWELS)
+    return doubled or (no_vowel and len(core) >= 2)
 
 
 def junk_words(text: str) -> str:
@@ -194,6 +207,8 @@ def _vote_words(seen: list[tuple[str, float]]) -> tuple[str, float]:
 
 
 TIDY = os.environ.get('OWNOCR_TIDY', '1') == '1'
+CREW = os.environ.get('OWNOCR_CREW', '1') == '1'
+RESCUE = os.environ.get('OWNOCR_RESCUE', '1') == '1'
 OTSU = os.environ.get('OWNOCR_OTSU', '0') == '1'
 DARK_FRAC = float(os.environ.get('OWNOCR_DARK', '0.55'))   # доля тёмного, при которой пробуем перевернуть
 JUNK_IN_WORD = '»«"“”„%№$|\\/~^`*+=<>[]{}'
@@ -241,6 +256,8 @@ class OwnReader:
                  pad: float = 0.0, vote: bool = True):
         self.ocr = OwnOCR(model_dir)
         self.scales, self.sure = tuple(scales), float(sure)
+        self.scales_rescue = tuple(float(x) for x in
+                                   os.environ.get('OWNOCR_RESCUE_SCALES', '4,5').split(','))
         env_harsh = os.environ.get('OWNOCR_HARSH')
         if env_harsh:
             scales_harsh = tuple(float(x) for x in env_harsh.split(','))
@@ -258,6 +275,14 @@ class OwnReader:
         # читаем все масштабы и по каждому слову берём то, за которое
         # проголосовало большинство масштабов, при равенстве — словарное.
         self.vote = bool(vote)
+        # Бригада: у каждого работника своя зона ответственности, бригадир
+        # сводит голоса пословно (см. ownocr/crew.py). Редактор и контролёр —
+        # те же функции, что уже отлажены в движке.
+        self.foreman = Foreman(
+            getattr(self.ocr, 'vocab', set()),
+            fix=lambda w: self.ocr._fix_word(w) if hasattr(self.ocr, '_fix_word') else w,
+            is_junk=lambda w: is_junk_word(w))
+
 
     def read(self, gray: np.ndarray, harsh: bool = False) -> tuple[str, float]:
         import cv2
@@ -284,6 +309,23 @@ class OwnReader:
         # на dense-b тёмный рисунок дал лишнюю «реплику» и CER 102 %. Поэтому
         # читаем оба варианта и берём тот, где больше словарных слов.
         best = self._read_scales(g, harsh)
+        # Мастер-наставник: если ни один работник не дал ни одного словарного
+        # слова, зовём его — он читает тот же кроп на нестандартных увеличениях
+        # (×4, ×5) и с выровненным контрастом. Это не «ещё один масштаб всем»:
+        # он включается только там, где бригада провалилась, и потому не
+        # замедляет обычные строки.
+        # На чёрно-белой странице крупные увеличения врут (бинаризация убивает
+        # края), проверено: 21,6 → 23,7 %. Поэтому наставник туда не идёт.
+        rescue = known_words(best[0]) == 0 and RESCUE and not harsh
+        if rescue:
+            R = self._read_rescue(g, harsh)
+            # Наставник засчитывается только если его прочтение ЧИТАЕМО: доля
+            # словарных слов не меньше половины. Иначе он вытаскивал служебную
+            # надпись приложения («ОШИБКА OCR САППО1…») и выдавал её за реплику.
+            words = [w for w in R[0].split() if w.strip(EDGE_PUNCT)]
+            share = sum(1 for w in words if _word_ok(w)) / len(words) if words else 0.0
+            if known_words(R[0]) > known_words(best[0]) and share >= 0.5:
+                best = R
         # Перевёрнутый вариант пробуем только когда обычное чтение не дало ни
         # одного словарного слова: так плашка с белым текстом спасается, а
         # тёмный рисунок не порождает лишнюю «реплику» (на dense-b это давало
@@ -303,12 +345,33 @@ class OwnReader:
         # поэтому подстраховка убрана — она только тратит время.
         return best
 
+    def _read_rescue(self, g, harsh):
+        """Мастер-наставник: нестандартные увеличения и выровненный контраст."""
+        import cv2
+
+        forms = [g]
+        lo, hi = float(np.percentile(g, 5)), float(np.percentile(g, 95))
+        if hi - lo >= 20:
+            flat = np.clip((g.astype(np.float32) - lo) * 255.0 / (hi - lo), 0, 255)
+            forms.append(flat.astype(np.uint8))
+        props: list[Proposal] = []
+        for fi, form in enumerate(forms):
+            for k in self.scales_rescue:
+                big = cv2.resize(form, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC)
+                r = self.ocr.read_line(big, lexicon=True)
+                props.append(Proposal('contrast' if fi else f'x{k:g}',
+                                      WEIGHTS.get(f'x{k:g}', 0.8), r['text'],
+                                      float(r.get('conf', 0.0))))
+        text, conf = self.foreman.decide(props)
+        return (text or '', conf)
+
     def _read_scales(self, g, harsh):
         import cv2
 
         best: tuple[str, float] = ('', -1.0)
         scales = self.scales_harsh if harsh else self.scales
         seen: list[tuple[str, float]] = []
+        self._last_workers = []
         for i, k in enumerate(scales):
             big = cv2.resize(g, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC) if k > 1.01 else g
             if harsh and self.blur_harsh:
@@ -320,9 +383,11 @@ class OwnReader:
                 # голосование словом вытягивает верный вариант.
                 forms.append(cv2.threshold(big, 0, 255,
                                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
-            for form in forms:
+            for fi, form in enumerate(forms):
                 r = self.ocr.read_line(form, lexicon=True)
                 conf = float(r.get('conf', 0.0))
+                name = f'x{k:g}' if fi == 0 else ('otsu' if fi == 1 else 'contrast')
+                self._last_workers.append(name)
                 seen.append((r['text'], conf))
                 if conf > best[1]:
                     best = (r['text'], conf)
@@ -332,7 +397,13 @@ class OwnReader:
             # дали одно и то же слово в слово, следующий ничего не изменит.
             if self.vote and len(seen) >= 2 and len({t for t, _ in seen}) == 1:
                 break
-        if self.vote and len(seen) > 1:
+        if CREW and seen and not harsh:
+            props = [Proposal(worker, WEIGHTS.get(worker, 0.9), text, conf)
+                     for worker, (text, conf) in zip(self._last_workers, seen)]
+            text, conf = self.foreman.decide(props)
+            if text:
+                best = (text, max(conf, best[1]))
+        elif self.vote and len(seen) > 1:
             if PICK == 'score':
                 text, conf = _score_pick(seen)
             else:
@@ -396,7 +467,29 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     # если фильтровать куски, мусор с рисунка перестаёт склеивать облачка и одна
     # реплика рвётся на две. Реплика без единого словарного слова — это подпись
     # рисунка, водяной знак или штриховка, прочитанная как буквы.
-    kept = [line for line in lines if known_words(line.text) >= 1]
+    # Реплика проходит, если в ней есть словарное слово И их доля не меньше
+    # 40 %. Второе условие отсекает служебные надписи приложения и подписи
+    # картинок: «ОШИБКА ОСР САППО1 СОЕГСЕ УАТ ЧЕ ТО» — одно словарное слово из
+    # семи, это не реплика.
+    def _readable(text: str) -> bool:
+        # Считаем только слова от трёх букв: «ЧЕ» и «ТО» — словарные, но их
+        # наличие не делает репликой служебную надпись «ОШИБКА ОСР САППО1…».
+        words = [w.strip('.,!?…—«»"():;%') for w in text.split()]
+        # «ЧТО-НИБУДЬ» — это два слова: без разбивки по дефису настоящая реплика
+        # «ПЫТАЮТСЯ МНЕ ЧТО-ТО СКАЗАТЬ» недосчитывалась словарных слов и
+        # выбрасывалась целиком.
+        words = [part for w in words for part in w.split('-')]
+        words = [w for w in words if len(w) >= 3]
+        if not words:
+            return bool(text.strip())
+        known = sum(1 for w in words if _word_ok(w))
+        share = known / len(words)
+        # Либо два словарных слова (шумная, но настоящая реплика), либо одно и
+        # оно покрывает половину строки («ЧТО?»). Служебная надпись приложения
+        # даёт одно слово из пяти — отсекается.
+        return known >= 2 or share >= 0.5
+
+    kept = [line for line in lines if _readable(line.text)]
     # Правки на уровне готовой реплики: слова склеиваются из переносов
     # («РАССЧИ-» + «ТЬВАЮ»), и каждая половина по отдельности ни в какие
     # правила не попадает — только целое слово. Заодно убираем мусорные
@@ -405,6 +498,11 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
         text = junk_words(line.text)
         if hasattr(reader, 'ocr'):
             text = reader.ocr._fix_common(text)
+        # Редактор и склейка работают и на готовой реплике: слова, разорванные
+        # переносом, лежат в РАЗНЫХ кропах («РАССЧ№» и «ТЬВАЮ»), и внутри кропа
+        # их не соединить — только здесь, когда реплика собрана.
+        if CREW and not harsh and getattr(reader, 'foreman', None) is not None:
+            text = reader.foreman._polish(text)
         line.text = text
     return {'replies': kept, 'dropped': len(lines) - len(kept), 'boxes': n_boxes,
             'lines': n_lines, 'harsh': harsh, 'seconds': time.time() - t0}
