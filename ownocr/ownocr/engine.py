@@ -240,7 +240,7 @@ class OwnOCR:
                   ('M', 'М'), ('T', 'Т'), ('X', 'Х'), ('C', 'С'), ('P', 'Р'),
                   ('Y', 'У'), ('3', 'З'), ('6', 'Б'), ('8', 'В')]
 
-    REPAIR = os.environ.get('OWNOCR_REPAIR', 'marks')   # marks | general | off
+    REPAIR = os.environ.get('OWNOCR_REPAIR', 'marksdigits')   # marksdigits | marks | general | off
 
     LEXWORD = os.environ.get('OWNOCR_LEXWORD', '0') == '1'   # замер: с ним хуже (18,1 % против 16,3 %)
 
@@ -298,6 +298,13 @@ class OwnOCR:
 
     VOCAB_BONUS = 2.0
 
+    # Пары, которые ученик действительно путает на странице (из разбора выше):
+    # П↔Л, В↔З, Т↔Г, И↔Л, И↔Н, Ш↔Щ, Ч↔П, Ь↔И.
+    CONFUSABLE = [('П', 'Л'), ('Л', 'П'), ('В', 'З'), ('З', 'В'), ('Т', 'Г'), ('Г', 'Т'),
+                  ('И', 'Л'), ('Л', 'И'), ('И', 'Н'), ('Н', 'И'), ('Ш', 'Щ'), ('Щ', 'Ш'),
+                  ('Ч', 'П'), ('П', 'Ч'), ('Ь', 'И'), ('И', 'Ь'), ('Д', 'И'), ('И', 'Д'),
+                  ('С', 'О'), ('О', 'С'), ('Н', 'Б'), ('Б', 'Н'), ('Ж', 'Х'), ('Х', 'Ж')]
+
     def _repair_word(self, word: str, max_subs: int = 1) -> str:
         """Если слово не из словаря — взять ближайшее словарное той же длины.
 
@@ -311,7 +318,8 @@ class OwnOCR:
         up = word.upper()
         if up in self.vocab:
             return word
-        if self.REPAIR == 'marks':
+        if self.REPAIR in ('marks', 'marksdigits') and not any(c.isdigit() for c in up):
+            # только метки: одна замена из списка похожих пар.
             # только метки: одна замена из списка похожих пар. Общий поиск
             # «ближайшего слова» проверялся — он ломает верные слова
             # («СДЕЛАИ» → «СДЕЛАЛ» вместо «СДЕЛАЙ»), поэтому по умолчанию
@@ -323,6 +331,29 @@ class OwnOCR:
                         if cand in self.vocab:
                             return cand
             return word
+        if self.REPAIR == 'marksdigits' and any(c.isdigit() for c in up):
+            # Цифра внутри слова — почти всегда потерянная буква («УТОДН2» →
+            # «УГОДНО», «Р5ИОМ» → «РЯДОМ»). Здесь словарь разрешаю шире, чем для
+            # обычных слов: правил меток не хватает, нужно две замены. Но ищу
+            # только среди слов, где на месте цифры стоит буква, — иначе
+            # словарь начнёт переписывать верные слова.
+            digits = [i for i, c in enumerate(up) if c.isdigit()]
+            best = None
+            for w in self.vocab_by_first.get(up[0], []):
+                if len(w) != len(up) or any(w[i].isdigit() for i in digits):
+                    continue
+                diff = [i for i, (a, b) in enumerate(zip(up, w)) if a != b]
+                if len(diff) > 2 or not set(diff) - set(digits) == set(diff) - set(digits):
+                    continue
+                # буквенные замены разрешаем только в знакомых парах
+                letters_ok = all(any((up[i] == a and w[i] == b) for a, b in self.CONFUSABLE)
+                                 for i in diff if i not in digits)
+                if not letters_ok:
+                    continue
+                rank = self.vocab.get(w, 10 ** 6)
+                if best is None or rank < best[0]:
+                    best = (rank, w)
+            return best[1] if best else word
         cands = self.vocab_by_first.get(up[0], [])
         best = None
         for w in cands:

@@ -100,6 +100,87 @@ class CtcReader:
         return ''.join(text), (score / count if count else 0.0)
 
 
+PICK = os.environ.get('OWNOCR_PICK', 'score')     # score | vote
+
+
+def _word_ok(word: str) -> bool:
+    core = word.strip(EDGE_PUNCT).upper()
+    return bool(VOCAB) and core in VOCAB
+
+
+def _score_pick(seen: list[tuple[str, float]]) -> tuple[str, float]:
+    """Выбрать целое прочтение по оценке: словарные слова, мусор, уверенность."""
+    best, best_s = '', -1e9
+    for text, conf in seen:
+        if not any(ch.isalnum() for ch in text):
+            continue                      # одни кавычки и проценты — не прочтение
+        words = [w for w in text.split() if w.strip(EDGE_PUNCT)]
+        if not words:
+            continue
+        known = sum(1 for w in words if _word_ok(w)) / len(words)
+        junk = sum(1 for ch in text if ch in JUNK_IN_WORD) / max(1, len(text))
+        s = 1.0 * known + 0.3 * conf - 2.0 * junk
+        if s > best_s:
+            best, best_s = text, s
+    return best, max((c for t, c in seen if t == best), default=0.0)
+
+
+def _vote_words(seen: list[tuple[str, float]]) -> tuple[str, float]:
+    """Собрать строку по голосам масштабов, слово за словом.
+
+    Если масштабы дали разное число слов, голосовать не по чему — отдаём
+    лучшее по уверенности целое прочтение (вызывающий это переживёт).
+    """
+    parts = [t.split() for t, _ in seen]
+    if len({len(p) for p in parts}) != 1:
+        return '', -1.0
+    out = []
+    for pos in range(len(parts[0])):
+        cands = [p[pos] for p in parts]
+        counts: dict[str, int] = {}
+        for c in cands:
+            counts[c] = counts.get(c, 0) + 1
+        top = max(counts.values())
+        finalists = [c for c, n in counts.items() if n == top]
+        if len(finalists) == 1:
+            out.append(finalists[0])
+            continue
+        in_vocab = [c for c in finalists
+                    if VOCAB and c.strip('.,!?…—«»"():;%').upper() in VOCAB]
+        pool = in_vocab or finalists
+        # при равенстве — слово из прочтения с большей уверенностью
+        order = [t for t, _ in sorted(seen, key=lambda x: -x[1])]
+        out.append(next(c for t in order for c in pool if c in t.split()[pos:pos + 1]))
+    return ' '.join(out), seen[0][1]
+
+
+TIDY = os.environ.get('OWNOCR_TIDY', '1') == '1'
+JUNK_IN_WORD = '»«"“”„%№$|\\/~^`*+=<>[]{}'
+
+
+EDGE_PUNCT = '.,!?…—'
+
+
+def tidy(text: str) -> str:
+    """Убрать знаки, которых в реплике быть не может: «П»АЛИЙЯА» → «ПАЛИЙЯА».
+
+    Кавычки и проценты попадают внутрь слова и на его край, когда ученик
+    принимает обрывок штриха за букву. Настоящей пунктуацией считаем только
+    «.,!?…—»; их по краям оставляем, а кавычки, проценты и скобки убираем.
+    Внутри слова остаются буквы, цифры и дефис («ЧТО-НИБУДЬ»).
+    """
+    out = []
+    for word in text.split():
+        lead = word[:len(word) - len(word.lstrip(EDGE_PUNCT))]
+        rest = word[len(lead):].strip(JUNK_IN_WORD + '()[]{}')
+        body = rest.rstrip(EDGE_PUNCT)
+        trail = rest[len(body):]
+        if len(body) >= 3:
+            body = ''.join(c for c in body if c not in JUNK_IN_WORD)
+        out.append((lead + body + trail) if body else lead)
+    return ' '.join(out)
+
+
 class OwnReader:
     """Свой ученик: читает строку целиком (boxes/segment/auto внутри движка).
 
@@ -114,9 +195,9 @@ class OwnReader:
     # (без сглаженных краёв у букв) нужен более крупный масштаб и лёгкое
     # размытие уже после увеличения — так буквы снова получают градиент, на
     # котором учился ученик.
-    def __init__(self, model_dir: str, scales=(2.0, 3.0), sure: float = 0.8,
+    def __init__(self, model_dir: str, scales=(2.0, 2.5, 3.0, 3.5), sure: float = 0.8,
                  scales_harsh=(3.0, 4.0, 5.0), blur_harsh: bool = False,
-                 pad: float = 0.0):
+                 pad: float = 0.0, vote: bool = True):
         self.ocr = OwnOCR(model_dir)
         self.scales, self.sure = tuple(scales), float(sure)
         self.scales_harsh = tuple(scales_harsh)
@@ -127,6 +208,12 @@ class OwnReader:
         # срезал его повторной обрезкой по чернилам. По умолчанию отступа нет,
         # параметр оставлен для будущих опытов.
         self.pad = float(pad)
+        # Голосование по масштабам на уровне слова. Раньше: первый масштаб с
+        # уверенностью ≥ sure и всё, остальные не считались. Ошибки на «×2» и
+        # «×3» разные (на ×2 «ПОЖАЛУЙСТА» → «ПОЖАЛУ№П%», на ×3 верно), поэтому
+        # читаем все масштабы и по каждому слову берём то, за которое
+        # проголосовало большинство масштабов, при равенстве — словарное.
+        self.vote = bool(vote)
 
     def read(self, gray: np.ndarray, harsh: bool = False) -> tuple[str, float]:
         import cv2
@@ -148,16 +235,29 @@ class OwnReader:
             g = cv2.copyMakeBorder(g, py, py, px, px, cv2.BORDER_CONSTANT, value=255)
         best: tuple[str, float] = ('', -1.0)
         scales = self.scales_harsh if harsh else self.scales
+        seen: list[tuple[str, float]] = []
         for i, k in enumerate(scales):
             big = cv2.resize(g, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC) if k > 1.01 else g
             if harsh and self.blur_harsh:
                 big = cv2.GaussianBlur(big, (3, 3), 0)
             r = self.ocr.read_line(big, lexicon=True)
             conf = float(r.get('conf', 0.0))
+            seen.append((r['text'], conf))
             if conf > best[1]:
                 best = (r['text'], conf)
-            if i == 0 and conf >= self.sure:
+            if not self.vote and i == 0 and conf >= self.sure:
                 break
+            # С голосованием читаем дальше, но не зря: если все масштабы уже
+            # дали одно и то же слово в слово, следующий ничего не изменит.
+            if self.vote and len(seen) >= 2 and len({t for t, _ in seen}) == 1:
+                break
+        if self.vote and len(seen) > 1:
+            if PICK == 'score':
+                text, conf = _score_pick(seen)
+            else:
+                text, conf = _vote_words(seen)
+            if text:
+                best = (text, max(conf, best[1]))
         return best
 
 
@@ -183,6 +283,8 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
             else:
                 text, score = reader.read(crop)
             text = text.strip()
+            if TIDY:
+                text = tidy(text)
             alnum = sum(c.isalnum() for c in text)
             if text and score >= minconf and alnum >= 2 and alnum / max(1, len(text)) >= 0.5:
                 regions.append(Region(text, x0 / W, y0 / H, x1 / W, y1 / H, score))
