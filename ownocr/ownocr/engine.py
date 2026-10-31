@@ -178,9 +178,15 @@ class OwnOCR:
         if not weights:
             raise FileNotFoundError(f'в {model_dir} нет ни ownocr-latest.npz, ни ownocr.npz')
         self.model.load(os.path.join(model_dir, weights[0]))
+        # дополнительные пары-путаницы для опытов: OWNOCR_PAIRS="В:Р,Ю:О"
+        extra = os.environ.get('OWNOCR_PAIRS', '')
+        if extra:
+            self.CONFUSABLE = list(self.CONFUSABLE) + [
+                tuple(x.split(':')) for x in extra.split(',') if ':' in x]
         self.vocab = {}
         self.vocab_by_first = {}
         self.vocab_by_len: dict[int, list[str]] = {}
+        self.by_prefix: dict[tuple[int, str], list[str]] = {}
         self.letter_of: dict[int, str] = {}
         if vocab_path and os.path.exists(vocab_path):
             with open(vocab_path, encoding='utf-8') as f:
@@ -193,6 +199,8 @@ class OwnOCR:
                         break
         for w in self.vocab:
             self.vocab_by_len.setdefault(len(w), []).append(w)
+            for k in (2, 3, 4):
+                self.by_prefix.setdefault((k, w[:k]), []).append(w)
         self.letter_of = {i: c for i, c in enumerate(self.classes)}
         self.cls_index = {c: i for i, c in enumerate(self.classes)}
 
@@ -209,7 +217,7 @@ class OwnOCR:
             a = self._read_by_boxes(gray, bw, lexicon, topk)
             if a is not None and self._sure(a):
                 if lexicon and a.get('text'):
-                    a['text'] = self.repair_marks(a['text'])
+                    a['text'] = self._fix_common(self.repair_marks(a['text']))
                 return a                       # дешёвый путь уверен — не тратим время
             if bw.shape[1] > 900:              # не настоящая строка, а полоса листа
                 return a or {'text': '', 'glyphs': [], 'conf': 0.0}
@@ -221,7 +229,7 @@ class OwnOCR:
             else:
                 best = b if self._line_score(b) > self._line_score(a) else a
             if lexicon and best.get('text'):
-                best['text'] = self.repair_marks(best['text'])
+                best['text'] = self._fix_common(self.repair_marks(best['text']))
             return best
         if method == 'segment':
             r = self._read_by_segmentation(gray, bw, lexicon, topk)
@@ -243,6 +251,159 @@ class OwnOCR:
     REPAIR = os.environ.get('OWNOCR_REPAIR', 'marksdigits')   # marksdigits | marks | general | off
 
     LEXWORD = os.environ.get('OWNOCR_LEXWORD', '0') == '1'   # замер: с ним хуже (18,1 % против 16,3 %)
+
+    def _cand_word(self, probs, idxs, text: str, max_subs: int = 2) -> str:
+        """Выбрать словарное слово по вероятностям ВСЕХ букв, а не по частоте.
+
+        Отличие от «ближайшего слова по словарю» (он портил текст): кандидаты
+        ограничены парами, которые ученик реально путает (Т↔П, Л↔И, З↔Э, Ь↔И,
+        С↔О …), и сравниваются не «похожесть», а сумма логарифмов вероятностей
+        букв из самой модели плюс премия за частотное слово. Если кандидат не
+        выигрывает с запасом — слово не трогаем.
+
+        Это чинит «СТВАШЮЙ» → «СТРАШНОЙ», «ПРОКЛЯПЕ» → «ПРОКЛЯТИЕ»,
+        «РАССЧИТЬВАЮ» → «РАССЧИТЫВАЮ».
+        """
+        up = text.upper()
+        n = len(up)
+        logP = np.log(np.clip(np.array([probs[i] for i in idxs], np.float64), 1e-6, 1.0))
+        m = min(n, logP.shape[0])
+        if m != n:
+            return text
+
+        def score_of(w):
+            # при вставке/удалении буквы сравниваем по совпадающей части
+            m = min(len(w), n)
+            cols = np.array([[self.cls_index.get(c, 0) for c in w[:m]]])
+            sc = float(logP[np.arange(m)[None, :], cols].sum())
+            if len(w) != n:
+                sc -= 1.2
+            if w in self.vocab:
+                sc += self.VOCAB_BONUS + 0.6 * math.log(1 + 40000.0 / (1 + self.vocab[w]))
+            else:
+                sc -= 0.5
+            return sc
+
+        base = score_of(up)
+        best, best_s = None, base
+        pairs = self.CONFUSABLE + self.MARK_SWAPS
+
+        def same_len_ok(w):
+            diff = [i for i, (a, b) in enumerate(zip(up, w)) if a != b]
+            if not 1 <= len(diff) <= max_subs:
+                return False
+            return all(any((up[i] == a and w[i] == b) or (up[i] == b and w[i] == a)
+                           for a, b in pairs) for i in diff)
+
+        def insert_ok(w):
+            """Слово на одну букву длиннее: «ОТЦЕПИАСЬ» → «ОТЦЕПИЛАСЬ».
+
+            Лишняя/потерянная буква внутри слова — частая ошибка, а заменами
+            она не лечится. Разрешаем ровно одну вставку и не больше двух
+            замен, причём замены только в знакомых парах.
+            """
+            if len(w) != n + 1:
+                return False
+            for pos in range(len(w)):
+                rest = w[:pos] + w[pos + 1:]
+                diff = [i for i, (a, b) in enumerate(zip(up, rest)) if a != b]
+                if len(diff) <= max_subs and all(
+                        any((up[i] == a and rest[i] == b) or (up[i] == b and rest[i] == a)
+                            for a, b in pairs) for i in diff):
+                    return True
+            return False
+
+        checkers = [(n, same_len_ok)] + ([(n + 1, insert_ok)] if self.INS else [])
+        for length, checker in checkers:
+            for w in self.vocab_by_len.get(length, ()):
+                if w == up or not checker(w):
+                    continue
+                sc = score_of(w)
+                if sc > best_s + 0.15:
+                    best, best_s = w, sc
+        return best or text
+
+    SPELL = os.environ.get('OWNOCR_SPELL', '0') == '1'
+    GAP = -2.5
+    MARGIN = float(os.environ.get('OWNOCR_MARGIN', '1.0'))
+    MAXED = int(os.environ.get('OWNOCR_MAXED', '2'))
+
+    def _align_score(self, word: str, logP) -> float:
+        """Оценка «насколько это слово похоже на то, что видно», с выравниванием.
+
+        Считаем по матрице: буква слова либо совпала с позицией картинки
+        (плюс логарифм вероятности этой буквы), либо в слове есть лишняя буква,
+        которой на картинке нет (штраф), либо на картинке лишний глиф.
+        Так слова разной длины сравнимы между собой — без этого «ПРОКЛЯПЕ»
+        (8 букв) никогда не проигрывало «ПРОКЛЯТИЕ» (9 букв).
+        """
+        m, n = len(word), logP.shape[0]
+        prev = [j * self.GAP for j in range(n + 1)]
+        for i in range(1, m + 1):
+            cur = [i * self.GAP] + [0.0] * n
+            col = self.cls_index.get(word[i - 1], 0)
+            for j in range(1, n + 1):
+                cur[j] = max(prev[j - 1] + logP[j - 1, col], prev[j] + self.GAP,
+                             cur[j - 1] + self.GAP)
+            prev = cur
+        return prev[n]
+
+    def _spell_word(self, probs, idxs, text: str) -> str:
+        """Словарная правка слова: до двух замен, вставки или удаления буквы.
+
+        Кандидаты ищутся по началу слова (индекс по 2–4 первым буквам), замены
+        разрешены только в парах, которые ученик реально путает, а выбор — по
+        выравниванию с вероятностями модели плюс частота слова. Если лучший
+        кандидат не выигрывает с запасом, слово не трогаем.
+        """
+        up = text.upper()
+        n = len(up)
+        if not 4 <= n <= 18 or not self.vocab:
+            return text
+        logP = np.log(np.clip(np.array([probs[i] for i in idxs], np.float64), 1e-6, 1.0))
+        if logP.shape[0] != n:
+            return text
+
+        def edits_ok(w):
+            """Расстояние правки ≤ 2 и только по знакомым парам букв."""
+            a, b = up, w
+            if abs(len(a) - len(b)) > 1:
+                return False
+            prev = list(range(len(b) + 1))
+            for i, ca in enumerate(a, 1):
+                cur = [i]
+                for j, cb in enumerate(b, 1):
+                    sub = prev[j - 1] + (0 if ca == cb else
+                                         (1 if any((ca == x and cb == y) or (ca == y and cb == x)
+                                                   for x, y in pairs) else 99))
+                    cur.append(min(prev[j] + 1, cur[j - 1] + 1, sub))
+                prev = cur
+            return prev[-1] <= self.MAXED
+
+        pairs = self.CONFUSABLE + self.MARK_SWAPS
+        cands = set()
+        for k in (4, 3, 2):
+            if n >= k:
+                cands.update(self.by_prefix.get((k, up[:k]), ()))
+                break
+
+        def score_of(w):
+            sc = self._align_score(w, logP)
+            if w in self.vocab:
+                sc += self.VOCAB_BONUS + 0.6 * math.log(1 + 40000.0 / (1 + self.vocab[w]))
+            return sc
+
+        base = score_of(up) if up in self.vocab else self._align_score(up, logP) - 0.5
+        best, best_s = None, base
+        for w in cands:
+            if w == up or not 1 <= abs(len(w) - len(up)) <= 1 and len(w) != len(up):
+                continue
+            if not edits_ok(w):
+                continue
+            sc = score_of(w)
+            if sc > best_s + self.MARGIN:
+                best, best_s = w, sc
+        return best or text
 
     def _lexicon_word(self, probs, idxs, extra_cost: float = 2.0):
         """Перечитать слово целиком по словарю: какое слово вероятнее всего.
@@ -297,13 +458,19 @@ class OwnOCR:
         return (best, best_score) if best else None
 
     VOCAB_BONUS = 2.0
+    CAND = os.environ.get('OWNOCR_CAND', '1') == '1'
+    INS = os.environ.get('OWNOCR_INS', '0') == '1'
+    BEAM = int(os.environ.get('OWNOCR_BEAM', '16'))
+    TOPK = int(os.environ.get('OWNOCR_TOPK', '5'))
 
     # Пары, которые ученик действительно путает на странице (из разбора выше):
     # П↔Л, В↔З, Т↔Г, И↔Л, И↔Н, Ш↔Щ, Ч↔П, Ь↔И.
     CONFUSABLE = [('П', 'Л'), ('Л', 'П'), ('В', 'З'), ('З', 'В'), ('Т', 'Г'), ('Г', 'Т'),
                   ('И', 'Л'), ('Л', 'И'), ('И', 'Н'), ('Н', 'И'), ('Ш', 'Щ'), ('Щ', 'Ш'),
                   ('Ч', 'П'), ('П', 'Ч'), ('Ь', 'И'), ('И', 'Ь'), ('Д', 'И'), ('И', 'Д'),
-                  ('С', 'О'), ('О', 'С'), ('Н', 'Б'), ('Б', 'Н'), ('Ж', 'Х'), ('Х', 'Ж')]
+                  ('С', 'О'), ('О', 'С'), ('Н', 'Б'), ('Б', 'Н'), ('Ж', 'Х'), ('Х', 'Ж'),
+                  ('Ь', 'Ы'), ('Ы', 'Ь'), ('В', 'Р'), ('Р', 'В'), ('Ю', 'О'), ('О', 'Ю'),
+                  ('В', 'Е'), ('Е', 'В'), ('П', 'Т'), ('Т', 'П'), ('Е', 'И'), ('И', 'Е')]
 
     def _repair_word(self, word: str, max_subs: int = 1) -> str:
         """Если слово не из словаря — взять ближайшее словарное той же длины.
@@ -387,6 +554,57 @@ class OwnOCR:
             if best is None or rank < best[0]:
                 best = (rank, w)
         return best[1] if best else word
+
+    # ── правки, которые не требуют вероятностей модели ───────────────────────
+    # Все они устроены одинаково: если написание НЕ словарное, а его исправление
+    # словарное — меняем. Если оба варианта словарные («ВСЕ» и «ВСЁ», «ЭЛИ» и
+    # «ЭТО»), не трогаем: без контекста это угадывание.
+    PUNCT_ALL = '.,!?…—«»"():;%'
+
+    def _fix_common(self, text: str) -> str:
+        out = []
+        for word in text.split(' '):
+            core = word.strip(self.PUNCT_ALL)
+            lead = word[:len(word) - len(word.lstrip(self.PUNCT_ALL))]
+            tail = word[len(lead) + len(core):]
+            out.append(lead + self._fix_word(core) + tail)
+        # пары слов: «ВСЕ ЕЩЕ» → «ВСЁ ЕЩЁ» (ЕЩЕ — не слово, только ЕЩЁ)
+        for i, w in enumerate(out):
+            c = w.strip(self.PUNCT_ALL).upper()
+            if c in ('ЕЩЕ', 'ЕЩЁ') and i and out[i - 1].strip(self.PUNCT_ALL).upper() == 'ВСЕ':
+                out[i - 1] = out[i - 1].replace('ВСЕ', 'ВСЁ')
+        return ' '.join(out)
+
+    def _fix_word(self, word: str) -> str:
+        if not word or len(word) < 3 or not self.vocab:
+            return word
+        up = word.upper()
+        if up in self.vocab:
+            # настоящее слово не трогаем, кроме ЕЩЕ: «ЕЩЕ» без ё не пишется
+            return word.replace('ЕЩЕ', 'ЕЩЁ') if up == 'ЕЩЕ' else word
+        # 1) потерянная/лишняя ё
+        for a, b in (('Е', 'Ё'), ('Ё', 'Е')):
+            for i, ch in enumerate(up):
+                if ch == a:
+                    cand = up[:i] + b + up[i + 1:]
+                    if cand in self.vocab:
+                        return cand
+        # 2) Ь вместо Ы и наоборот («РАССЧИТЬВАЮ» → «РАССЧИТЫВАЮ»)
+        for i, ch in enumerate(up):
+            if ch in 'ЬЫ':
+                cand = up[:i] + ('Ы' if ch == 'Ь' else 'Ь') + up[i + 1:]
+                if cand in self.vocab:
+                    return cand
+        # 3) окончание -ОИ: в русском слов на -ОИ почти нет (ТВОИ, МОИ, СВОИ —
+        # словарные), а имя «ХАНОЙ» читается «ХАНОИ» — краткая потеряна.
+        if up.endswith('ОИ') and up[:-1] + 'Й' not in self.vocab:
+            return up[:-1] + 'Й'
+        # 4) мусорный хвост от обрывка штриха: «ГОТОВОХ» → «ГОТОВО».
+        # Только Х и Ъ и только когда остаток — слово от 4 букв: широкое
+        # правило резало настоящие формы («ХАНЫ» → «ХАН», «ВКУСНОЙ» → «ВКУСНО»).
+        if up[-1] in 'ХЪ' and len(up) >= 5 and up[:-1] in self.vocab:
+            return up[:-1]
+        return word
 
     def repair_marks(self, text: str) -> str:
         """Починить метки во всей строке (слова от трёх букв)."""
@@ -620,6 +838,10 @@ class OwnOCR:
             if score > best_score:
                 best_score, best = score, (text, score, detail)
         text, _, detail = best
+        if self.CAND and self.vocab and 4 <= len(text) <= 18:
+            text = self._cand_word(probs, idxs, text)
+        if self.SPELL and self.vocab and text.upper() not in self.vocab:
+            text = self._spell_word(probs, idxs, text)
         if self.LEXWORD and self.vocab and 3 <= len(text) <= 20:
             # Сравниваем две гипотезы ОДНОЙ формулой: сумма логарифмов
             # вероятностей букв + премия за частотное слово. Раньше сравнивались

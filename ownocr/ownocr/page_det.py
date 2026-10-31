@@ -262,7 +262,22 @@ def bubbles_of(group, rtl: bool) -> list[Line]:
 
     lines: list[Line] = []
     for block in blocks:
-        ordered = sorted(block, key=lambda r: -r.left if rtl else r.left)
+        # Порядок внутри облачка: сначала ряды сверху вниз, и только внутри
+        # ряда — справа налево. Раньше весь блок сортировался по правому краю,
+        # и в пузыре с центрированными строками («ДА, / ПОЧЕМУ / БЫ И / НЕТ?»)
+        # нижняя строка уезжала вперёд верхней: «ДА, ПОЧЕМУ НЕТ? БЫ И».
+        rows: list[list] = []
+        for r in sorted(block, key=lambda x: x.top):
+            lh = max(r.bottom - r.top, 0.01)
+            for row in rows:
+                head = row[0]
+                if min(head.bottom, r.bottom) - max(head.top, r.top) > lh * 0.5:
+                    row.append(r)
+                    break
+            else:
+                rows.append([r])
+        ordered = [r for row in rows for r in
+                   sorted(row, key=lambda x: -x.left if rtl else x.left)]
         text = ''
         for i, part in enumerate(ordered):
             if i:

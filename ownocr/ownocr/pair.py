@@ -62,10 +62,49 @@ def cer(ref: str, hyp: str) -> float:
     return prev[-1] / len(ref)
 
 
+VOWELS = set('АЕЁИОУЫЭЮЯ')
+
+
+def junk_words(text: str) -> str:
+    """Выбросить «ЮЁЁЩ»: буквы есть, слова нет.
+
+    Признаки мусора: не словарное, короткое, и либо внутри двойная одна и та же
+    буква («ЁЁ»), либо нет гласных вовсе, либо букв меньше трёх. Настоящие
+    имена собственные (ХАНОЙ, ХАНЫ) так не отсекаются: в них есть гласные.
+    """
+    out = []
+    for word in text.split():
+        core = word.strip('.,!?…—«»"():;%').upper()
+        if not core:
+            continue
+        if any(ch.isdigit() for ch in core):
+            out.append(word)          # цифры не мусор: «5 ЙЕН ПОДОЙДЕТ…»
+            continue
+        doubled = any(core[i] == core[i + 1] and core[i] in 'ЁЪЬЙ' for i in range(len(core) - 1))
+        no_vowel = not (set(core) & VOWELS)
+        # одна буква — ещё не мусор: «Я», «В», «К», «С» настоящие слова
+        if core not in VOCAB and (doubled or (no_vowel and len(core) >= 2)):
+            continue
+        out.append(word)
+    return ' '.join(out)
+
+
 def known_words(text: str) -> int:
     """Сколько слов реплики есть в словаре (25 000 частых русских слов)."""
     words = [w.strip('.,!?…—«»"():;%') for w in text.upper().replace('-', ' ').split()]
     return sum(1 for w in words if len(w) >= 3 and w in VOCAB)
+
+
+def levenshtein(a: str, b: str) -> int:
+    """Расстояние правки: сколько букв испорчено в строке."""
+    a, b = clean(a), clean(b)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
 
 
 def clean(text: str) -> str:
@@ -155,6 +194,7 @@ def _vote_words(seen: list[tuple[str, float]]) -> tuple[str, float]:
 
 
 TIDY = os.environ.get('OWNOCR_TIDY', '1') == '1'
+OTSU = os.environ.get('OWNOCR_OTSU', '0') == '1'
 DARK_FRAC = float(os.environ.get('OWNOCR_DARK', '0.55'))   # доля тёмного, при которой пробуем перевернуть
 JUNK_IN_WORD = '»«"“”„%№$|\\/~^`*+=<>[]{}'
 
@@ -201,8 +241,11 @@ class OwnReader:
                  pad: float = 0.0, vote: bool = True):
         self.ocr = OwnOCR(model_dir)
         self.scales, self.sure = tuple(scales), float(sure)
+        env_harsh = os.environ.get('OWNOCR_HARSH')
+        if env_harsh:
+            scales_harsh = tuple(float(x) for x in env_harsh.split(','))
         self.scales_harsh = tuple(scales_harsh)
-        self.blur_harsh = blur_harsh
+        self.blur_harsh = (os.environ.get('OWNOCR_HARSH_BLUR', '0') == '1') or blur_harsh
         # Отступ вокруг буквы. Проверялся (0,12 / 0,15 / 0,18 / 0,20): на деле
         # он ВРЕДИТ — CER на dense-a 13,4 → 20,6 %. Первый перебор показывал
         # выигрыш потому, что тестовый класс добавлял отступ, а затем сам же
@@ -270,11 +313,19 @@ class OwnReader:
             big = cv2.resize(g, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC) if k > 1.01 else g
             if harsh and self.blur_harsh:
                 big = cv2.GaussianBlur(big, (3, 3), 0)
-            r = self.ocr.read_line(big, lexicon=True)
-            conf = float(r.get('conf', 0.0))
-            seen.append((r['text'], conf))
-            if conf > best[1]:
-                best = (r['text'], conf)
+            forms = [big]
+            if OTSU and i == 0:
+                # второй вид того же кропа: жёсткое ч/б по Отсу. На рукописных
+                # буквах со смазанным краем даёт другую сеть ошибок, и
+                # голосование словом вытягивает верный вариант.
+                forms.append(cv2.threshold(big, 0, 255,
+                                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1])
+            for form in forms:
+                r = self.ocr.read_line(form, lexicon=True)
+                conf = float(r.get('conf', 0.0))
+                seen.append((r['text'], conf))
+                if conf > best[1]:
+                    best = (r['text'], conf)
             if not self.vote and i == 0 and conf >= self.sure:
                 break
             # С голосованием читаем дальше, но не зря: если все масштабы уже
@@ -309,9 +360,13 @@ def colour_page(rgb: np.ndarray) -> bool:
 
 def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     harsh = is_harsh_page(rgb)
-    if hasattr(reader, 'ocr'):
-        reader.ocr.REPAIR = 'marksmall' if colour_page(rgb) else 'marksdigits'
     rgb = normalize_page(rgb)
+    if hasattr(reader, 'ocr'):
+        # Цвет определяем ПОСЛЕ приведения полярности: у перевёрнутой страницы
+        # насыщенность считается от инвертированных пикселей и выходит завышенной
+        # (на dense-a инверсия получала «рукописный» режим и теряла починку цифр:
+        # Р5ИОМ, УТОДН2). После нормализации цвет и инверсия дают одно и то же.
+        reader.ocr.REPAIR = 'marksmall' if colour_page(rgb) else 'marksdigits'
     gray = np.array(Image.fromarray(rgb).convert('L'))
     H, W = gray.shape
     t0 = time.time()
@@ -342,6 +397,15 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     # реплика рвётся на две. Реплика без единого словарного слова — это подпись
     # рисунка, водяной знак или штриховка, прочитанная как буквы.
     kept = [line for line in lines if known_words(line.text) >= 1]
+    # Правки на уровне готовой реплики: слова склеиваются из переносов
+    # («РАССЧИ-» + «ТЬВАЮ»), и каждая половина по отдельности ни в какие
+    # правила не попадает — только целое слово. Заодно убираем мусорные
+    # «слова» из обрывков штриховки («ЮЁЁЩ»), которых в русском быть не может.
+    for line in kept:
+        text = junk_words(line.text)
+        if hasattr(reader, 'ocr'):
+            text = reader.ocr._fix_common(text)
+        line.text = text
     return {'replies': kept, 'dropped': len(lines) - len(kept), 'boxes': n_boxes,
             'lines': n_lines, 'harsh': harsh, 'seconds': time.time() - t0}
 
