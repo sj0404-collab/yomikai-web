@@ -180,6 +180,8 @@ class OwnOCR:
         self.model.load(os.path.join(model_dir, weights[0]))
         self.vocab = {}
         self.vocab_by_first = {}
+        self.vocab_by_len: dict[int, list[str]] = {}
+        self.letter_of: dict[int, str] = {}
         if vocab_path and os.path.exists(vocab_path):
             with open(vocab_path, encoding='utf-8') as f:
                 for rank, line in enumerate(f):
@@ -189,6 +191,10 @@ class OwnOCR:
                         self.vocab_by_first.setdefault(w[0], []).append(w)
                     if len(self.vocab) >= vocab_size:
                         break
+        for w in self.vocab:
+            self.vocab_by_len.setdefault(len(w), []).append(w)
+        self.letter_of = {i: c for i, c in enumerate(self.classes)}
+        self.cls_index = {c: i for i, c in enumerate(self.classes)}
 
     # ── чтение одной строки ──────────────────────────────────────────────────
     def read_line(self, gray: np.ndarray, lexicon: bool = True, topk: int = 5,
@@ -235,6 +241,62 @@ class OwnOCR:
                   ('Y', 'У'), ('3', 'З'), ('6', 'Б'), ('8', 'В')]
 
     REPAIR = os.environ.get('OWNOCR_REPAIR', 'marks')   # marks | general | off
+
+    LEXWORD = os.environ.get('OWNOCR_LEXWORD', '0') == '1'   # замер: с ним хуже (18,1 % против 16,3 %)
+
+    def _lexicon_word(self, probs, idxs, extra_cost: float = 2.0):
+        """Перечитать слово целиком по словарю: какое слово вероятнее всего.
+
+        Не «замена одной буквы» (она ломала верные слова: «СДЕЛАИ» → «СДЕЛАЛ»),
+        а выбор слова по сумме логарифмов вероятностей всех его букв плюс
+        частота слова. Кандидаты — все слова словаря нужной длины (±1, с
+        штрафом за лишнюю/недостающую букву).
+
+        Зачем: на настоящем почерке ученик путает П↔И, В↔З, Т↔Л. Правильного
+        ответа часто нет в топ-5 букв, но вероятность у него не нулевая — и
+        словарь вытягивает «ПОВВОИЬ» → «ПОЗВОЛЬ», «ШЕЛЧЕТ» → «ШЕПЧЕТ».
+        """
+        if not self.vocab:
+            return None
+        n = len(idxs)
+        if n < 3 or n > 20:
+            return None
+        # вероятности букв по позициям: (n, classes)
+        P = np.asarray([probs[i] for i in idxs], np.float64)
+        cls = np.array([int(k) for k in idxs], np.int32)
+        logP = np.log(np.clip(P, 1e-6, 1.0))
+        best, best_score = None, -1e9
+        for L, cost in ((n, 0.0), (n + 1, extra_cost), (n - 1, extra_cost)):
+            words = self.vocab_by_len.get(L, ())
+            if not words:
+                continue
+            idx_map = np.array([[self.cls_index.get(c, -1) for c in w] for w in words],
+                               np.int32)
+            ok = (idx_map >= 0).all(axis=1)
+            if not ok.any():
+                continue
+            words_ok = [w for w, k in zip(words, ok) if k]
+            M = idx_map[ok]
+            rows_idx = np.arange(n)[None, :]
+            if L == n:
+                sc = logP[rows_idx, M].sum(axis=1)
+            else:
+                # грубое выравнивание при сдвиге длины: берём лучшее по позициям
+                sc = np.array([-cost - 0.7 * abs(L - n)
+                               * np.log(10) for _ in range(len(words_ok))])
+                for j, w in enumerate(words_ok):
+                    m = min(L, n)
+                    cols = np.array([[self.cls_index[c] for c in w[:m]]])
+                    sc[j] += logP[np.arange(m)[None, :], cols].sum()
+            freq = np.array([0.6 * math.log(1 + 40000.0 / (1 + self.vocab[w]))
+                             + self.VOCAB_BONUS for w in words_ok])
+            total = sc + freq
+            k = int(np.argmax(total))
+            if total[k] > best_score:
+                best_score, best = float(total[k]), words_ok[k]
+        return (best, best_score) if best else None
+
+    VOCAB_BONUS = 2.0
 
     def _repair_word(self, word: str, max_subs: int = 1) -> str:
         """Если слово не из словаря — взять ближайшее словарное той же длины.
@@ -329,6 +391,29 @@ class OwnOCR:
         probs = self.model.predict_proba(np.stack(feats))
         order = np.argsort(-probs, axis=1)[:, :topk]
 
+        # Обрывки от рамки облачка и штриховки: очень узкие или очень широкие
+        # пятна — это не буквы. Без этого в реплику попадают «П»АЛИЙЯА», «ЭП%»,
+        # «Р5ИОМ»: обрывок рамки читается как буква и приклеивается к слову.
+        if os.environ.get('OWNOCR_SLIVER', '1') == '1' and len(keep) >= 5:
+            heights = np.array([b[3] - b[1] for b in keep], np.float32)
+            med_h = float(np.median(heights)) or 1.0
+            words_w = np.array(widths, np.float32) if (widths := [b[2] - b[0] for b in keep]) else None
+            med_w0 = float(np.median(words_w)) or 1.0
+            ok = []
+            for i, b in enumerate(keep):
+                h = max(1, b[3] - b[1])
+                w = max(1, b[2] - b[0])
+                if h < 0.45 * med_h and w < 0.6 * med_w0:
+                    continue                     # мелкая точка-шум
+                if w > 2.6 * med_w0 or h > 3.0 * med_h:
+                    continue                     # полоса рамки
+                ok.append(i)
+            if len(ok) >= max(2, int(0.5 * len(keep))):
+                keep = [keep[i] for i in ok]
+                feats = [feats[i] for i in ok]
+                probs = probs[ok]
+                order = order[ok]
+
         # разбиваем на слова по промежуткам между рамками
         widths = [b[2] - b[0] for b in keep]
         med_w = float(np.median(widths)) if widths else 1.0
@@ -402,6 +487,15 @@ class OwnOCR:
             return None
         if not pieces:
             return None
+        # Обрывки: очень узкий кусок (полоска рамки, штрих) или очень широкий —
+        # это не буква. Из-за них в репликах появляется «П»АЛИЙЯА», «ЭП%».
+        if os.environ.get('OWNOCR_SLIVER', '1') == '1' and len(pieces) >= 6:
+            ws = np.array([pc[1] - pc[0] for pc in pieces], np.float32)
+            med = float(np.median(ws)) or 1.0
+            kept = [pc for pc in pieces
+                    if 0.34 * med <= (pc[1] - pc[0]) <= 2.5 * med]
+            if len(kept) >= max(3, int(0.6 * len(pieces))):
+                pieces = kept
         # куски отдают только топ-k, поэтому собираем полную матрицу классов
         # (57 столбцов): иначе декодер принимает номер в топе за номер класса
         probs = np.zeros((len(pieces), len(self.classes)), np.float32)
@@ -478,6 +572,29 @@ class OwnOCR:
             if score > best_score:
                 best_score, best = score, (text, score, detail)
         text, _, detail = best
+        if self.LEXWORD and self.vocab and 3 <= len(text) <= 20:
+            # Сравниваем две гипотезы ОДНОЙ формулой: сумма логарифмов
+            # вероятностей букв + премия за частотное слово. Раньше сравнивались
+            # несравнимые числа (beam уже содержал премию), и словарь не влиял.
+            logP = np.log(np.clip(np.array([probs[i] for i in idxs], np.float64), 1e-6, 1.0))
+            def score_of(w):
+                m = min(len(w), logP.shape[0])
+                cols = np.array([[self.cls_index.get(c, 0) for c in w[:m]]])
+                sc = float(logP[np.arange(m)[None, :], cols].sum())
+                if len(w) != logP.shape[0]:
+                    sc -= 2.0
+                if w in self.vocab:
+                    sc += self.VOCAB_BONUS + 0.6 * math.log(1 + 40000.0 / (1 + self.vocab[w]))
+                else:
+                    sc -= 0.5
+                return sc
+            cand = self._lexicon_word(probs, idxs)
+            if cand:
+                word, _ = cand
+                if score_of(word) > score_of(text) + 0.05:
+                    text = word
+                    detail = [{'char': c, 'prob': 0.9} for c in word]
+                    best_score = score_of(word)
         return text, [{'char': d['char'], 'prob': d['prob']} for d in detail]
 
     # ── чтение страницы ──────────────────────────────────────────────────────

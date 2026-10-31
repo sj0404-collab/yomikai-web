@@ -115,11 +115,18 @@ class OwnReader:
     # размытие уже после увеличения — так буквы снова получают градиент, на
     # котором учился ученик.
     def __init__(self, model_dir: str, scales=(2.0, 3.0), sure: float = 0.8,
-                 scales_harsh=(3.0, 4.0, 5.0), blur_harsh: bool = False):
+                 scales_harsh=(3.0, 4.0, 5.0), blur_harsh: bool = False,
+                 pad: float = 0.0):
         self.ocr = OwnOCR(model_dir)
         self.scales, self.sure = tuple(scales), float(sure)
         self.scales_harsh = tuple(scales_harsh)
         self.blur_harsh = blur_harsh
+        # Отступ вокруг буквы. Проверялся (0,12 / 0,15 / 0,18 / 0,20): на деле
+        # он ВРЕДИТ — CER на dense-a 13,4 → 20,6 %. Первый перебор показывал
+        # выигрыш потому, что тестовый класс добавлял отступ, а затем сам же
+        # срезал его повторной обрезкой по чернилам. По умолчанию отступа нет,
+        # параметр оставлен для будущих опытов.
+        self.pad = float(pad)
 
     def read(self, gray: np.ndarray, harsh: bool = False) -> tuple[str, float]:
         import cv2
@@ -135,6 +142,10 @@ class OwnReader:
             x0, x1 = max(0, xs.min() - 2), min(g.shape[1], xs.max() + 3)
             if y1 - y0 >= 6 and x1 - x0 >= 6:
                 g = g[y0:y1, x0:x1]
+        if self.pad > 0:
+            h, w = g.shape[:2]
+            py, px = max(1, int(round(h * self.pad))), max(1, int(round(w * self.pad)))
+            g = cv2.copyMakeBorder(g, py, py, px, px, cv2.BORDER_CONSTANT, value=255)
         best: tuple[str, float] = ('', -1.0)
         scales = self.scales_harsh if harsh else self.scales
         for i, k in enumerate(scales):

@@ -86,9 +86,14 @@ def main():
     ap.add_argument('--page', default=os.path.join(ROOT, '..', 'koma-lab', 'dense-a.jpg'))
     ap.add_argument('--det', default='/home/user/koma_models/koma_det.onnx')
     ap.add_argument('--model', default=os.path.join(ROOT, 'model'))
-    ap.add_argument('--expected', default='')
+    ap.add_argument('--expected',
+                    default=os.path.join(ROOT, '..', 'koma-lab', 'dense-expected.json'))
     ap.add_argument('--out', default=os.path.join(ROOT, '..', 'свой-OCR-три-варианта.png'))
     ap.add_argument('--json', default=os.path.join(ROOT, 'out', 'three-variants.json'))
+    ap.add_argument('--layout', choices=['wide', 'phone'], default='wide',
+                    help='wide — картинка и текст рядом; phone — скрин сверху, '
+                         'текст под ним (для телефона: ничего не уезжает за край)')
+    ap.add_argument('--prefix', default=os.path.join(ROOT, '..', 'свой-OCR-телефон'))
     a = ap.parse_args()
 
     rgb = np.array(Image.open(a.page).convert('RGB'))
@@ -111,6 +116,64 @@ def main():
 
     same = results[0]['texts'] == results[2]['texts']
     print(f'инверсия читается как цвет: {"да, слово в слово" if same else "нет"}')
+
+
+    # ── раскладка под телефон: вертикально, ничего не уезжает за край ────────
+    if a.layout == 'phone':
+        W = 800                     # уже любого телефона: масштабируется по ширине
+        pad = 26
+        f_hdr, f_num, f_body = font(26, True), font(22, True), font(21)
+        step = 27
+        made = []
+        for k, r in enumerate(results, 1):
+            page_w = W - pad * 2
+            page_h = int(rgb.shape[0] * page_w / rgb.shape[1])
+            page_img = draw_overlay(r['image'], r['boxes'], r['lines']).resize(
+                (page_w, page_h), Image.LANCZOS)
+            probe2 = ImageDraw.Draw(Image.new('RGB', (8, 8)))
+            body_h = 0
+            wrapped = []
+            for text in r['texts']:
+                pieces = wrap(probe2, text, f_body, W - pad * 2 - 46)
+                wrapped.append(pieces)
+                body_h += step * len(pieces) + 8
+            H = pad + 96 + page_h + 40 + body_h + pad + 40
+            sheet_i = Image.new('RGB', (W, H), BG)
+            di = ImageDraw.Draw(sheet_i)
+            di.text((pad, pad), f'{r["title"]}', font=f_hdr, fill=ACC)
+            info = f'реплик {len(r["texts"])}'
+            if r['cer'] is not None:
+                info += f' · CER {100 * r["cer"]:.1f} %'
+            di.text((pad, pad + 34), info + f' · {r["seconds"]:.1f} с',
+                    font=font(21, True),
+                    fill=OK if (r['cer'] is not None and r['cer'] < 0.20) else WARN)
+            di.text((pad, pad + 62), 'сверху — скрин с разметкой, ниже — текст ученика '
+                                     'в том же порядке', font=font(17), fill=DIM)
+            y = pad + 96
+            sheet_i.paste(page_img, (pad, y))
+            di.rectangle([pad - 3, y - 3, pad + page_w + 2, y + page_h + 2],
+                         outline=(54, 60, 76), width=1)
+            y += page_h + 34
+            di.text((pad, y), 'текст ученика, в том же порядке', font=font(19, True), fill=DIM)
+            y += 30
+            for i, pieces in enumerate(wrapped, 1):
+                di.text((pad, y + 1), f'{i}.', font=f_num, fill=ACC)
+                for j, piece in enumerate(pieces):
+                    di.text((pad + 40, y + j * step), piece, font=f_body, fill=FG)
+                y += step * len(pieces) + 8
+            di.text((pad, y + 12), 'серые рамки — детектор · зелёные с номером — реплики',
+                    font=font(16), fill=DIM)
+            name = f'{a.prefix}-{k}.jpg'
+            sheet_i.save(name, quality=88, optimize=True)
+            made.append((name, sheet_i.size))
+            print(f'  {name}  {sheet_i.size[0]}×{sheet_i.size[1]}')
+        print('лист для телефона: ' + ', '.join(n for n, _ in made))
+        json.dump({'page': os.path.basename(a.page), 'layout': 'phone',
+                   'variants': {r['title']: {'texts': r['texts'], 'cer': r['cer'],
+                                             'seconds': round(r['seconds'], 2)}
+                                for r in results}},
+                  open(a.json, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+        return
 
     # ── сборка листа ────────────────────────────────────────────────────────
     scale = 0.74
