@@ -1,0 +1,361 @@
+{
+ "accepted": true,
+ "before_cer": 0.1661005661005661,
+ "before_exact": 8,
+ "n_test": 14,
+ "after_cer": 0.15181485181485183,
+ "after_exact": 8,
+ "n_pairs": 80,
+ "alignment": [
+  {
+   "file": "01.png",
+   "ref": "ПОДОЙДЕТ",
+   "aligned": "ПТ",
+   "boxes": 5,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 0.0
+  },
+  {
+   "file": "03.png",
+   "ref": "ДЛЯ ПОД",
+   "aligned": "ДД",
+   "boxes": 3,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 0.1
+  },
+  {
+   "file": "05.png",
+   "ref": "ДА,",
+   "aligned": "Д",
+   "boxes": 2,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.07
+  },
+  {
+   "file": "06.png",
+   "ref": "ПОЧЕМУ",
+   "aligned": "",
+   "boxes": 3,
+   "pairs": 0,
+   "trusted": false,
+   "nll": 99.0
+  },
+  {
+   "file": "09.png",
+   "ref": "НЕТ?",
+   "aligned": "Т",
+   "boxes": 4,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.0
+  },
+  {
+   "file": "10.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ЛУТ",
+   "boxes": 6,
+   "pairs": 3,
+   "trusted": false,
+   "nll": 2.5
+  },
+  {
+   "file": "12.png",
+   "ref": "С ЭТОЙ СТРАШНОЙ",
+   "aligned": "ОА",
+   "boxes": 7,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 3.77
+  },
+  {
+   "file": "13.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ОЖА",
+   "boxes": 5,
+   "pairs": 3,
+   "trusted": false,
+   "nll": 1.8
+  },
+  {
+   "file": "15.png",
+   "ref": "ПОЗВОЛЬ МНЕ",
+   "aligned": "ПОЗВОЛЬМНЕ",
+   "boxes": 10,
+   "pairs": 10,
+   "trusted": true,
+   "nll": 0.02
+  },
+  {
+   "file": "16.png",
+   "ref": "ДО ОТВАЛА",
+   "aligned": "ДООТВАЛА",
+   "boxes": 8,
+   "pairs": 8,
+   "trusted": true,
+   "nll": 0.02
+  },
+  {
+   "file": "18.png",
+   "ref": "С ХАНОЙ.",
+   "aligned": "СХАНЙ",
+   "boxes": 6,
+   "pairs": 5,
+   "trusted": true,
+   "nll": 0.95
+  },
+  {
+   "file": "19.png",
+   "ref": "ПОЕСТЬ",
+   "aligned": "Е",
+   "boxes": 3,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.29
+  },
+  {
+   "file": "21.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ПЖА",
+   "boxes": 6,
+   "pairs": 3,
+   "trusted": false,
+   "nll": 2.72
+  },
+  {
+   "file": "22.png",
+   "ref": "Я СДЕЛАЮ ЧТО",
+   "aligned": "ЯСДЕЛАЮЧТО",
+   "boxes": 10,
+   "pairs": 10,
+   "trusted": true,
+   "nll": 0.02
+  },
+  {
+   "file": "24.png",
+   "ref": "ЭТА ШТУКА",
+   "aligned": "ЭТАШТУКА",
+   "boxes": 8,
+   "pairs": 8,
+   "trusted": true,
+   "nll": 0.02
+  },
+  {
+   "file": "25.png",
+   "ref": "ОТЦЕПИЛАСЬ",
+   "aligned": "ОТЦЕПИАСЬ",
+   "boxes": 9,
+   "pairs": 9,
+   "trusted": true,
+   "nll": 0.41
+  },
+  {
+   "file": "28.png",
+   "ref": "ПОЖАЛУЙСТА,",
+   "aligned": "ОУ",
+   "boxes": 5,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 2.13
+  },
+  {
+   "file": "29.png",
+   "ref": "СНИМИ С ХАНЫ",
+   "aligned": "А",
+   "boxes": 7,
+   "pairs": 1,
+   "trusted": false,
+   "nll": 0.51
+  },
+  {
+   "file": "31.png",
+   "ref": "И ПОМОГИ МНЕ.",
+   "aligned": "ИПОМОГИМНЕ",
+   "boxes": 10,
+   "pairs": 10,
+   "trusted": true,
+   "nll": 0.06
+  },
+  {
+   "file": "32.png",
+   "ref": "ГОТОВО...",
+   "aligned": "ГОТОВО",
+   "boxes": 7,
+   "pairs": 6,
+   "trusted": true,
+   "nll": 0.03
+  },
+  {
+   "file": "34.png",
+   "ref": "ОНА",
+   "aligned": "",
+   "boxes": 2,
+   "pairs": 0,
+   "trusted": false,
+   "nll": 99.0
+  },
+  {
+   "file": "35.png",
+   "ref": "Я РАССЧИ-",
+   "aligned": "ЯИ",
+   "boxes": 3,
+   "pairs": 2,
+   "trusted": false,
+   "nll": 0.43
+  },
+  {
+   "file": "37.png",
+   "ref": "ВСЁ ЕЩЁ",
+   "aligned": "ВЁЁ",
+   "boxes": 4,
+   "pairs": 3,
+   "trusted": false,
+   "nll": 0.95
+  },
+  {
+   "file": "38.png",
+   "ref": "ТЫВАЮ",
+   "aligned": "ТВАЮ",
+   "boxes": 5,
+   "pairs": 4,
+   "trusted": true,
+   "nll": 0.07
+  },
+  {
+   "file": "41.png",
+   "ref": "НА ВАС,",
+   "aligned": "",
+   "boxes": 3,
+   "pairs": 0,
+   "trusted": false,
+   "nll": 99.0
+  },
+  {
+   "file": "42.png",
+   "ref": "ШЕПЧЕТ",
+   "aligned": "ШЕПЧЕТ",
+   "boxes": 6,
+   "pairs": 6,
+   "trusted": true,
+   "nll": 0.02
+  },
+  {
+   "file": "44.png",
+   "ref": "ДУХИ.",
+   "aligned": "ДУХИ",
+   "boxes": 4,
+   "pairs": 4,
+   "trusted": true,
+   "nll": 0.01
+  }
+ ],
+ "detail": [
+  {
+   "file": "00.png",
+   "ref": "5 ЙЕН",
+   "hyp": "ДЖ-",
+   "cer": 1.0
+  },
+  {
+   "file": "04.png",
+   "ref": "НОШЕНИЯ?",
+   "hyp": "НОШЕНИЯ?",
+   "cer": 0.0
+  },
+  {
+   "file": "08.png",
+   "ref": "БЫ И",
+   "hyp": "БЫ И",
+   "cer": 0.0
+  },
+  {
+   "file": "11.png",
+   "ref": "СДЕЛАЙ ЧТО-НИБУДЬ",
+   "hyp": "СДЕЛАЙ Ч7О-НИБУДЬ",
+   "cer": 0.06666666666666667
+  },
+  {
+   "file": "14.png",
+   "ref": "ШТУКОЙ, КОТОРАЯ",
+   "hyp": "ШТУКОИ, КОТОРАЯ",
+   "cer": 0.07692307692307693
+  },
+  {
+   "file": "17.png",
+   "ref": "СТОИТ РЯДОМ",
+   "hyp": "СТОИТ РЯДОМ",
+   "cer": 0.0
+  },
+  {
+   "file": "20.png",
+   "ref": "ВКУСНОЙ ЕДЫ",
+   "hyp": "ВКУОНОЙ Е№Ё",
+   "cer": 0.3
+  },
+  {
+   "file": "23.png",
+   "ref": "УГОДНО, ЧТОБЫ",
+   "hyp": "УТОДН2 ЧТОБЫ",
+   "cer": 0.18181818181818182
+  },
+  {
+   "file": "27.png",
+   "ref": "ОТ ХАНЫ.",
+   "hyp": "ОТ ХАНЫ",
+   "cer": 0.0
+  },
+  {
+   "file": "30.png",
+   "ref": "ЭТО ПРОКЛЯТИЕ",
+   "hyp": "ЭТО ПРОКЛЯТИЕ",
+   "cer": 0.0
+  },
+  {
+   "file": "33.png",
+   "ref": "НЕ ЗНАЮ,",
+   "hyp": "НЕ ЭИЮ.",
+   "cer": 0.5
+  },
+  {
+   "file": "36.png",
+   "ref": "ПОМОЖЕТ",
+   "hyp": "ПОМОЖЕТ",
+   "cer": 0.0
+  },
+  {
+   "file": "39.png",
+   "ref": "ЛИ ЭТО,",
+   "hyp": "ЛИ ЭТО,",
+   "cer": 0.0
+  },
+  {
+   "file": "43.png",
+   "ref": "НО...",
+   "hyp": "НО..",
+   "cer": 0.0
+  }
+ ],
+ "history": [
+  0.24416593307008347,
+  0.2329332179700335,
+  0.22620710377778971,
+  0.22193792459526748,
+  0.21426830841510586,
+  0.21318358106707985,
+  0.2095672885294665,
+  0.2056319611429265,
+  0.20255341829562729,
+  0.20072873693072435,
+  0.19716300360971328,
+  0.19603336608093797,
+  0.19322842019468997,
+  0.19201949859658876,
+  0.18999171999254913,
+  0.18722121637653222,
+  0.185904584260601,
+  0.18509907111751311
+ ],
+ "model": "/home/runner/work/yomikai-web/yomikai-web/ownocr/out/ownocr-real"
+}
