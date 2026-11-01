@@ -55,7 +55,10 @@ def all_real():
 
 
 def ctc_target(text: str):
-    ids = [E.CHAR_TO_IDX[c] for c in text.upper() if c in E.CHAR_TO_IDX]
+    # ВАЖНО: классы 0-based (LETTERS.index), а не CHAR_TO_IDX — там +1 для
+    # собственного кодировщика. С +1 модель разваливалась в первый же шаг:
+    # CTC получал метки, сдвинутые на единицу, и CER уезжал в 100 %.
+    ids = [E.LETTERS.index(c) for c in text.upper() if c in E.CHAR_TO_IDX]
     return torch.tensor(ids, dtype=torch.long)
 
 
