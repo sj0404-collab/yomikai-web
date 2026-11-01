@@ -483,6 +483,54 @@
   }
 
   /**
+   * Чужой чтец PP-OCR (PaddleOCR, кириллица): вход 3×48×W, каналы BGR,
+   * нормировка /255−0,5, CTC с «пусто» = класс 0, словарь с 1-го класса.
+   * Другой производитель и другое обучение — значит и ошибки другие.
+   */
+  async function readPP(rec, chars, rgb, w, box, opts) {
+    const [x0, y0, x1, y1] = box;
+    const cw = x1 - x0, ch = y1 - y0;
+    if (cw < 4 || ch < 7) return { text: '', conf: 0 };
+    const crop = new Uint8Array(cw * ch * 3);
+    for (let y = 0; y < ch; y++) {
+      let p = ((y0 + y) * w + x0) * 3, o = y * cw * 3;
+      for (let x = 0; x < cw; x++, p += 3, o += 3) {
+        crop[o] = rgb[p]; crop[o + 1] = rgb[p + 1]; crop[o + 2] = rgb[p + 2];
+      }
+    }
+    const tw = clamp(Math.round(48 * cw / ch), 8, 3200);
+    const resized = resizeRGB(crop, cw, ch, tw, 48);
+    const plane = 48 * tw;
+    const x = new Float32Array(3 * plane);
+    for (let yy = 0; yy < 48; yy++) {
+      for (let xx = 0; xx < tw; xx++) {
+        const s = (yy * tw + xx) * 3, d = yy * tw + xx;
+        x[d] = (resized[s + 2] / 255 - 0.5) / 0.5;
+        x[plane + d] = (resized[s + 1] / 255 - 0.5) / 0.5;
+        x[plane * 2 + d] = (resized[s] / 255 - 0.5) / 0.5;
+      }
+    }
+    const out = await rec.run({ [rec.inputNames[0]]: new (opts.ort.Tensor)('float32', x, [1, 3, 48, tw]) });
+    const data = out[rec.outputNames[0]].data;
+    const dims = out[rec.outputNames[0]].dims;
+    const T = dims[dims.length - 2], C = dims[dims.length - 1];
+    let text = '', prev = -1;
+    for (let i = 0; i < T; i++) {
+      let best = 0, bestV = data[i * C];
+      for (let c = 1; c < C; c++) {
+        const v = data[i * C + c];
+        if (v > bestV) { bestV = v; best = c; }
+      }
+      if (best !== prev && best !== 0) {
+        const j = best - 1;
+        if (j < chars.length) text += chars[j];
+      }
+      prev = best;
+    }
+    return { text, conf: 0 };
+  }
+
+  /**
    * Голосование двух чтецов — только «в плюс».
    *
    * Замер на трёх страницах показал, что простое большинство слов вредит: эслав
@@ -802,7 +850,7 @@
     detThr: 0.3, inkLuma: 150, minInk: 0.025, maxInk: 0.92, dupShare: 0.7,
     minCropH: 7, minConf: 0.2, rtl: true, maxBoxes: 400, readConcurrency: 2,
     blockGap: 0.6, softAccept: true, twoPass: false, stretch: false, stretchWeight: 0.6,
-    uiBandTop: 0.10, secondReader: true
+    uiBandTop: 0.10, secondReader: true, thirdReader: false
   };
 
   /**
@@ -840,6 +888,10 @@
         if (env.eslav && env.charset && opts.secondReader) {
           const e = await readEslav(env.eslav, env.charset, rgb, width, box, opts);
           if (e.text) text = voteText(text, e.text, env.vocab);
+        }
+        if (env.pp && env.ppChars && opts.thirdReader) {
+          const p = await readPP(env.pp, env.ppChars, rgb, width, box, opts);
+          if (p.text) text = voteText(text, p.text, env.vocab);
         }
         return { box, text, conf };
       }));
@@ -888,7 +940,7 @@
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
   const api = {
-    runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk,
+    runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
     plausible, readingOrder, normalizePage, luma, resizeRGB, inkShare,
     fixChars, fixDigits, wordOk, DEFAULTS
   };
