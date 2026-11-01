@@ -74,6 +74,12 @@
       <h2>страница</h2>
       <div class="body" style="padding-bottom:0">
         <div class="row" style="margin-bottom:12px">
+          <select id="genre" title="Жанр страницы. От него зависит, какой второй чтец работает: на манге — обученный на манге, на вебтуне (манхва/маньхуа) — обученный на вебтуне"
+                  style="font:inherit;font-size:12.5px;color:var(--text);background:var(--panel);
+                         border:1px solid var(--line);border-radius:9px;padding:7px 9px">
+            <option value="manga">манга</option>
+            <option value="webtoon">манхва / маньхуа</option>
+          </select>
           <button class="primary" id="btnRun" disabled>Распознать</button>
           <button id="btnPick">Выбрать файл…</button>
           <button id="btnA">Пример: страница A</button>
@@ -221,8 +227,15 @@ async function boot() {
       inline && inline.charset ? Promise.resolve(inline.charset)
         : readOptional(['models/charset.txt', '../ownocr/charset.txt'])
     ]);
+    // второй чтец «под жанр»: на манге и на вебтуне нужны РАЗНЫЕ модели
+    let eslavWebtoon = null;
+    try {
+      eslavWebtoon = inline && inline.eslavWebtoon
+        ? await ort.InferenceSession.create(toBytes(inline.eslavWebtoon))
+        : await openOptional(['models/eslav-webtoon.onnx']);
+    } catch (e) { eslavWebtoon = null; }
     env = {
-      det, rec, dict, vocab, ort, eslav,
+      det, rec, dict, vocab, ort, eslav, eslavWebtoon,
       charset: charsetText ? charsetText.replace(/\n$/, '').split('') : null
     };
     const ms = Math.round(performance.now() - t0);
@@ -330,7 +343,8 @@ async function run() {
   }
   const t0 = performance.now();
   try {
-    const res = await OwnOcr.runPage(env, rgb, current.w, current.h, {});
+    const genre = ($('genre') && $('genre').value) || 'manga';
+    const res = await OwnOcr.runPage(env, rgb, current.w, current.h, { genre });
     const ms = Math.round(performance.now() - t0);
     lastResult = res;
     showResult(res, ms);

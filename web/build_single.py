@@ -27,6 +27,7 @@ inline = {
     'det': b64(os.path.join(ROOT, 'models/koma_det.onnx')),
     'rec': b64(os.path.join(ROOT, 'models/koma_rec.onnx')),
     'eslav': b64(os.path.join(ROOT, 'models/eslav-ft.onnx')),
+    'eslavWebtoon': b64(os.path.join(ROOT, 'models/eslav-webtoon.onnx')),
     'charset': open(os.path.join(ROOT, 'models/charset.txt'), encoding='utf-8').read(),
     'dict': open(os.path.join(ROOT, 'models/koma_dict.txt'), encoding='utf-8').read(),
     'vocab': open(os.path.join(ROOT, 'data/vocab-ru.txt'), encoding='utf-8').read(),

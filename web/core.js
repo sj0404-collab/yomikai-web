@@ -870,7 +870,8 @@
     detThr: 0.3, inkLuma: 150, minInk: 0.025, maxInk: 0.92, dupShare: 0.7,
     minCropH: 7, minConf: 0.2, rtl: true, maxBoxes: 400, readConcurrency: 2,
     blockGap: 0.6, softAccept: true, twoPass: false, stretch: false, stretchWeight: 0.6,
-    uiBandTop: 0.10, secondReader: true, thirdReader: false, pickSecond: false
+    uiBandTop: 0.10, secondReader: true, thirdReader: false, pickSecond: false,
+    genre: 'manga'
   };
 
   /**
@@ -905,8 +906,14 @@
         if (!cropOk(rgb, width, box, opts)) return null;
         const r = await readLine(env.rec, env.dict, rgb, width, box, opts);
         let text = r.text, conf = r.conf;
-        if (env.eslav && env.charset && opts.secondReader) {
-          const e = await readEslav(env.eslav, env.charset, rgb, width, box, opts);
+        // Жанр решает, КАКОЙ второй чтец смотреть. Замер на 174 настоящих
+        // строках: наш чтец, дообученный на манге, даёт на манге 1,1 %, а на
+        // вебтуне 29,8 %; чтец, обученный на вебтуне (манхва+маньхуа) — 0,2 %
+        // на манхве и 1,9 % на маньхуа. Один чтец на всё — это 8–14 %.
+        const eslavModel = (opts.genre === 'webtoon' && env.eslavWebtoon)
+          ? env.eslavWebtoon : env.eslav;
+        if (eslavModel && env.charset && opts.secondReader) {
+          const e = await readEslav(eslavModel, env.charset, rgb, width, box, opts);
           if (e.text) text = opts.pickSecond ? pickBetter(text, e.text, env.vocab) : voteText(text, e.text, env.vocab);
         }
         if (env.pp && env.ppChars && opts.thirdReader) {
