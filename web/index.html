@@ -232,7 +232,7 @@ async function boot() {
         : readOptional(['models/charset.txt', '../ownocr/charset.txt'])
     ]);
     // второй чтец «под жанр»: на манге и на вебтуне нужны РАЗНЫЕ модели
-    let eslavWebtoon = null, eslavComic = null;
+    let eslavWebtoon = null, eslavComic = null, eslavHard = null;
     try {
       eslavWebtoon = inline && inline.eslavWebtoon
         ? await ort.InferenceSession.create(toBytes(inline.eslavWebtoon))
@@ -243,12 +243,18 @@ async function boot() {
         ? await ort.InferenceSession.create(toBytes(inline.eslavComic))
         : await openOptional(['models/eslav-comic.onnx']);
     } catch (e) { eslavComic = null; }
+    try {
+      // «трудный» чтец — третий кандидат на вебтуне: крупные строки и рукопись
+      eslavHard = inline && inline.eslavHard
+        ? await ort.InferenceSession.create(toBytes(inline.eslavHard))
+        : null;
+    } catch (e) { eslavHard = null; }
     env = {
-      det, rec, dict, vocab, ort, eslav, eslavWebtoon, eslavComic,
+      det, rec, dict, vocab, ort, eslav, eslavWebtoon, eslavComic, eslavHard,
       charset: charsetText ? charsetText.replace(/\n$/, '').split('') : null
     };
     const ms = Math.round(performance.now() - t0);
-    const nReaders = 1 + (env.eslav ? 1 : 0) + (env.eslavWebtoon ? 1 : 0) + (env.eslavComic ? 1 : 0) + (env.pp ? 1 : 0);
+    const nReaders = 1 + (env.eslav ? 1 : 0) + (env.eslavWebtoon ? 1 : 0) + (env.eslavComic ? 1 : 0) + (env.eslavHard ? 1 : 0) + (env.pp ? 1 : 0);
     setModel(`модели готовы · ${ms} мс · чтецов ${nReaders}`);
     $('engine').textContent = `движок: onnxruntime-web ${ort.env.versions ? ort.env.versions.web : ''} · SIMD · 1 поток` +
       (env.eslav ? ' · чтецы: приложение + эслав (постфиксер «только в плюс»)' : ' · чтец один');

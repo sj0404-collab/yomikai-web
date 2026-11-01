@@ -29,6 +29,7 @@ inline = {
     'eslav': b64(os.path.join(ROOT, 'models/eslav-ft.onnx')),
     'eslavWebtoon': b64(os.path.join(ROOT, 'models/eslav-webtoon.onnx')),
     'eslavComic': b64(os.path.join(ROOT, 'models/eslav-comic.onnx')),
+    'eslavHard': b64(os.path.join(ROOT, 'models/eslav-hard.onnx')),
     'charset': open(os.path.join(ROOT, 'models/charset.txt'), encoding='utf-8').read(),
     'dict': open(os.path.join(ROOT, 'models/koma_dict.txt'), encoding='utf-8').read(),
     'vocab': open(os.path.join(ROOT, 'data/vocab-ru.txt'), encoding='utf-8').read(),

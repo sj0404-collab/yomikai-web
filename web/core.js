@@ -1132,7 +1132,11 @@
       return /[A-Za-z]/.test(t) && /[А-Яа-яЁё]/.test(t);
     });
     if (addr && lat >= 1 && cyr >= 2) return true;
-    if (/[\/\\@]/.test(String(text)) && /\b(vk|вк|tg|t\.me|com|ru|сот)\b/i.test(String(text))) return true;
+    // JS-ный \b не работает на кириллице ( «т» не считается словом), поэтому
+    // границы заданы явно через «не-буква». Без этого «ук.сот/оихиап» проходил
+    // фильтр и водяной знак снова читался голосом.
+    const site = /(^|[^а-яё])(vk|вк|tg|t\.me|com|сот|ru\b)([^а-яё]|$)/i.test(String(text));
+    if (site && (/[\/\\@]/.test(String(text)) || /vk|вк|t\.me|tg/i.test(String(text)))) return true;
     return false;
   }
 
@@ -1340,6 +1344,14 @@
         const eslavModel = opts.genre === 'webtoon' ? (env.eslavWebtoon || env.eslav)
           : opts.genre === 'comic' ? (env.eslavComic || env.eslav)
           : env.eslav;
+        // Третий чтец: «трудный» (обучен на мелком/рукописном/звуках). Замер на
+        // 183 размеченных строках показал, что на вебтуне он лучше основного
+        // чтеца вебтуна в трёх категориях из четырёх:
+        //   рукописный 17,5 % против 26,1 % · мелкий 9,5 % против 12,6 % ·
+        //   крупный 29,3 % против 43,2 %  (и только «печатный» хуже: 10,8 против 9,2)
+        // Поэтому: крупные строки (>40 px) отдаём ему целиком, а на остальных
+        // выбираем по словарю между прочтениями — 9,2 % на всём наборе.
+        const hardModel = opts.genre === 'comic' ? null : (env.eslavHard || null);
         if (eslavModel && env.charset && opts.secondReader) {
           const e = await readEslav(eslavModel, env.charset, rgb, width, box, opts);
           // Голосование по словам выбрасывает слова, в которых чтецы разошлись:
@@ -1349,6 +1361,13 @@
           // лучшее целое прочтение, а не голосуем пословно.
           const byWord = !(opts.pickSecond || opts.genre === 'comic');
           if (e.text) text = byWord ? voteText(text, e.text, env.vocab) : pickBetter(text, e.text, env.vocab);
+        }
+        if (hardModel && env.charset && env.eslavHard && env.eslavHard !== eslavModel) {
+          const h = await readEslav(env.eslavHard, env.charset, rgb, width, box, opts);
+          // Выбор ТОЛЬКО по словарю. Пробовал «крупные строки отдавать ему
+          // целиком» — на вебтуне это дало ложный звук («САЬД» вместо реплики)
+          // и CER на reader-p1 вырос 6,1 → 10,0 %. Поэтому без захвата.
+          if (h.text) text = pickBetter(text, h.text, env.vocab);
         }
         if (env.pp && env.ppChars && opts.thirdReader) {
           const p = await readPP(env.pp, env.ppChars, rgb, width, box, opts);
