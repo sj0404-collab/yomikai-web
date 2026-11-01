@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .text_clean import dejunk, plausible
 from .crew import Foreman, Proposal, WEIGHTS
 from .engine import OwnOCR
 from .page_det import PageDetector, Region, bubbles_of, split_panels, text_lines
@@ -488,6 +489,104 @@ def colour_page(rgb: np.ndarray) -> bool:
     return float(np.mean(sat)) > 8.0
 
 
+# Поля вокруг строки. Проверял два подхода:
+#   * ровный отступ 8 % высоты — ЛОМАЕТ чтение: dense-a 0,9 → 40,8 % (чтецы
+#     обучены на плотных кропах, и белое поле сбивает нормировку);
+#   * расширять только там, где буква реально касается края кропа, — то, что
+#     нужно: обрезанный край («О» без бока, «Ш» без зубцов) чинится, остальные
+#     кропы не меняются вовсе.
+STEP = int(os.environ.get('OWNOCR_PAD_STEP', '3'))      # сколько добавлять за раз
+TRIES = int(os.environ.get('OWNOCR_PAD_TRIES', '3'))    # до 9 px в каждую сторону
+PAD_MODE = os.environ.get('OWNOCR_PAD', 'off')   # по умолчанию — как настроено чтение        # edges | off | frac
+DEJUNK = os.environ.get('OWNOCR_DEJUNK', '1') == '1'
+PAD_FRAC = float(os.environ.get('OWNOCR_PAD_FRAC', '0.0'))
+
+
+def _ink_on_edge(sub: np.ndarray, side: str, thr: int = 170) -> bool:
+    """Касаются ли чернила края картинки."""
+    if sub.size == 0:
+        return False
+    g = sub if sub.ndim == 2 else cv2.cvtColor(sub, cv2.COLOR_RGB2GRAY)
+    if side == 'top':
+        line = g[0, :]
+    elif side == 'bottom':
+        line = g[-1, :]
+    elif side == 'left':
+        line = g[:, 0]
+    else:
+        line = g[:, -1]
+    return bool((line < thr).any())
+
+
+MIN_CROP_H = int(os.environ.get('OWNOCR_MIN_CROP_H', '7'))
+
+
+def crop_ok(crop: np.ndarray) -> tuple[bool, str]:
+    """Годен ли кроп для чтения. Битый кроп — источник крякозябр, его лучше пропустить.
+
+    Что считается поломкой: кроп ниже 7 px (буквы не различить), уже 4 px, почти
+    целиком чёрный или целиком белый (нет текста, только фон или плашка), или
+    вытянутый в 20 раз (это линия рамки, а не строка).
+    """
+    if crop.size == 0:
+        return False, 'пусто'
+    h, w = crop.shape[:2]
+    if h < MIN_CROP_H:
+        return False, 'низкий'
+    if w < 4:
+        return False, 'узкий'
+    if w / float(h) > 20:
+        return False, 'линия'
+    g = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    ink = float((g < 140).mean())
+    if ink < 0.01:
+        return False, 'нет чернил'
+    if ink > 0.92:
+        return False, 'залито'
+    return True, ''
+
+
+def _padded(rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int, frac: float = None):
+    """Кроп строки, дотянутый там, где текст упёрся в край.
+
+    Возвращает (кроп, x0, y0, x1, y1) — координаты уже расширенные, чтобы рамка
+    в отчёте совпадала с тем, что читали.
+    """
+    H, W = rgb.shape[:2]
+    frac = PAD_FRAC if frac is None else frac
+    if PAD_MODE == 'frac':
+        h = max(1, y1 - y0)
+        pad = max(0, int(round(h * frac)))
+        nx0, ny0 = max(0, x0 - pad), max(0, y0 - pad)
+        nx1, ny1 = min(W, x1 + pad), min(H, y1 + pad)
+        return rgb[ny0:ny1, nx0:nx1], nx0, ny0, nx1, ny1
+    if PAD_MODE == 'off':
+        return rgb[y0:y1, x0:x1], x0, y0, x1, y1
+    # edges: тянем только те стороны, где чернила касаются края
+    nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+    for _ in range(max(1, TRIES)):
+        touched = False
+        sub = rgb[ny0:ny1, nx0:nx1]
+        if ny0 > 0 and _ink_on_edge(sub, 'top'):
+            ny0 = max(0, ny0 - STEP)
+            touched = True
+        sub = rgb[ny0:ny1, nx0:nx1]
+        if ny1 < H and _ink_on_edge(sub, 'bottom'):
+            ny1 = min(H, ny1 + STEP)
+            touched = True
+        sub = rgb[ny0:ny1, nx0:nx1]
+        if nx0 > 0 and _ink_on_edge(sub, 'left'):
+            nx0 = max(0, nx0 - STEP)
+            touched = True
+        sub = rgb[ny0:ny1, nx0:nx1]
+        if nx1 < W and _ink_on_edge(sub, 'right'):
+            nx1 = min(W, nx1 + STEP)
+            touched = True
+        if not touched:
+            break
+    return rgb[ny0:ny1, nx0:nx1], nx0, ny0, nx1, ny1
+
+
 def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     harsh = is_harsh_page(rgb)
     rgb = normalize_page(rgb)
@@ -502,12 +601,18 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     t0 = time.time()
     boxes = det.detect_page(rgb)
     n_boxes = len(boxes)
-    regions, n_lines = [], 0
+    regions, n_lines, broken = [], 0, 0
     for box in boxes[:400]:
         for (x0, y0, x1, y1) in text_lines(rgb, box):
             n_lines += 1
-            crop = rgb[y0:y1, x0:x1]
-            if crop.size == 0:
+            # Поля вокруг строки. Бокс приходит обрезанным по чернилам, и на
+            # тонких штрихах сглаженный край буквы срезался: «О» теряла бок,
+            # «Ш» — зубцы. Отступ в 8 % высоты строки это лечит; страницу не
+            # расширяем за её границы.
+            crop, x0, y0, x1, y1 = _padded(rgb, x0, y0, x1, y1)
+            ok_crop, why = crop_ok(crop)
+            if not ok_crop:
+                broken += 1
                 continue
             if crop.shape[0] > crop.shape[1] * 1.8:          # вертикальная надпись
                 crop = np.rot90(crop, k=-1)
@@ -563,6 +668,8 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     # («РАССЧИ-» + «ТЬВАЮ»), и каждая половина по отдельности ни в какие
     # правила не попадает — только целое слово. Заодно убираем мусорные
     # «слова» из обрывков штриховки («ЮЁЁЩ»), которых в русском быть не может.
+    dropped_junk = 0
+    clean = []
     for line in kept:
         text = junk_words(line.text)
         if hasattr(reader, 'ocr'):
@@ -572,8 +679,20 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
         # их не соединить — только здесь, когда реплика собрана.
         if CREW and not harsh and getattr(reader, 'foreman', None) is not None:
             text = reader.foreman._polish(text)
+        # Последним шагом — чистка крякозябр: латиница/греческий/украинские
+        # буквы, перемешанный регистр, обрывки штриховки. После неё строка без
+        # единого правдоподобного слова выбрасывается целиком.
+        if DEJUNK:
+            text = dejunk(text)
+            if not text or not plausible(text, VOCAB):
+                dropped_junk += 1
+                continue
         line.text = text
-    return {'replies': kept, 'dropped': len(lines) - len(kept), 'boxes': n_boxes,
+        clean.append(line)
+    kept = clean
+    return {'replies': kept, 'dropped': len(lines) - len(kept), 'junk': dropped_junk,
+            'broken_crops': broken,
+            'boxes': n_boxes,
             'lines': n_lines, 'harsh': harsh, 'seconds': time.time() - t0}
 
 

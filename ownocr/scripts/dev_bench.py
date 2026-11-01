@@ -37,7 +37,8 @@ for page in a.pages:
     errs = sum(pr.levenshtein(pr.clean(refs[i]), pr.clean(got[i])) for i in range(n))
     tot.append(cer); exact_all += exact; tol_all += tol; err_all += errs
     print(f'{a.label} {page}: {len(got)} репл · {cer:.1f} % · дословно {exact}/9 · '
-          f'≤15% {tol}/9 · ошибок {errs} · {res["seconds"]:.0f} с', flush=True)
+          f'≤15% {tol}/9 · ошибок {errs} · мусор {res.get("junk", 0)} · '
+          f'битых кропов {res.get("broken_crops", 0)} · {res["seconds"]:.0f} с', flush=True)
 print(f'{a.label} СРЕДНЕЕ {np.mean(tot):.1f} % · дословно {exact_all}/{9*len(a.pages)} · '
       f'≤15% {tol_all}/{9*len(a.pages)} · ошибок {err_all}', flush=True)
 if os.environ.get('DUMP'):

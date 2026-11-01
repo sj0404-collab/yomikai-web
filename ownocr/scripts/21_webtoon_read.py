@@ -15,7 +15,7 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import ownocr.webtoon as W                                   # noqa: E402
+import ownocr.ideas.webtoon as W                                   # noqa: E402
 from ownocr.pair import CtcLineReader, cer, clean            # noqa: E402
 
 

@@ -7,7 +7,7 @@
 
 Три подхода на одних и тех же отложенных шрифтах:
 
-  1. **шаблоны** (`ownocr/archaeologist.py`) — сравнение формы глифа с
+  1. **шаблоны** (`ownocr/ideas/archaeologist.py`) — сравнение формы глифа с
      библиотекой начертаний, без обучения: 26 %;
   2. **вложение** — маленькая свёрточная сеть, обученная на 109 буквах в 50
      начертаниях, применяется к незнакомым;
@@ -28,7 +28,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import ownocr.eslav as E                                        # noqa: E402
-import ownocr.archaeologist as A                                # noqa: E402
+import ownocr.ideas.archaeologist as A                                # noqa: E402
 
 S = 32
 
