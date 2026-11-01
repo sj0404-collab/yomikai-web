@@ -33,6 +33,11 @@ LOOKALIKE = {
     'і': 'и', 'ї': 'и', 'є': 'е', 'ґ': 'г', 'І': 'И', 'Ї': 'И', 'Є': 'Е', 'Ґ': 'Г',
 }
 
+# Цифры, которые на манге читаются как буквы: зеркальная «З» рисуется как «3»,
+# «О» — как «0», «Ч» — как «4». Внутри слова (рядом с буквами) это ошибка
+# чтеца, а не число; отдельное «5» в «5 ЙЕН» остаётся цифрой.
+DIGIT_LOOKALIKE = {'3': 'З', '0': 'О', '4': 'Ч', '6': 'Б'}
+
 VOWELS = set('АЕЁИОУЫЭЮЯ')
 CONSONANTS = set('БВГДЖЗЙКЛМНПРСТФХЦЧШЩЬЪ')   # без гласных: О и др. сюда не входят
 # латиница и греческий, для которых в LOOKALIKE нет пары: их присутствие в слове
@@ -46,11 +51,27 @@ def _fix_char(c: str) -> str:
     return LOOKALIKE.get(c, c)
 
 
-def _word_ok(word: str) -> tuple[bool, str]:
-    """Слово после чистки: (оставить?, как выглядит)."""
+def fix_digits(word: str) -> str:
+    """Заменить цифры-двойники на буквы, но только ВНУТРИ слова.
+
+    «3АСАДА» и «И3-ПОД» — это «ЗАСАДА» и «ИЗ-ПОД»; «5 ЙЕН» остаётся числом.
+    """
+    if not any(c.isdigit() for c in word) or not any(c.isalpha() for c in word):
+        return word
+    return ''.join(DIGIT_LOOKALIKE.get(c, c) for c in word)
+
+
+def _word_ok(word: str, vocab: set[str] | None = None) -> tuple[bool, str]:
+    """Слово после чистки: (оставить?, как выглядит).
+
+    Если слово есть в словаре, оно остаётся при любой форме: правила ниже ловят
+    обрывки штриховки, но настоящие слова с одним гласным («ЗДЕСЬ», «ВЗРЫВ»,
+    «ТВОЙ») под них тоже попадали — и вылетали из реплики.
+    """
     core = word.strip(EDGE)
     if not core:
         return False, ''
+    core = fix_digits(core)
     letters = [c for c in core if c.isalpha()]
     digits = [c for c in core if c.isdigit()]
     if not letters and not digits:
@@ -62,7 +83,7 @@ def _word_ok(word: str) -> tuple[bool, str]:
     no_vowel = not (set(upper) & VOWELS)
     doubled = any(upper[i] == upper[i + 1] and upper[i] in 'ЁЪЬЙ' for i in range(len(upper) - 1))
     junk_share = sum(1 for c in core if not (c.isalpha() or c.isdigit())) / len(core)
-    if mixed and len(letters) >= 2:
+    if mixed and len(letters) >= 2:          # цифра не опознана как буква
         return False, ''
     if junk_share > 0.34:
         return False, ''
@@ -93,18 +114,18 @@ def _word_ok(word: str) -> tuple[bool, str]:
             return False, ''
     if len(core) >= 4 and sum(1 for c in upper if c in VOWELS) <= 1 \
             and sum(1 for c in upper if c in CONSONANTS) >= 3:
-        return False, ''
+        return (True, core) if (vocab and upper in vocab) else (False, '')
     return True, core
 
 
-def dejunk(text: str) -> str:
+def dejunk(text: str, vocab: set[str] | None = None) -> str:
     """Убрать крякозябры из прочитанной строки. Пустая строка — нормальный ответ."""
     if not text:
         return ''
     text = ''.join(_fix_char(c) for c in text)
     out = []
     for word in text.split():
-        ok, core = _word_ok(word)
+        ok, core = _word_ok(word, vocab)
         if not (ok and core):
             continue
         # знаки по краям слова сохраняем: «ДА,» не должно стать «ДА»

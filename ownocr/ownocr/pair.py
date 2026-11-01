@@ -409,10 +409,10 @@ class OwnReader:
         «НО...» (ученик: «НАД»). Язык тут единственный судья: берём первое по
         весу предложение, которое после чистки состоит из правдоподобных слов.
         """
-        if not text or (plausible(dejunk(text), VOCAB) and dejunk(text)):
+        if not text or (plausible(dejunk(text, VOCAB), VOCAB) and dejunk(text, VOCAB)):
             return text
         for cand, weight, _conf in sorted(self._last_props, key=lambda p: -p[1]):
-            fixed = dejunk(cand)
+            fixed = dejunk(cand, VOCAB)
             if fixed and plausible(fixed, VOCAB):
                 return cand
         return text
@@ -724,7 +724,7 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
         # буквы, перемешанный регистр, обрывки штриховки. После неё строка без
         # единого правдоподобного слова выбрасывается целиком.
         if DEJUNK:
-            text = dejunk(text)
+            text = dejunk(text, VOCAB)
             if not text or not plausible(text, VOCAB):
                 dropped_junk += 1
                 continue
