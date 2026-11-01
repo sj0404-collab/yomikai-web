@@ -506,16 +506,53 @@
     const xs = new Float32Array(ww), ys = new Float32Array(H);
     for (let x = 0; x < ww; x++) xs[x] = clamp((x + 0.5) * cw / ww - 0.5, 0, cw - 1);
     for (let y = 0; y < H; y++) ys[y] = clamp((y + 0.5) * ch / H - 0.5, 0, ch - 1);
+    // Интерполяция. Замер на 183 настоящих строках (eslav-hard, CER):
+    //   билинейная везде        11,9 % · мелкий шрифт 9,5 % · рукописный 19,3 %
+    //   кубическая везде        11,9 % · мелкий 8,5 % · рукописный 18,1 % · крупный 32,3 %
+    //   кубическая при увеличении, билинейная при уменьшении
+    //                           11,6 % · мелкий 8,5 % · рукописный 17,7 % · крупный 29,3 %
+    // То есть кубика нужна только когда кроп РАСТЯГИВАЮТ (мелкий/рукописный
+    // шрифт), а на крупном она мылит штрих.
+    // opts.interp='bilinear' — принудительно билинейная (нужно для честного A/B)
+    const upscale = opts.interp === 'bilinear' ? false : (ww > cw || H > ch);
+    const cubic = (p0, p1, p2, p3, f) => {
+      const a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+      const b = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3;
+      const c = -0.5 * p0 + 0.5 * p2;
+      return ((a * f + b) * f + c) * f + p1;
+    };
     const t = new Float32Array(H * ww);
-    for (let y = 0; y < H; y++) {
-      const y0i = Math.floor(ys[y]), y1i = Math.min(ch - 1, y0i + 1), fy = ys[y] - y0i;
-      for (let x = 0; x < ww; x++) {
-        const x0i = Math.floor(xs[x]), x1i = Math.min(cw - 1, x0i + 1), fx = xs[x] - x0i;
-        const a = g[y0i * cw + x0i] + (g[y0i * cw + x1i] - g[y0i * cw + x0i]) * fx;
-        const b = g[y1i * cw + x0i] + (g[y1i * cw + x1i] - g[y1i * cw + x0i]) * fx;
-        // нормировка /127.5-1 — та, на которой модель учили и на которой она
-        // даёт 8 % на строках (на /255 выходит хуже: 10,6 % против 2,7 %)
-        t[y * ww + x] = (a + (b - a) * fy) / 127.5 - 1;
+    if (upscale) {
+      // одна кубическая свёртка по горизонтали, затем по вертикали
+      const tmp = new Float32Array(H * ww);
+      for (let y = 0; y < ch; y++) {
+        for (let x = 0; x < ww; x++) {
+          const fx0 = Math.floor(xs[x]), f = xs[x] - fx0;
+          const i1 = Math.max(0, Math.min(cw - 1, fx0));
+          const i0 = Math.max(0, i1 - 1), i2 = Math.min(cw - 1, i1 + 1), i3 = Math.min(cw - 1, i1 + 2);
+          tmp[y * ww + x] = cubic(g[y * cw + i0], g[y * cw + i1], g[y * cw + i2], g[y * cw + i3], f);
+        }
+      }
+      for (let y = 0; y < H; y++) {
+        const fy0 = Math.floor(ys[y]), f = ys[y] - fy0;
+        const j1 = Math.max(0, Math.min(ch - 1, fy0));
+        const j0 = Math.max(0, j1 - 1), j2 = Math.min(ch - 1, j1 + 1), j3 = Math.min(ch - 1, j1 + 2);
+        for (let x = 0; x < ww; x++) {
+          let v = cubic(tmp[j0 * ww + x], tmp[j1 * ww + x], tmp[j2 * ww + x], tmp[j3 * ww + x], f);
+          // нормировка /127.5-1 — та, на которой модель учили (на /255 хуже:
+          // 10,6 % против 2,7 %)
+          t[y * ww + x] = Math.max(0, Math.min(255, v)) / 127.5 - 1;
+        }
+      }
+    } else {
+      for (let y = 0; y < H; y++) {
+        const y0i = Math.floor(ys[y]), y1i = Math.min(ch - 1, y0i + 1), fy = ys[y] - y0i;
+        for (let x = 0; x < ww; x++) {
+          const x0i = Math.floor(xs[x]), x1i = Math.min(cw - 1, x0i + 1), fx = xs[x] - x0i;
+          const a = g[y0i * cw + x0i] + (g[y0i * cw + x1i] - g[y0i * cw + x0i]) * fx;
+          const b = g[y1i * cw + x0i] + (g[y1i * cw + x1i] - g[y1i * cw + x0i]) * fx;
+          t[y * ww + x] = (a + (b - a) * fy) / 127.5 - 1;
+        }
       }
     }
     const out = await rec.run({ [rec.inputNames[0]]: new (opts.ort.Tensor)('float32', t, [1, 1, H, ww]) });
@@ -685,8 +722,21 @@
       core = (up / Math.max(1, all) >= 0.6) ? core.toUpperCase() : core.toLowerCase();
       upper = core.toUpperCase();
     }
-    for (let i = 0; i + 1 < upper.length; i++) {
-      if (upper[i] === upper[i + 1] && VOWELS.has(upper[i])) return [false, ''];
+    // Двойная гласная — не всегда мусор: «ПОСЛЕДНЕЕ», «СИНЕЕ», «ЛУЧШЕЕ» — это
+    // нормальные русские окончания. Мусор — это ПРОТЯЖКА из трёх и больше
+    // («АААА», «ОООО»), поэтому пара в конце слова (или в начале возгласа)
+    // допускается, а три подряд — нет.
+    for (let i = 0; i < upper.length;) {
+      let j = i + 1;
+      while (j < upper.length && upper[j] === upper[i]) j++;
+      const run = j - i;
+      if (run >= 3 && VOWELS.has(upper[i])) return [false, ''];
+      if (run === 2 && VOWELS.has(upper[i])) {
+        const atEnd = j >= upper.length;
+        const atStart = i === 0;
+        if (!atEnd && !atStart) return [false, ''];
+      }
+      i = j;
     }
     let run = 0;
     for (const c of upper) {
@@ -709,38 +759,100 @@
   };
 
   /** Починить слово по словарю: одна замена похожей буквы или одна вставка. */
-  function spellFix(word, vocab) {
+  function spellFix(word, vocab, aggressive) {
     if (!vocab || !vocab.size) return word;
     const letters = Array.from(word);
     if (letters.length < 3) return word;
     const upper = word.toUpperCase();
     if (vocab.has(upper)) return word;
+    const ALPHA = 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ';
+    // Собираем ВСЕ слова словаря на расстоянии 1 (замена, вставка, удаление,
+    // перестановка) и правим только при ОДНОЗНАЧНОМ кандидате. Без этого
+    // правила редкое правильное слово («ТАЙВАНЯ») заменялось другим словарным
+    // и CER рос: 18,5 % против 18,0 %.
+    const cands = new Set();
     for (let i = 0; i < letters.length; i++) {
       const pair = CONFUSABLE[letters[i].toUpperCase()];
-      if (!pair) continue;
-      const cand = letters.slice(0, i).concat([pair], letters.slice(i + 1)).join('');
-      if (vocab.has(cand.toUpperCase())) return cand;
+      const opts = pair ? [pair] : [];
+      for (const o of opts) {
+        const c = upper.slice(0, i) + o + upper.slice(i + 1);
+        if (vocab.has(c)) cands.add(c);
+      }
+      if (!aggressive) continue;
+      for (const v of ALPHA) {
+        if (v === upper[i]) continue;
+        const c = upper.slice(0, i) + v + upper.slice(i + 1);
+        if (vocab.has(c)) cands.add(c);
+        if (cands.size > 1) return word;
+      }
+      const del = upper.slice(0, i) + upper.slice(i + 1);
+      if (del.length > 2 && vocab.has(del)) cands.add(del);
     }
-    // пропущенная буква: вставить любую из гласных на месте провала
-    for (let i = 1; i < letters.length; i++) {
-      for (const v of 'ОЕИАУЯ') {
-        const cand = (letters.slice(0, i).join('') + v + letters.slice(i).join(''));
-        if (vocab.has(cand.toUpperCase())) return cand;
+    if (aggressive && letters.length <= 9) {
+      for (let i = 0; i <= upper.length; i++) {
+        for (const v of ALPHA) {
+          const c = upper.slice(0, i) + v + upper.slice(i);
+          if (vocab.has(c)) cands.add(c);
+          if (cands.size > 1) return word;
+        }
       }
     }
-    return word;
+    for (let i = 0; i + 1 < upper.length && aggressive; i++) {
+      if (upper[i] === upper[i + 1]) continue;
+      const c = upper.slice(0, i) + upper[i + 1] + upper[i] + upper.slice(i + 2);
+      if (vocab.has(c)) cands.add(c);
+      if (cands.size > 1) return word;
+    }
+    if (cands.size !== 1) return word;
+    const fix = Array.from(cands)[0];
+    // сохраняем регистр исходного слова
+    const isCap = letters[0] === letters[0].toUpperCase() && letters[0] !== letters[0].toLowerCase();
+    const isUpper = upper === word;
+    const out = isUpper ? fix : isCap ? fix[0] + fix.slice(1).toLowerCase() : fix.toLowerCase();
+    return out;
   }
 
-  /** Убрать крякозябры. Пустая строка — нормальный ответ. */
-  function dejunk(text, vocab) {
+  // Латинские двойники кириллицы: чтец путает шрифт и подставляет «L», «A»,
+  // «O» вместо русских букв. Раньше такое слово считалось мусором и удалялось
+  // ВМЕСТЕ со смыслом — реплика «КАКИЕ ПЛАНЫ НА СЕГОДНЯ?» превращалась в
+  // «ПЛАНЫ НА» (обрезанный хвост). Теперь слово спасаем, а не выбрасываем.
+  const HOMOGLYPH = { A: 'А', B: 'В', C: 'С', E: 'Е', H: 'Н', K: 'К', M: 'М',
+    O: 'О', P: 'Р', T: 'Т', X: 'Х', Y: 'У', a: 'а', c: 'с', e: 'е', o: 'о',
+    p: 'р', x: 'х', y: 'у', k: 'к', m: 'м', t: 'т', h: 'н' };
+  function salvage(word) {
+    if (!word) return '';
+    let cyr = 0, lat = 0, other = 0;
+    let out = '';
+    for (const ch of word) {
+      if (/[А-Яа-яЁё]/.test(ch)) { cyr++; out += ch; }
+      else if (/[A-Za-z]/.test(ch)) {
+        lat++;
+        const g = HOMOGLYPH[ch];
+        out += g || ch;
+      } else if (/[0-9]/.test(ch) || '.,!?…—«»"():;%'.includes(ch)) { out += ch; }
+      else other++;
+    }
+    if (other) return '';
+    if (cyr + lat < 2) return '';
+    if (cyr < 1) return '';                 // целиком латиница — это не наша речь
+    if (lat > cyr) return '';               // больше половины латиницы — мусор
+    return out;
+  }
+
+  function dejunk(text, vocab, aggressive) {
     if (!text) return '';
     const fixed = fixChars(text);
     const out = [];
     for (const word of fixed.split(/\s+/)) {
       if (!word) continue;
       const [ok, core0] = wordOk(word, vocab);
-      if (!ok || !core0) continue;
-      const core = vocab && vocab.size ? spellFix(core0, vocab) : core0;
+      if (!ok || !core0) {
+        // слово не прошло проверку — но если в нём есть кириллица, не выбрасываем
+        const saved = salvage(word);
+        if (saved && Array.from(saved).filter((c) => /[А-Яа-яЁё]/.test(c)).length >= 2) out.push(saved);
+        continue;
+      }
+      const core = vocab && vocab.size ? spellFix(core0, vocab, aggressive) : core0;
       const lead = word.slice(0, word.length - word.replace(/^[.,!?…—«»"():;%]+/, '').length);
       const trail = word.slice(word.replace(/[.,!?…—«»"():;%]+$/, '').length);
       out.push(lead + core + trail);
@@ -877,6 +989,124 @@
     }
     const cls = sfxClass(text, vocab);
     return cls || 'hit';                                    // тип не прочли — «удар»
+  }
+
+  /** Нарезать готовое облачко на СТРОКИ по проекции чернил.
+   *
+   * Зачем: на рукописной маньхуа и западноv комиксе детектор отдаёт строки
+   * «лестницей» — соседние рамки перекрываются по высоте на 60–75 %. Из облачка
+   * в 4 строки в ответ попадали 4 куска из 6, и реплика выходила обрывком.
+   * Здесь мы берём объединяющий бокс и режем его по горизонтальным провалам
+   * чернил — так же, как это делает Python-версия.
+   */
+  function cutRows(rgb, w, h, box, opts) {
+    const [bx1, by1, bx2, by2] = box;
+    const pad = Math.max(1, Math.round((by2 - by1) * 0.06));
+    const left = Math.max(0, bx1 - pad), right = Math.min(w, bx2 + pad);
+    const top = Math.max(0, by1 - pad), bottom = Math.min(h, by2 + pad);
+    if (right - left < 6 || bottom - top < 4) return [];
+    const scale = Math.min(1, 600 / (right - left));
+    const cw = Math.max(8, Math.round((right - left) * scale));
+    const ch = Math.max(6, Math.round((bottom - top) * scale));
+    const full = cropLuma(rgb, w, left, top, right, bottom);
+    const small = resizeLuma(full, right - left, bottom - top, cw, ch);
+    const thr = opts.inkLuma;
+    const rowInk = new Array(ch).fill(0);
+    for (let y = 0; y < ch; y++) {
+      let c = 0;
+      for (let x = 0; x < cw; x++) if (small[y * cw + x] < thr) c++;
+      rowInk[y] = c;
+    }
+    let maxInk = 0;
+    for (let y = 0; y < ch; y++) if (rowInk[y] > maxInk) maxInk = rowInk[y];
+    const need = Math.max(2, Math.round(maxInk * 0.18));
+    const runs = [];
+    for (let y = 0; y < ch;) {
+      if (rowInk[y] < need) { y++; continue; }
+      let end = y;
+      while (end < ch && rowInk[end] >= need) end++;
+      runs.push([y, end]);
+      y = Math.max(end, y + 1);
+    }
+    if (!runs.length) return [];
+    const merged = [];
+    for (const run of runs) {
+      const last = merged[merged.length - 1];
+      if (last && run[0] - last[1] <= 1) last[1] = run[1];
+      else merged.push([run[0], run[1]]);
+    }
+    const out = [];
+    for (const [y0, y1] of merged) {
+      if (y1 - y0 < 2) continue;
+      const ty = Math.max(0, Math.round(y0 / scale) + top - 2);
+      const by = Math.min(h, Math.round(y1 / scale) + top + 2);
+      let x0 = cw, x1 = -1;
+      for (let y = y0; y < y1; y++) {
+        for (let x = 0; x < cw; x++) if (small[y * cw + x] < thr) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+        }
+      }
+      const lx = x1 >= x0 ? Math.max(0, Math.round(x0 / scale) + left - 2) : left;
+      const rx = x1 >= x0 ? Math.min(w, Math.round(x1 / scale) + left + 2) : right;
+      out.push([lx, ty, rx, by]);
+    }
+    return out;
+  }
+
+  /** Починить «лестницу» рамок: соседние строки одного облачка перекрываются
+   * по высоте больше чем на 60 % — значит детектор режет облачко со сдвигом,
+   * и любая склейка по геометрии теряет куски. Объединяем такую группу и режем
+   * по чернилам. На плотной манге лестниц нет — там всё остаётся как было.
+   */
+  function repairLadders(rgb, w, h, lines, opts) {
+    const overlapY = (a, b) => Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+    const overlapX = (a, b) => Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+    const n = lines.length;
+    const parent = lines.map((_, i) => i);
+    const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    const join = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+    // Связываем рамки, у которых большая часть ширины общая И они стоят друг на
+    // друге либо почти вплотную. «Настоящая лестница» = внутри группы есть пара
+    // с перекрытием по высоте больше половины — именно там терялись строки.
+    const laddery = new Array(n).fill(false);
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = lines[i], b = lines[j];
+        const ah = a[3] - a[1], bh = b[3] - b[1];
+        if (!ah || !bh) continue;
+        const ox = overlapX(a, b);
+        const bw = Math.min(a[2] - a[0], b[2] - b[0]);
+        if (ox < bw * 0.5) continue;
+        const oy = overlapY(a, b);
+        if (oy > Math.min(ah, bh) * 0.3) { join(i, j); if (oy > Math.min(ah, bh) * 0.5) laddery[find(i)] = true; }
+      }
+    }
+    const groups = new Map();
+    for (let i = 0; i < n; i++) {
+      const r = find(i);
+      if (!groups.has(r)) groups.set(r, []);
+      groups.get(r).push(i);
+    }
+    const out = [];
+    let fixed = 0;
+    const handled = new Set();
+    for (let i = 0; i < n; i++) {
+      const r = find(i);
+      if (handled.has(r)) continue;
+      handled.add(r);
+      const members = groups.get(r);
+      if (members.length < 2 || !laddery[r]) { for (const m of members) out.push(lines[m]); continue; }
+      const boxes = members.map((m) => lines[m]);
+      const union = [
+        Math.min(...boxes.map((b) => b[0])), Math.min(...boxes.map((b) => b[1])),
+        Math.max(...boxes.map((b) => b[2])), Math.max(...boxes.map((b) => b[3]))
+      ];
+      const rows = cutRows(rgb, w, h, union, opts);
+      if (rows.length >= 2) { out.push(...rows); fixed += members.length - rows.length; }
+      else out.push(...boxes);
+    }
+    return { lines: out, fixed };
   }
 
   /** кусок интерфейса/табло: цифры, счётчики, номера страниц — не читаем и не озвучиваем */
@@ -1053,6 +1283,10 @@
 
     const regions = [];
     const dropped = { crop: 0, empty: 0, ui: 0 };
+    // «Лестницу» рамок чиним ДО чтения: иначе из облачка в 4 строки в ответ
+    // попадают 4 куска из 6 и реплика выходит обрывком (comic4, 1-я реплика).
+    const repaired = repairLadders(rgb, width, height, lines, opts);
+    lines = repaired.lines;
     const tRead = now();
     for (let i = 0; i < lines.length; i += opts.readConcurrency) {
       const chunk = lines.slice(i, i + opts.readConcurrency);
@@ -1073,7 +1307,13 @@
           : env.eslav;
         if (eslavModel && env.charset && opts.secondReader) {
           const e = await readEslav(eslavModel, env.charset, rgb, width, box, opts);
-          if (e.text) text = opts.pickSecond ? pickBetter(text, e.text, env.vocab) : voteText(text, e.text, env.vocab);
+          // Голосование по словам выбрасывает слова, в которых чтецы разошлись:
+          // на строке «НЕТ, В ПОСЛЕДНЕЕ» (чтец приложения) против «НЕТ. В ОСЕДЕ»
+          // (комикс-чтец) оставалось «НЕТ, В» — то есть выпавший хвост реплики.
+          // На комиксе/рукописи чтецы расходятся ЧАСТО, поэтому там выбираем
+          // лучшее целое прочтение, а не голосуем пословно.
+          const byWord = !(opts.pickSecond || opts.genre === 'comic');
+          if (e.text) text = byWord ? voteText(text, e.text, env.vocab) : pickBetter(text, e.text, env.vocab);
         }
         if (env.pp && env.ppChars && opts.thirdReader) {
           const p = await readPP(env.pp, env.ppChars, rgb, width, box, opts);
@@ -1103,6 +1343,9 @@
         });
       }
     }
+    if (typeof process !== 'undefined' && process.env && process.env.OWNOCR_DEBUG) {
+      for (const r of regions) console.log('[region]', Math.round(r.top * height), Math.round(r.left * width), JSON.stringify(r.text));
+    }
     const readMs = now() - tRead;
 
     const replies = [];
@@ -1110,12 +1353,26 @@
     const orderedLines = readingOrder(regions, opts.rtl, opts.blockGap);
     const hs = orderedLines.map((l) => l.bottom - l.top).sort((a, b) => a - b);
     const medianH = hs.length ? hs[Math.floor(hs.length / 2)] : 0.02;
+    if (typeof process !== 'undefined' && process.env && process.env.OWNOCR_DEBUG) {
+      console.log('[ordered]', orderedLines.length, 'из', regions.length, 'регионов');
+      for (const l of orderedLines) console.log('   [o]', Math.round(l.top * height), Math.round(l.left * width), JSON.stringify(l.text));
+    }
     for (const line of orderedLines) {
       // Звук проверяем ДО чистки: чистка срезает «!» и ломает повторы «ХА-ХА-ХА».
       const rawText = String(line.text || '').trim();
       const sfx = (opts.sfxByLook === false ? null : sfxByLook(line, medianH, env.vocab))
         || sfxClass(rawText, env.vocab);
-      const text = dejunk(rawText, env.vocab);
+      const lhPx = (line.bottom - line.top) * height;
+      // Агрессивная правка по словарю (вставка/удаление/перестановка буквы)
+      // помогает на рукописи и мелком шрифте, но на крупном чистом тексте
+      // портит верные слова («ВКЛЮЧИШЬ» → «ВКЛЮЧИТЬ»). Поэтому включаем её
+      // только там, где чтец и правда путается.
+      const aggressive = opts.genre === 'comic' || lhPx <= 30;
+      const text = dejunk(rawText, env.vocab, aggressive);
+      if (typeof process !== 'undefined' && process.env && process.env.OWNOCR_DEBUG && rawText.length > 40) {
+        console.log('[raw]', JSON.stringify(rawText), '=>', JSON.stringify(text));
+        for (const w of rawText.split(' ')) console.log('   слово', JSON.stringify(w), JSON.stringify(wordOk(w, env.vocab)));
+      }
       const box = [line.left * width, line.top * height, line.right * width, line.bottom * height];
       if (sfx) {
         // звук виден, но голосом не читается — вместо него играется эффект
@@ -1145,7 +1402,7 @@
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
   const api = {
-    sfxClass, sfxByLook, isInterfaceText, pickBetter, runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
+    cutRows, repairLadders, salvage, sfxClass, sfxByLook, isInterfaceText, pickBetter, runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
     plausible, readingOrder, normalizePage, luma, resizeRGB, inkShare,
     fixChars, fixDigits, wordOk, DEFAULTS
   };

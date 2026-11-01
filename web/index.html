@@ -248,7 +248,8 @@ async function boot() {
       charset: charsetText ? charsetText.replace(/\n$/, '').split('') : null
     };
     const ms = Math.round(performance.now() - t0);
-    setModel(`модели готовы · ${ms} мс · чтецов ${env.eslav ? 2 : 1}`);
+    const nReaders = 1 + (env.eslav ? 1 : 0) + (env.eslavWebtoon ? 1 : 0) + (env.eslavComic ? 1 : 0) + (env.pp ? 1 : 0);
+    setModel(`модели готовы · ${ms} мс · чтецов ${nReaders}`);
     $('engine').textContent = `движок: onnxruntime-web ${ort.env.versions ? ort.env.versions.web : ''} · SIMD · 1 поток` +
       (env.eslav ? ' · чтецы: приложение + эслав (постфиксер «только в плюс»)' : ' · чтец один');
     $('btnRun').disabled = !current;
