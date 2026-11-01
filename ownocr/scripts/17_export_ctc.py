@@ -6,8 +6,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import ownocr.eslav as E
 
-src = os.path.join(ROOT, 'out', 'eslav-ft.pt')
-dst = os.path.join(ROOT, 'out', 'eslav-ft.onnx')
+import argparse
+_ap = argparse.ArgumentParser(description='экспорт дообученного чтеца в ONNX')
+_ap.add_argument('--src', default=os.path.join(ROOT, 'out', 'eslav-ft.pt'))
+_ap.add_argument('--dst', default=os.path.join(ROOT, 'out', 'eslav-ft.onnx'))
+_a = _ap.parse_args()
+src, dst = _a.src, _a.dst
 net = E.build_torch()
 net.load_state_dict(torch.load(src, map_location='cpu'))
 net.eval()

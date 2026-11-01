@@ -1,0 +1,90 @@
+name: отдельные чтецы по жанрам — вебтун и комикс
+
+# Зачем на раннере: два прогона CTC по своим страницам. Дома это часы, на 4
+# ядрах раннера — минуты.
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'эпох'
+        default: '6'
+      steps:
+        description: 'шагов на эпоху'
+        default: '120'
+  push:
+    paths:
+      - 'ownocr/scripts/29_finetune_genre.py'
+      - 'ownocr/data-manhua/**'
+      - 'ownocr/data-comic/**'
+      - '.github/workflows/ownocr-finetune-genres.yml'
+
+concurrency:
+  group: ownocr-finetune-genres
+  cancel-in-progress: false
+
+jobs:
+  genres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      EPOCHS: ${{ github.event.inputs.epochs || '6' }}
+      STEPS: ${{ github.event.inputs.steps || '120' }}
+      PYTHONUNBUFFERED: '1'
+      OMP_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 'зависимости — torch только CPU'
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy opencv-python-headless pillow
+          python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --quiet onnx onnxruntime onnxscript
+      - name: 'шрифты из кэша'
+        id: fonts
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/fonts
+          key: cyr-fonts-300-v1
+      - name: 'скачать шрифты'
+        if: steps.fonts.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${{ env.FONTS_DIR || '/home/runner/fonts' }}"
+          python ownocr/scripts/01_fetch_fonts.py --limit 300 --out /home/runner/fonts --layout /tmp/ownocr
+      - name: 'чтец вебтуна (манхва + маньхуа)'
+        run: |
+          cd ownocr
+          mkdir -p out
+          python scripts/29_finetune_genre.py --name webtoon \
+            --train tyrant-p1,manhua1,manhua2,manhua4 --eval manhua5,reader-p1 \
+            --epochs "$EPOCHS" --steps "$STEPS" 2>&1 | tee out/finetune-webtoon.txt
+          python scripts/17_export_ctc.py --src out/eslav-webtoon.pt --dst out/eslav-webtoon.onnx 2>&1 | tee out/export-webtoon.txt
+      - name: 'чтец комикса'
+        run: |
+          cd ownocr
+          python scripts/29_finetune_genre.py --name comic \
+            --train comic2,comic3 --eval comic4 \
+            --epochs "$EPOCHS" --steps "$STEPS" 2>&1 | tee out/finetune-comic.txt
+          python scripts/17_export_ctc.py --src out/eslav-comic.pt --dst out/eslav-comic.onnx 2>&1 | tee out/export-comic.txt
+      - name: 'замер всех чтецов по жанрам'
+        run: |
+          cd ownocr
+          python scripts/28_tess_eval.py 2>&1 | tee out/genre-eval.txt
+      - name: 'артефакты'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: genre-readers
+          path: |
+            ownocr/out/eslav-webtoon.onnx
+            ownocr/out/eslav-comic.onnx
+            ownocr/out/eslav-webtoon.json
+            ownocr/out/eslav-comic.json
+            ownocr/out/finetune-webtoon.txt
+            ownocr/out/finetune-comic.txt
+            ownocr/out/genre-eval.txt
+          retention-days: 30

@@ -23,7 +23,9 @@ from ownocr.pair import CtcLineReader, CtcReader, cer, clean   # noqa: E402
 from ownocr.tess import TesseractReader                        # noqa: E402
 
 DOMAIN = {'dense-a': 'манга', 'kuro-p1': 'манга', 'kuro-p2': 'манга',
-          'tyrant-p1': 'манхва', 'reader-p1': 'манхва'}
+          'tyrant-p1': 'манхва', 'reader-p1': 'манхва',
+          'manhua1': 'маньхуа', 'manhua2': 'маньхуа', 'manhua4': 'маньхуа', 'manhua5': 'маньхуа',
+          'comic2': 'комикс', 'comic3': 'комикс', 'comic4': 'комикс'}
 
 
 def load(rows, dirname, default_page):
@@ -50,6 +52,8 @@ def main():
     rows = []
     load(rows, 'data-real', 'dense-a')
     load(rows, 'data-pages', 'other')
+    load(rows, 'data-manhua', 'manhua?')
+    load(rows, 'data-comic', 'comic?')
     vocab = set(w.upper() for w in open(a.vocab, encoding='utf-8').read().split() if len(w) >= 3)
     app = CtcReader(a.app, a.dict)
     esl = CtcLineReader(a.eslav)
@@ -105,7 +109,7 @@ def main():
     print('страница     ' + ''.join(f'{k:>15}' for k in keys))
     for p in sorted(per):
         print(f'{p:12s} ' + ''.join(f'{100 * np.mean(per[p][k]):14.1f}%' for k in keys))
-    for dom in ['манга', 'манхва']:
+    for dom in ['манга', 'манхва', 'маньхуа', 'комикс']:
         idx = [i for i, r in enumerate(rows) if DOMAIN.get(r['page']) == dom]
         print(f'{dom:12s} ' + ''.join(
             f'{100 * np.mean([acc[k][i] for i in idx]):14.1f}%' for k in keys))
