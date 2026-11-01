@@ -1117,6 +1117,22 @@
     const digits = chars.filter((c) => /[0-9]/.test(c)).length;
     if (letters === 0) return true;                       // «03:19», «12», «$2.95»
     if (digits / chars.length > 0.45) return true;        // «ОЗ:12», «1АN»
+    // ВОДЯНОЙ ЗНАК ПЕРЕВОДЧИКА — не реплика. Признак: латиница пополам с
+    // кириллицей и слэш-адрес («Специально для группы vк.сот/оихиап»,
+    // «перевод: vk.com/…», «tg: @…»). Раньше он попадал в список реплик и
+    // читался голосом как часть истории.
+    // Водяной знак узнаём по «токену-адресу»: длинный токен, в котором смешаны
+    // латиница и кириллица («vк.сот/оихиап» — глазом почти не видно, а машинно
+    // это адрес). Порог 8 символов отсекает обычные слова вида «да/no».
+    const lat = chars.filter((c) => /[A-Za-z]/.test(c)).length;
+    const cyr = chars.filter((c) => /[А-Яа-яЁё]/.test(c)).length;
+    const addr = String(text).split(/\s+/).some((tok) => {
+      const t = tok.replace(/[.,;:!?«»"()\[\]]/g, '');
+      if (t.length < 8) return false;
+      return /[A-Za-z]/.test(t) && /[А-Яа-яЁё]/.test(t);
+    });
+    if (addr && lat >= 1 && cyr >= 2) return true;
+    if (/[\/\\@]/.test(String(text)) && /\b(vk|вк|tg|t\.me|com|ru|сот)\b/i.test(String(text))) return true;
     return false;
   }
 
@@ -1281,6 +1297,25 @@
     const nLinesRaw = lines.length;
     lines = tuneLines(rgb, width, lines, opts);
 
+    // A/B-переключатель: резать ли высокие боксы на строки перед чтением.
+    if (opts.splitBoxes) {
+      const hs = lines.map((b) => b[3] - b[1]).sort((a, b) => a - b);
+      const medH = hs.length ? hs[Math.floor(hs.length / 2)] : 10;
+      const out = [];
+      let cuts = 0;
+      for (const b of lines) {
+        const bh = b[3] - b[1];
+        if (bh > medH * 1.7) {
+          const rows = cutRows(rgb, width, height, b, opts);
+          if (rows.length >= 2) { out.push(...rows); cuts++; continue; }
+        }
+        out.push(b);
+      }
+      lines = out;
+      if (typeof process !== 'undefined' && process.env && process.env.OWNOCR_DEBUG) {
+        console.log('[splitBoxes] разрезано боксов:', cuts, 'строк стало:', lines.length);
+      }
+    }
     const regions = [];
     const dropped = { crop: 0, empty: 0, ui: 0 };
     // «Лестницу» рамок чиним ДО чтения: иначе из облачка в 4 строки в ответ
@@ -1352,7 +1387,13 @@
     let junk = 0;
     const orderedLines = readingOrder(regions, opts.rtl, opts.blockGap);
     const hs = orderedLines.map((l) => l.bottom - l.top).sort((a, b) => a - b);
-    const medianH = hs.length ? hs[Math.floor(hs.length / 2)] : 0.02;
+    // Берём МЕНЬШУЮ из двух медиан: по склеенным репликам и по отдельным
+    // строкам детектора. Высокая медиана склеенных реплик поднимала порог и
+    // «АА» (4,4× медианы строк) уходило в голос вместо звука.
+    const medianMerged = hs.length ? hs[Math.floor(hs.length / 2)] : 0.02;
+    const hr = regions.map((r) => r.bottom - r.top).sort((a, b) => a - b);
+    const medianRows = hr.length ? hr[Math.floor(hr.length / 2)] : medianMerged;
+    const medianH = Math.min(medianMerged, medianRows);
     if (typeof process !== 'undefined' && process.env && process.env.OWNOCR_DEBUG) {
       console.log('[ordered]', orderedLines.length, 'из', regions.length, 'регионов');
       for (const l of orderedLines) console.log('   [o]', Math.round(l.top * height), Math.round(l.left * width), JSON.stringify(l.text));
