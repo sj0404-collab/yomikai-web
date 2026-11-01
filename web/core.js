@@ -540,6 +540,26 @@
    * словарное. В остальных случаях остаётся прочтение приложения. Такой постфиксер
    * может улучшить, но не может испортить.
    */
+  // Голосование «в плюс» сравнивает слова ПО МЕСТАМ и требует равного числа
+  // слов: если чтецы разбили строку по-разному (а это правило, а не редкость),
+  // оно возвращает текст своего чтеца и второй голос пропадает целиком.
+  // Замер на настоящей странице kuro-p1: старый и новый эслав давали
+  // ОДИНАКОВЫЙ результат 51,1 %. Поэтому выбираем прочтение целиком — по числу
+  // слов, найденных в словаре (длинные слова весят больше).
+  function pickBetter(a, b, vocab) {
+    if (!b) return a;
+    if (!a) return b;
+    const score = (t) => {
+      let s = 0;
+      for (const w of t.split(/\s+/)) {
+        const k = fixChars(w).replace(/^[.,!?…—«»"():;%]+|[.,!?…—«»"():;%]+$/g, '').toUpperCase();
+        if (k.length >= 3 && vocab && vocab.has(k)) s += k.length;
+      }
+      return s;
+    };
+    return score(b) > score(a) ? b : a;
+  }
+
   function voteText(a, b, vocab) {
     if (!b || !a) return a || b;
     const wa = a.split(/\s+/).filter(Boolean), wb = b.split(/\s+/).filter(Boolean);
@@ -850,7 +870,7 @@
     detThr: 0.3, inkLuma: 150, minInk: 0.025, maxInk: 0.92, dupShare: 0.7,
     minCropH: 7, minConf: 0.2, rtl: true, maxBoxes: 400, readConcurrency: 2,
     blockGap: 0.6, softAccept: true, twoPass: false, stretch: false, stretchWeight: 0.6,
-    uiBandTop: 0.10, secondReader: true, thirdReader: false
+    uiBandTop: 0.10, secondReader: true, thirdReader: false, pickSecond: false
   };
 
   /**
@@ -887,7 +907,7 @@
         let text = r.text, conf = r.conf;
         if (env.eslav && env.charset && opts.secondReader) {
           const e = await readEslav(env.eslav, env.charset, rgb, width, box, opts);
-          if (e.text) text = voteText(text, e.text, env.vocab);
+          if (e.text) text = opts.pickSecond ? pickBetter(text, e.text, env.vocab) : voteText(text, e.text, env.vocab);
         }
         if (env.pp && env.ppChars && opts.thirdReader) {
           const p = await readPP(env.pp, env.ppChars, rgb, width, box, opts);
@@ -940,7 +960,7 @@
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
   const api = {
-    runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
+    pickBetter, runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
     plausible, readingOrder, normalizePage, luma, resizeRGB, inkShare,
     fixChars, fixDigits, wordOk, DEFAULTS
   };

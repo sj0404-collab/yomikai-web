@@ -54,7 +54,7 @@ jobs:
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet numpy opencv-python-headless pillow
           python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch
-          python -m pip install --quiet onnx onnxruntime
+          python -m pip install --quiet onnx onnxruntime onnxscript
           python -c "import torch; print('torch', torch.__version__, 'ядер', torch.get_num_threads())"
 
       - name: 'шрифты из кэша'

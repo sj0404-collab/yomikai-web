@@ -11,10 +11,12 @@ dst = os.path.join(ROOT, 'out', 'eslav-ft.onnx')
 net = E.build_torch()
 net.load_state_dict(torch.load(src, map_location='cpu'))
 net.eval()
-dummy = torch.zeros(1, 1, 32, 64)
+dummy = torch.zeros(1, 1, 32, 256)
+# dynamo=False — старый экспортёр: новый (torch 2.9 + onnxscript) на этой
+# свёрточной сети падает с «size of tensor a (128) must match 384».
 torch.onnx.export(net, dummy, dst, input_names=['x'], output_names=['logit'],
                   dynamic_axes={'x': {3: 'width'}, 'logit': {0: 'T'}},
-                  opset_version=13, do_constant_folding=True)
+                  opset_version=13, do_constant_folding=True, dynamo=False)
 # Веса зашиваем внутрь файла. `torch.onnx.export` умеет вынести их в
 # `<имя>.onnx.data` и оставить в модели ссылки — тогда залитый в репозиторий
 # один .onnx не открывается: «External data path does not exist». На этом я уже
