@@ -22,6 +22,11 @@ import numpy as np
 from PIL import Image
 
 BUBBLE_SHIFT = 0.8
+# Блок строк = одна реплика. Порог по горизонтальному зазору между строками:
+# при 1,6 высоты строки в один блок попадали строки из РАЗНЫХ облачков, когда
+# облачка стоят рядом («ОНА ВСЁ ЕЩЁ ШЕПЧЕТ» и «ГОТОВО…» на dense-a), и текст
+# реплик перемешивался. 0,6 высоты — зазор внутри одного облачка с запасом.
+BLOCK_GAP = 0.6
 
 
 # ── детектор ─────────────────────────────────────────────────────────────────
@@ -251,7 +256,7 @@ def bubbles_of(group, rtl: bool) -> list[Line]:
                 gap = region.right - bl
             else:
                 gap = 0.0
-            if gap > lh * 1.6 or gap < -lh * 0.9:
+            if gap > lh * BLOCK_GAP or gap < -lh * 0.9:
                 continue
             if gap < best_gap:
                 best_gap, target = gap, block
