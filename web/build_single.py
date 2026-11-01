@@ -33,6 +33,8 @@ inline = {
     'vocab': open(os.path.join(ROOT, 'data/vocab-ru.txt'), encoding='utf-8').read(),
     'examples': {name: b64(os.path.join(ROOT, 'data', name + '.jpg'))
                  for name in ('dense-a', 'dense-b', 'dense-page')},
+    'sfx': {name: 'data:audio/wav;base64,' + b64(os.path.join(ROOT, 'data', 'sfx', name + '.wav'))
+            for name in ('gong', 'hit', 'boom', 'whoosh', 'laugh', 'slap')},
     'wasmPaths': {
         'mjs': 'data:text/javascript;base64,' + mjs,
         'wasm': 'data:application/wasm;base64,' + wasm,

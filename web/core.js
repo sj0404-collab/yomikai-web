@@ -139,8 +139,12 @@
     return boxes;
   }
 
-  /** Один проход детектора по странице (одна плитка). */
-  async function detectPage(det, rgb, w, h, opts) {
+  /** Один проход детектора по куску страницы. */
+  async function detectTile(det, rgb, w, h, opts) {
+    // Плитка не больше 960 по длинной стороне => масштаб не мельче ~1:1.7.
+    // Раньше страница целиком сжималась до 960: полоса вебтуна 800×5161
+    // превращалась в 148×960, и детектор не находил НИЧЕГО (0 рамок на
+    // настоящей маньхуа). Поэтому режем на плитки, как это делает Python-версия.
     const ratio = Math.min(1, 960 / Math.max(w, h));
     const dw = Math.max(32, Math.round(w * ratio / 32) * 32);
     const dh = Math.max(32, Math.round(h * ratio / 32) * 32);
@@ -161,6 +165,56 @@
     return boxes.map(([x1, y1, x2, y2]) => [
       Math.round(x1 / pw * w), Math.round(y1 / ph * h),
       Math.round(x2 / pw * w), Math.round(y2 / ph * h)]);
+  }
+
+  function cropRGB(rgb, w, x0, y0, x1, y1) {
+    const cw = x1 - x0, ch = y1 - y0, out = new Uint8Array(cw * ch * 3);
+    for (let y = 0; y < ch; y++) {
+      const src = ((y0 + y) * w + x0) * 3, dst = y * cw * 3;
+      out.set(rgb.subarray(src, src + cw * 3), dst);
+    }
+    return out;
+  }
+
+  function dedupeBoxes(boxes) {
+    const keep = [];
+    for (const b of boxes) {
+      const bw = b[2] - b[0], bh = b[3] - b[1];
+      let dup = false;
+      for (const k of keep) {
+        const ov = Math.min(b[2], k[2]) - Math.max(b[0], k[0]);
+        const oy = Math.min(b[3], k[3]) - Math.max(b[1], k[1]);
+        if (ov > 0 && oy > 0) {
+          const inter = ov * oy;
+          const uni = bw * bh + (k[2] - k[0]) * (k[3] - k[1]) - inter;
+          if (inter / uni > 0.45) { dup = true; break; }
+        }
+      }
+      if (!dup) keep.push(b);
+    }
+    return keep.sort((a, b) => a[1] - b[1]);
+  }
+
+  /** Детектор по всей странице: бьём на плитки, если страница длинная. */
+  async function detectPage(det, rgb, w, h, opts) {
+    const TILE = opts.tileSize || 1500, OVER = 160;
+    if (Math.max(w, h) <= TILE * 1.06) return detectTile(det, rgb, w, h, opts);
+    const boxes = [];
+    const tw = Math.min(TILE, w), th = Math.min(TILE, h);
+    for (let y0 = 0; ;) {
+      const y1 = Math.min(h, y0 + th);
+      for (let x0 = 0; ;) {
+        const x1 = Math.min(w, x0 + tw);
+        const sub = cropRGB(rgb, w, x0, y0, x1, y1);
+        const got = await detectTile(det, sub, x1 - x0, y1 - y0, opts);
+        for (const b of got) boxes.push([b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0]);
+        if (x1 >= w) break;
+        x0 += tw - OVER;
+      }
+      if (y1 >= h) break;
+      y0 += th - OVER;
+    }
+    return dedupeBoxes(boxes);
   }
 
   // ── резка бокса на строки ────────────────────────────────────────────────
@@ -744,15 +798,108 @@
     return [group];
   }
 
+  // ── что это: реплика, звук (SFX) или кусок интерфейса ─────────────────────
+  //
+  // Пользователь: «не выбрасывай ХА-ХА-ХА и другие, а SFX подставляй звуки, а не
+  // голоса: пускай видит, но для чтения пропускает». Значит мало найти строку —
+  // надо решить, ЧИТАТЬ её голосом или ОЗВУЧИВАТЬ эффектом.
+  //
+  // Классификатор нарочно осторожный: лучше не узнать звук (и прочитать его как
+  // реплику), чем превратить диалог в «бум». Поэтому только явные признаки:
+  // словарь звукоподражаний, повторы слогов (ХА-ХА-ХА), и всё это на короткой
+  // строке без словарных слов.
+  const SFX_WORDS = {
+    'ГОНГ': 'gong', 'ДЗЫНЬ': 'gong', 'ДОН': 'gong', 'БОМ': 'gong',
+    'УДАР': 'hit', 'БАМ': 'hit', 'БАХ': 'hit', 'БУХ': 'hit', 'ТКАДЫ': 'hit',
+    'ХРЯСЬ': 'hit', 'ТРЕСЬ': 'hit', 'КРАК': 'hit', 'ЧПОК': 'hit', 'ХЛОП': 'hit',
+    'ХЛОБЫСЬ': 'slap', 'ШЛЁП': 'slap', 'ЩЁЛК': 'slap', 'ХЛОПОК': 'slap',
+    'БУМ': 'boom', 'ВЗРЫВ': 'boom', 'РРРАХ': 'boom', 'ГРОХОТ': 'boom',
+    'ШИЕП': 'whoosh', 'ШУХ': 'whoosh', 'ФЬЮ': 'whoosh', 'ВЖУХ': 'whoosh',
+    'СВУШ': 'whoosh', 'ШШШ': 'whoosh', 'ВЖИК': 'whoosh',
+    'ХА': 'laugh', 'ХИ': 'laugh', 'ХЕ': 'laugh', 'ХО': 'laugh', 'ХАХА': 'laugh'
+  };
+
+  function bareWords(text) {
+    return String(text || '').toUpperCase()
+      .replace(/[^А-ЯЁA-Z\-\s]/g, ' ').split(/\s+/).filter(Boolean);
+  }
+
+  /** 'gong' | 'hit' | 'slap' | 'boom' | 'whoosh' | 'laugh' | null */
+  function sfxClass(text, vocab) {
+    const words = bareWords(text);
+    if (!words.length || words.length > 3) return null;   // длинная фраза — речь
+    let cls = null, other = 0;
+    for (const w of words) {
+      const bare = w.replace(/-/g, '');
+      let parts = w.split('-').filter(Boolean);
+      // «А-ХА-ХА-ХА» — вставка «а» + повтор слога
+      if (parts.length >= 2 && parts[0].length === 1 && parts.slice(1).every((p) => p === parts[1])) {
+        parts = parts.slice(1);
+      }
+      if (SFX_WORDS[w]) { cls = cls || SFX_WORDS[w]; continue; }
+      if (SFX_WORDS[bare]) { cls = cls || SFX_WORDS[bare]; continue; }
+      if (parts.length >= 2 && parts.every((p) => p === parts[0]) && parts[0].length <= 4) {
+        cls = cls || (/^Х/.test(parts[0]) ? 'laugh' : 'hit');
+        continue;
+      }
+      // «А-ха-хаха-х», «хахаха» — смех, собранный из Х и А (без дефисов)
+      if (bare.length >= 3 && /^[ХА]+$/.test(bare) && (bare.match(/ХА/g) || []).length >= 2) {
+        cls = cls || 'laugh';
+        continue;
+      }
+      other++;
+    }
+    // хоть одно слово не звукоподражание → это речь, а не звук. Осторожность
+    // важнее полноты: «УДАР «РАДУЖНАЯ ПТИЦА…»!!!» — крик героя, не «бам».
+    if (!cls || other) return null;
+    return cls;
+  }
+
+  /** звук по ВНЕШНЕМУ ВИДУ: большие буквы-афиша, которых чтец не осилил.
+   *
+   * Замер: на 174 размеченных строках текстовый классификатор узнаёт только
+   * 2 звука из 12 (precision 100 %) — потому что крупные звуковые надписи
+   * «ФЬЮ», «ШИЕП», «ХЛОБЫСЬ» вообще не читаются (выходит «ДЬЮ», «УИЯБ»).
+   * Но их видно: они в 2 раза выше обычной строки и не содержат словарных слов.
+   */
+  function sfxByLook(line, medianH, vocab) {
+    const h = line.bottom - line.top;
+    if (!(h > medianH * 1.75)) return null;                 // не афиша — обычная строка
+    const text = String(line.text || '');
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length > 3) return null;                      // длинная фраза — речь
+    for (const w of words) {
+      const k = w.replace(/[^А-ЯЁA-Z]/gi, '').toUpperCase();
+      if (k.length >= 3 && vocab && vocab.has(k)) return null;   // есть слово — это речь
+    }
+    const cls = sfxClass(text, vocab);
+    return cls || 'hit';                                    // тип не прочли — «удар»
+  }
+
+  /** кусок интерфейса/табло: цифры, счётчики, номера страниц — не читаем и не озвучиваем */
+  function isInterfaceText(text) {
+    const chars = Array.from(String(text || '')).filter((c) => !/\s/.test(c));
+    if (!chars.length) return true;
+    const letters = chars.filter((c) => /\p{L}/u.test(c)).length;
+    const digits = chars.filter((c) => /[0-9]/.test(c)).length;
+    if (letters === 0) return true;                       // «03:19», «12», «$2.95»
+    if (digits / chars.length > 0.45) return true;        // «ОЗ:12», «1АN»
+    return false;
+  }
+
   function sameBubble(a, b) {
     const aw = a.right - a.left, bw = b.right - b.left;
     const ah = a.bottom - a.top, bh = b.bottom - b.top;
     if (Math.min(aw, bw) <= 0 || Math.min(ah, bh) <= 0) return false;
     const ov = Math.min(a.right, b.right) - Math.max(a.left, b.left);
-    if (ov <= 0 || ov / Math.min(aw, bw) < 0.30) return false;
+    // было 0.30: соседние облачка с почти совпадающими краями сливались в одну
+    // реплику («ЧАЙ ПОДАМ В БЕЛОФОЛУБОМ…»). Требуем больше перекрытия.
+    if (ov <= 0 || ov / Math.min(aw, bw) < 0.5) return false;
     if (Math.abs((a.left + a.right) / 2 - (b.left + b.right) / 2) > Math.max(aw, bw) * SHIFT) return false;
     const gap = b.top - a.bottom;
-    if (gap < -ah * 0.6 || gap > Math.max(ah, bh) * 1.2) return false;
+    // было max(ah,bh)*1.2: к реплике приклеивалось табло «03:19», стоящее ниже
+    // на целую строку. Внутри облачка межстрочный зазор ~0.3 высоты строки.
+    if (gap < -ah * 0.6 || gap > Math.max(ah, bh) * 0.7) return false;
     return !(ah > aw * 3 || bh > bw * 3);
   }
 
@@ -839,6 +986,11 @@
       } else result.push(line);
     }
 
+    // Порядок чтения: полосы сверху вниз, внутри полосы — справа налево (манга).
+    // Пробовал сортировать по колонкам целиком (правая колонка → левая): на
+    // kuro-p1 это дало другой порядок, чем в эталоне, и CER вырос. Полосы
+    // совпадают с тем, как страницу читает человек: правый пузырь полосы, потом
+    // левый.
     const ordered2 = result.slice().sort((a, b) => (a.top - b.top) || (a.left - b.left));
     const bands = [];
     for (const line of ordered2) {
@@ -870,8 +1022,8 @@
     detThr: 0.3, inkLuma: 150, minInk: 0.025, maxInk: 0.92, dupShare: 0.7,
     minCropH: 7, minConf: 0.2, rtl: true, maxBoxes: 400, readConcurrency: 2,
     blockGap: 0.6, softAccept: true, twoPass: false, stretch: false, stretchWeight: 0.6,
-    uiBandTop: 0.10, secondReader: true, thirdReader: false, pickSecond: false,
-    genre: 'manga'
+    uiBandTop: 0.10, secondReader: true, thirdReader: false, pickSecond: true,
+    genre: 'manga', useCropOk: false, sfxByLook: true, tileSize: 1500
   };
 
   /**
@@ -903,7 +1055,10 @@
       const chunk = lines.slice(i, i + opts.readConcurrency);
       const got = await Promise.all(chunk.map(async (box) => {
         if (isUiBand(rgb, width, height, box, opts)) { dropped.ui++; return null; }
-        if (!cropOk(rgb, width, box, opts)) return null;
+        // cropOk отбраковывает кропы с «чернилами на краю». Полезно против
+        // рисунков, но на kuro-p1 он выбросил строку «КАКИЕ» целиком, и реплика
+        // стала «ПЛАНЫ НА» — обрезанный хвост, который нельзя принимать.
+        if (opts.useCropOk && !cropOk(rgb, width, box, opts)) return null;
         const r = await readLine(env.rec, env.dict, rgb, width, box, opts);
         let text = r.text, conf = r.conf;
         // Жанр решает, КАКОЙ второй чтец смотреть. Замер на 174 настоящих
@@ -924,13 +1079,18 @@
       }));
       for (const g of got) {
         if (!g) { dropped.crop++; continue; }
+        // Табло, счётчики и номера страниц отбрасываем ДО склейки: иначе они
+        // прилипают к реплике («03.19 ЭЙ, ПОЧЕМУ ТЫ ТАК СДЕЛАЛ?») и портят CER.
+        if (isInterfaceText(g.text)) { dropped.ui++; continue; }
         // Строку НЕ чистим по одной: чистка и отбраковка мусора делаются на
         // уровне готовой реплики (как в Python-версии). Иначе выброшенная
         // «мусорная» строка рвёт облачко на обрывки: «Я РАССЧИ-» и «НА ВАС,»
         // остаются двумя репликами вместо одной.
         const raw = fixChars(g.text).trim();
         const alnum = Array.from(raw).filter((c) => /[\p{L}\p{N}]/u.test(c)).length;
-        if (!raw || g.conf < opts.minConf || alnum < 2) { dropped.empty++; continue; }
+        // было «< 2»: короткие реплики вроде «ГОНГ» и «НУ» выбрасывались как
+        // мусор. Теперь порог 1 символ, а мусор отсекает plausible() ниже.
+        if (!raw || g.conf < opts.minConf || alnum < 1) { dropped.empty++; continue; }
         regions.push({
           text: raw,
           left: g.box[0] / width, top: g.box[1] / height,
@@ -943,17 +1103,31 @@
 
     const replies = [];
     let junk = 0;
-    for (const line of readingOrder(regions, opts.rtl, opts.blockGap)) {
-      const text = dejunk(line.text, env.vocab);
+    const orderedLines = readingOrder(regions, opts.rtl, opts.blockGap);
+    const hs = orderedLines.map((l) => l.bottom - l.top).sort((a, b) => a - b);
+    const medianH = hs.length ? hs[Math.floor(hs.length / 2)] : 0.02;
+    for (const line of orderedLines) {
+      // Звук проверяем ДО чистки: чистка срезает «!» и ломает повторы «ХА-ХА-ХА».
+      const rawText = String(line.text || '').trim();
+      const sfx = (opts.sfxByLook === false ? null : sfxByLook(line, medianH, env.vocab))
+        || sfxClass(rawText, env.vocab);
+      const text = dejunk(rawText, env.vocab);
+      const box = [line.left * width, line.top * height, line.right * width, line.bottom * height];
+      if (sfx) {
+        // звук виден, но голосом не читается — вместо него играется эффект
+        replies.push({ text: rawText, box, kind: 'sfx', sound: sfx });
+        continue;
+      }
       if (!text || !plausible(text, env.vocab)) { junk++; continue; }
-      replies.push({
-        text,
-        box: [line.left * width, line.top * height, line.right * width, line.bottom * height]
-      });
+      replies.push({ text, box, kind: 'voice' });
     }
 
+    const voices = replies.filter((r) => r.kind === 'voice');
+    const sounds = replies.filter((r) => r.kind === 'sfx');
     return {
       replies,
+      voices,
+      sounds,
       regions,
       stats: {
         boxes: boxes.length, linesRaw: nLinesRaw, linesTuned: lines.length,
@@ -967,7 +1141,7 @@
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
   const api = {
-    pickBetter, runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
+    sfxClass, sfxByLook, isInterfaceText, pickBetter, runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
     plausible, readingOrder, normalizePage, luma, resizeRGB, inkShare,
     fixChars, fixDigits, wordOk, DEFAULTS
   };
