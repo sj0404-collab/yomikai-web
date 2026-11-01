@@ -193,6 +193,20 @@ async function boot() {
       }
       throw new Error('не нашёл файл: ' + paths.join(' / '));
     };
+    // Второй чтец — «эслав», дообученный на нашем домене (3,9 МБ, 111 классов).
+    // Если файла нет, страница работает с одним чтецом: это не ошибка.
+    const openOptional = async (paths) => {
+      for (const p of paths) {
+        try { return await ort.InferenceSession.create(p); } catch (e) { /* нет — и ладно */ }
+      }
+      return null;
+    };
+    const readOptional = async (paths) => {
+      for (const p of paths) {
+        try { const r = await fetch(p); if (r.ok) return await r.text(); } catch (e) { /* дальше */ }
+      }
+      return null;
+    };
     const [det, rec, dictText, vocabText] = await Promise.all([
       inline ? ort.InferenceSession.create(toBytes(inline.det)) : openSession(DET_PATHS),
       inline ? ort.InferenceSession.create(toBytes(inline.rec)) : openSession(REC_PATHS),
@@ -201,9 +215,20 @@ async function boot() {
     ]);
     const dict = [''].concat(dictText.split(/\r?\n/).filter(s => s.length), [' ']);
     const vocab = new Set(vocabText.split(/\r?\n/).map(s => s.trim().toUpperCase()).filter(Boolean));
-    env = { det, rec, dict, vocab, ort };
+    const [eslav, charsetText] = await Promise.all([
+      inline && inline.eslav ? ort.InferenceSession.create(toBytes(inline.eslav))
+        : openOptional(['models/eslav-ft.onnx', '../ownocr/model/eslav/eslav-ft.onnx']),
+      inline && inline.charset ? Promise.resolve(inline.charset)
+        : readOptional(['models/charset.txt', '../ownocr/charset.txt'])
+    ]);
+    env = {
+      det, rec, dict, vocab, ort, eslav,
+      charset: charsetText ? charsetText.replace(/\n$/, '').split('') : null
+    };
     const ms = Math.round(performance.now() - t0);
-    setModel(`модели готовы · ${ms} мс`);
+    setModel(`модели готовы · ${ms} мс · чтецов ${env.eslav ? 2 : 1}`);
+    $('engine').textContent = `движок: onnxruntime-web ${ort.env.versions ? ort.env.versions.web : ''} · SIMD · 1 поток` +
+      (env.eslav ? ' · чтецы: приложение + эслав (постфиксер «только в плюс»)' : ' · чтец один');
     $('btnRun').disabled = !current;
     $('engine').textContent = `движок: onnxruntime-web ${ort.env.versions ? ort.env.versions.web : ''} · SIMD · 1 поток`;
   } catch (e) {

@@ -431,6 +431,83 @@
     return { text: chars.join(''), conf: count ? score / count : 0 };
   }
 
+  /**
+   * Второй чтец — «эслав» (CTC, вход 1×1×32×W, 109 букв, «пусто» = класс 109).
+   * Дообучен на нашем домене, ошибки у него другие: где чтец приложения рвёт
+   * слово, эслав часто видит его целиком. Голосование — по словам.
+   */
+  async function readEslav(rec, charset, rgb, w, box, opts) {
+    const [x0, y0, x1, y1] = box;
+    const cw = x1 - x0, ch = y1 - y0;
+    if (cw < 4 || ch < 4) return { text: '', conf: 0 };
+    const g = new Float32Array(cw * ch);
+    for (let y = 0; y < ch; y++) {
+      let p = ((y0 + y) * w + x0) * 3;
+      for (let x = 0; x < cw; x++, p += 3) {
+        g[y * cw + x] = (299 * rgb[p] + 587 * rgb[p + 1] + 114 * rgb[p + 2]) / 1000;
+      }
+    }
+    const H = 32;
+    const ww = Math.max(8, Math.round(cw * H / ch));
+    const xs = new Float32Array(ww), ys = new Float32Array(H);
+    for (let x = 0; x < ww; x++) xs[x] = clamp((x + 0.5) * cw / ww - 0.5, 0, cw - 1);
+    for (let y = 0; y < H; y++) ys[y] = clamp((y + 0.5) * ch / H - 0.5, 0, ch - 1);
+    const t = new Float32Array(H * ww);
+    for (let y = 0; y < H; y++) {
+      const y0i = Math.floor(ys[y]), y1i = Math.min(ch - 1, y0i + 1), fy = ys[y] - y0i;
+      for (let x = 0; x < ww; x++) {
+        const x0i = Math.floor(xs[x]), x1i = Math.min(cw - 1, x0i + 1), fx = xs[x] - x0i;
+        const a = g[y0i * cw + x0i] + (g[y0i * cw + x1i] - g[y0i * cw + x0i]) * fx;
+        const b = g[y1i * cw + x0i] + (g[y1i * cw + x1i] - g[y1i * cw + x0i]) * fx;
+        // нормировка /127.5-1 — та, на которой модель учили и на которой она
+        // даёт 8 % на строках (на /255 выходит хуже: 10,6 % против 2,7 %)
+        t[y * ww + x] = (a + (b - a) * fy) / 127.5 - 1;
+      }
+    }
+    const out = await rec.run({ [rec.inputNames[0]]: new (opts.ort.Tensor)('float32', t, [1, 1, H, ww]) });
+    const data = out[rec.outputNames[0]].data;
+    const dims = out[rec.outputNames[0]].dims;
+    const T = dims[0], C = dims[dims.length - 1];
+    let text = '', prev = -1, score = 0, count = 0;
+    for (let i = 0; i < T; i++) {
+      let best = 0, bestV = data[i * C];
+      for (let c = 1; c < C; c++) {
+        const v = data[i * C + c];
+        if (v > bestV) { bestV = v; best = c; }
+      }
+      if (best !== prev && best !== 109 && best < charset.length) text += charset[best];
+      if (best !== 109 && best !== prev) { score += bestV; count++; }
+      prev = best;
+    }
+    return { text, conf: count ? score / count : 0 };
+  }
+
+  /**
+   * Голосование двух чтецов — только «в плюс».
+   *
+   * Замер на трёх страницах показал, что простое большинство слов вредит: эслав
+   * иногда портит слово, которое чтец приложения прочитал верно, и реплика
+   * становится хуже («Я РАССЧИТ ЫПОНМТ НА ВАС»). Поэтому правило строгое: слово
+   * эслава берём ТОЛЬКО если у приложения это слово не словарное, а у эслава —
+   * словарное. В остальных случаях остаётся прочтение приложения. Такой постфиксер
+   * может улучшить, но не может испортить.
+   */
+  function voteText(a, b, vocab) {
+    if (!b || !a) return a || b;
+    const wa = a.split(/\s+/).filter(Boolean), wb = b.split(/\s+/).filter(Boolean);
+    if (wa.length !== wb.length) return a;              // разное число слов — не трогаем
+    // похожие буквы (Δ→Д, латиница→кириллица) приводим ДО проверки по словарю:
+    // иначе «ΔА» не находится в словаре, и его подменяет чужое «ДО»
+    const key = (w) => fixChars(w).replace(/^[.,!?…—«»"():;%]+|[.,!?…—«»"():;%]+$/g, '').toUpperCase();
+    let changed = 0;
+    const out = wa.map((w, i) => {
+      const ka = key(w), kb = key(wb[i]);
+      if (!vocab.has(ka) && vocab.has(kb)) { changed++; return wb[i]; }
+      return w;
+    }).join(' ');
+    return changed ? out : a;
+  }
+
   // ── чистка текста (text_clean.py) ────────────────────────────────────────
 
   const LOOKALIKE = {
@@ -725,7 +802,7 @@
     detThr: 0.3, inkLuma: 150, minInk: 0.025, maxInk: 0.92, dupShare: 0.7,
     minCropH: 7, minConf: 0.2, rtl: true, maxBoxes: 400, readConcurrency: 2,
     blockGap: 0.6, softAccept: true, twoPass: false, stretch: false, stretchWeight: 0.6,
-    uiBandTop: 0.10
+    uiBandTop: 0.10, secondReader: true
   };
 
   /**
@@ -759,7 +836,12 @@
         if (isUiBand(rgb, width, height, box, opts)) { dropped.ui++; return null; }
         if (!cropOk(rgb, width, box, opts)) return null;
         const r = await readLine(env.rec, env.dict, rgb, width, box, opts);
-        return { box, text: r.text, conf: r.conf };
+        let text = r.text, conf = r.conf;
+        if (env.eslav && env.charset && opts.secondReader) {
+          const e = await readEslav(env.eslav, env.charset, rgb, width, box, opts);
+          if (e.text) text = voteText(text, e.text, env.vocab);
+        }
+        return { box, text, conf };
       }));
       for (const g of got) {
         if (!g) { dropped.crop++; continue; }
