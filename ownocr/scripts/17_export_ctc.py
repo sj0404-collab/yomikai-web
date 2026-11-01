@@ -15,7 +15,18 @@ dummy = torch.zeros(1, 1, 32, 64)
 torch.onnx.export(net, dummy, dst, input_names=['x'], output_names=['logit'],
                   dynamic_axes={'x': {3: 'width'}, 'logit': {0: 'T'}},
                   opset_version=13, do_constant_folding=True)
-print('сохранено:', dst, os.path.getsize(dst) // 1024, 'КБ')
+# Веса зашиваем внутрь файла. `torch.onnx.export` умеет вынести их в
+# `<имя>.onnx.data` и оставить в модели ссылки — тогда залитый в репозиторий
+# один .onnx не открывается: «External data path does not exist». На этом я уже
+# потерял дообученную модель, поэтому теперь это отдельный шаг и проверка.
+import onnx
+_m = onnx.load(dst)
+onnx.save(_m, dst, save_as_external_data=False)
+_m2 = onnx.load(dst, load_external_data=False)
+_ext = [i.name for i in _m2.graph.initializer if i.data_location == onnx.TensorProto.EXTERNAL]
+print('сохранено:', dst, os.path.getsize(dst) // 1024, 'КБ · внешних тензоров', len(_ext))
+if _ext:
+    raise SystemExit('веса остались снаружи — такой файл нельзя заливать один')
 
 # сверка torch ↔ onnx
 import onnxruntime as ort

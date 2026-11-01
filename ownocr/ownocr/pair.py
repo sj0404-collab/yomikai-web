@@ -321,18 +321,10 @@ class OwnReader:
         # сводит голоса пословно (см. ownocr/crew.py). Редактор и контролёр —
         # те же функции, что уже отлажены в движке.
         # Работник «эслав» подключается, если есть дообученная модель.
-        # «Эславов» может быть несколько: дообученный на нашем домене и исходные
-        # чужие. Список задаётся через запятую — каждый становится отдельным
-        # работником бригады со своим голосом.
-        self.eslavs = []
-        for path in os.environ.get('OWNOCR_ESLAV_MODEL', '').split(','):
-            path = path.strip()
-            if not path or not os.path.exists(path):
-                continue
-            try:
-                self.eslavs.append(CtcLineReader(path))
-            except Exception as exc:                      # модель есть, но битая
-                print(f'эслав не подключён ({path}): {exc}')
+        # Роли бригады. Реестр в ownocr/roles.py: добавить чтеца — одна запись,
+        # голосование и веса уже умеют любое число работников.
+        from . import roles as _roles
+        self.roles = _roles.build(_roles.enabled(), ocr=self.ocr)
         self.foreman = Foreman(
             getattr(self.ocr, 'vocab', set()),
             fix=lambda w: self.ocr._fix_word(w) if hasattr(self.ocr, '_fix_word') else w,
@@ -452,27 +444,18 @@ class OwnReader:
             # дали одно и то же слово в слово, следующий ничего не изменит.
             if self.vote and len(seen) >= 2 and len({t for t, _ in seen}) == 1:
                 break
-        # «Эслав» читает строку на нескольких растяжениях: на настоящих кропах
-        # растяжение 1.1 дало 20.0 % против 24.3 % при 1.0 (замер на отложенных
-        # строках). Каждое растяжение — отдельный голос работника.
-        for k, ctc in enumerate(self.eslavs if not harsh else []):
-            # растяжение включаем только для длинных строк: на коротком кропе
-            # оно растягивает сами буквы и портит результат (замер: dense-page
-            # 2.9 → 13.8 % при включённом растяжении на всех кропах)
-            wide = g.shape[1] >= ESLAV_WIDE
-            variants = [(1.0, 'eslav')] + ([(ESLAV_STRETCH, 'eslav1')] if wide else [])
-            for st, name in variants:
-                try:
-                    etext, econf = ctc.read(g, stretch=st)
-                    if etext.strip():
-                        # Доверие CTC-модели берём ФИКСИРОВАННЫМ: после
-                        # дообучения она выдаёт вероятности ~0,99 почти всегда, и
-                        # в голосовании перебивала ученика, хотя ошибается не
-                        # реже (замер: CER страниц 3,7 → 16,1 % на её родных 0,99).
-                        seen.append((etext, ESLAV_CONF))
-                        self._last_workers.append(name if k == 0 else f'{name}_{k}')
-                except Exception:
-                    pass
+        # Роли бригады: каждая — отдельный чтец со своим весом и зоной. Список
+        # задаётся OWNOCR_ROLES («хоть 5, хоть 10»), по умолчанию те же две роли,
+        # что работали раньше: эслав и он же на растянутой строке.
+        for role in (self.roles if not harsh else []):
+            try:
+                for text, conf in role.emit(g):
+                    if text.strip():
+                        seen.append((text, conf))
+                        self._last_workers.append(role.name)
+            except Exception as exc:
+                if os.environ.get('OWNOCR_ROLE_DEBUG'):
+                    print(f'роль «{role.name}» упала: {exc}')
         if CREW and seen and not harsh:
             props = [Proposal(worker, WEIGHTS.get(worker, 0.9), text, conf)
                      for worker, (text, conf) in zip(self._last_workers, seen)]
