@@ -863,8 +863,11 @@
    * Но их видно: они в 2 раза выше обычной строки и не содержат словарных слов.
    */
   function sfxByLook(line, medianH, vocab) {
-    const h = line.bottom - line.top;
-    if (!(h > medianH * 1.75)) return null;                 // не афиша — обычная строка
+    const h = line.bottom - line.top;                 // нормировано: доля высоты страницы
+    // На странице, где ВСЁ — крупные надписи, медиана сама большая, и правило
+    // «выше медианы» не срабатывает (на manhua3 так терялись все звуки).
+    // Поэтому второй, абсолютный признак: строка выше 4,5 % высоты страницы.
+    if (!(h > medianH * 1.75 || h > 0.045)) return null;
     const text = String(line.text || '');
     const words = text.split(/\s+/).filter(Boolean);
     if (words.length > 3) return null;                      // длинная фраза — речь
@@ -1065,8 +1068,9 @@
         // строках: наш чтец, дообученный на манге, даёт на манге 1,1 %, а на
         // вебтуне 29,8 %; чтец, обученный на вебтуне (манхва+маньхуа) — 0,2 %
         // на манхве и 1,9 % на маньхуа. Один чтец на всё — это 8–14 %.
-        const eslavModel = (opts.genre === 'webtoon' && env.eslavWebtoon)
-          ? env.eslavWebtoon : env.eslav;
+        const eslavModel = opts.genre === 'webtoon' ? (env.eslavWebtoon || env.eslav)
+          : opts.genre === 'comic' ? (env.eslavComic || env.eslav)
+          : env.eslav;
         if (eslavModel && env.charset && opts.secondReader) {
           const e = await readEslav(eslavModel, env.charset, rgb, width, box, opts);
           if (e.text) text = opts.pickSecond ? pickBetter(text, e.text, env.vocab) : voteText(text, e.text, env.vocab);

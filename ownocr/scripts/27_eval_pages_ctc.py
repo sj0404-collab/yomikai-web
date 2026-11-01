@@ -43,7 +43,8 @@ def main():
     ap.add_argument('--show', type=int, default=0, help='показать N примеров на страницу')
     a = ap.parse_args()
 
-    rows = load('data-real', 'dense-a') + load('data-pages', 'other')
+    rows = (load('data-real', 'dense-a') + load('data-pages', 'other')
+            + load('data-manhua', 'manhua') + load('data-comic', 'comic'))
     reader = CtcLineReader(a.model)
     per = {}
     for r in rows:

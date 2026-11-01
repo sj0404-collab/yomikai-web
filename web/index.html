@@ -81,6 +81,7 @@
                          border:1px solid var(--line);border-radius:9px;padding:7px 9px">
             <option value="manga">манга</option>
             <option value="webtoon">манхва / маньхуа</option>
+            <option value="comic">комикс</option>
           </select>
           <button class="primary" id="btnRun" disabled>Распознать</button>
           <button id="btnSpeak" disabled title="прочитать реплики голосом; звуки не читаются, а играются">🔊 Читать вслух</button>
@@ -231,14 +232,19 @@ async function boot() {
         : readOptional(['models/charset.txt', '../ownocr/charset.txt'])
     ]);
     // второй чтец «под жанр»: на манге и на вебтуне нужны РАЗНЫЕ модели
-    let eslavWebtoon = null;
+    let eslavWebtoon = null, eslavComic = null;
     try {
       eslavWebtoon = inline && inline.eslavWebtoon
         ? await ort.InferenceSession.create(toBytes(inline.eslavWebtoon))
         : await openOptional(['models/eslav-webtoon.onnx']);
     } catch (e) { eslavWebtoon = null; }
+    try {
+      eslavComic = inline && inline.eslavComic
+        ? await ort.InferenceSession.create(toBytes(inline.eslavComic))
+        : await openOptional(['models/eslav-comic.onnx']);
+    } catch (e) { eslavComic = null; }
     env = {
-      det, rec, dict, vocab, ort, eslav, eslavWebtoon,
+      det, rec, dict, vocab, ort, eslav, eslavWebtoon, eslavComic,
       charset: charsetText ? charsetText.replace(/\n$/, '').split('') : null
     };
     const ms = Math.round(performance.now() - t0);
