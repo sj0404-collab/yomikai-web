@@ -1,0 +1,98 @@
+name: чтец на трудном — мелкий шрифт, рукописный, звуки
+
+# Зачем на раннере: 7 эпох × 150 шагов CTC с тремя видами аугментации.
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'эпох'
+        default: '7'
+      steps:
+        description: 'шагов на эпоху'
+        default: '150'
+  push:
+    paths:
+      - 'ownocr/scripts/31_finetune_hard.py'
+      - 'ownocr/scripts/30_sfx_eval.py'
+      - 'ownocr/data-pages/**'
+      - 'ownocr/data-manhua/**'
+      - 'ownocr/data-comic/**'
+      - '.github/workflows/ownocr-finetune-hard.yml'
+
+concurrency:
+  group: ownocr-finetune-hard
+  cancel-in-progress: false
+
+jobs:
+  hard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EPOCHS: ${{ github.event.inputs.epochs || '7' }}
+      STEPS: ${{ github.event.inputs.steps || '150' }}
+      PYTHONUNBUFFERED: '1'
+      OMP_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 'зависимости — torch только CPU'
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy opencv-python-headless pillow
+          python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --quiet onnx onnxruntime onnxscript pytesseract
+      - name: 'шрифты из кэша'
+        id: fonts
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/fonts
+          key: cyr-fonts-300-v1
+      - name: 'скачать шрифты'
+        if: steps.fonts.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /home/runner/fonts
+          python ownocr/scripts/01_fetch_fonts.py --limit 300 --out /home/runner/fonts --layout /tmp/ownocr
+      - name: 'замер ДО: страницы и звуки'
+        run: |
+          cd ownocr
+          mkdir -p out
+          python scripts/27_eval_pages_ctc.py --model model/eslav/eslav-ft-all.onnx \
+            --out out/hard-before.json --show 3 2>&1 | tee out/hard-before.txt
+          python scripts/30_sfx_eval.py --eslav model/eslav/eslav-ft-all.onnx \
+            --out out/sfx-before.json 2>&1 | tee out/sfx-before.txt
+      - name: 'обучение на трудном'
+        run: |
+          cd ownocr
+          python scripts/31_finetune_hard.py --epochs "$EPOCHS" --steps "$STEPS" \
+            --eval-pages manhua2,reader-p1 2>&1 | tee out/finetune-hard.txt
+      - name: 'экспорт и сверка'
+        run: |
+          cd ownocr
+          test -f out/eslav-hard.pt || { echo 'обучение не дало лучшего состояния'; exit 1; }
+          python scripts/17_export_ctc.py --src out/eslav-hard.pt --dst out/eslav-hard.onnx 2>&1 | tee out/export-hard.txt
+      - name: 'замер ПОСЛЕ: страницы и звуки'
+        run: |
+          cd ownocr
+          python scripts/27_eval_pages_ctc.py --model out/eslav-hard.onnx \
+            --out out/hard-after.json --show 3 2>&1 | tee out/hard-after.txt
+          python scripts/30_sfx_eval.py --eslav out/eslav-hard.onnx \
+            --out out/sfx-after.json 2>&1 | tee out/sfx-after.txt
+      - name: 'артефакты'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslav-hard
+          path: |
+            ownocr/out/eslav-hard.onnx
+            ownocr/out/eslav-hard.pt
+            ownocr/out/eslav-hard.json
+            ownocr/out/hard-before.txt
+            ownocr/out/hard-after.txt
+            ownocr/out/sfx-before.txt
+            ownocr/out/sfx-after.txt
+            ownocr/out/finetune-hard.txt
+          retention-days: 30

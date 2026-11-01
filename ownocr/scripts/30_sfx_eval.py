@@ -76,6 +76,11 @@ def load(dirname, default_page):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--eslav', default=os.path.join(ROOT, 'model/eslav/eslav-ft-all.onnx'))
+    ap.add_argument('--out', default=os.path.join(ROOT, 'out', 'sfx-eval.json'))
+    args = ap.parse_args()
     rows = []
     for d, dp in (('data-real', 'dense-a'), ('data-pages', 'p'), ('data-manhua', 'm'),
                   ('data-comic', 'c')):
@@ -83,7 +88,7 @@ def main():
     # «ГОНГ» с kuro-p1 руками: он не попал в строки страницы, но помечен как звук
     reader_app = CtcReader('/home/user/cand/q/koma_rec-fp16.onnx',
                            '/home/user/koma_models/koma_dict.txt')
-    reader_esl = CtcLineReader(os.path.join(ROOT, 'model/eslav/eslav-ft-all.onnx'))
+    reader_esl = CtcLineReader(args.eslav)
 
     # медиана высоты строки по странице — так же, как считает браузер
     import numpy as np
@@ -120,6 +125,7 @@ def main():
             tn += 1
     rec = tp / max(1, tp + fn)
     prec = tp / max(1, tp + fp)
+    print(f'чтец {os.path.basename(args.eslav)}')
     print(f'строк {len(rows)} · звуков в эталоне {tp + fn} · найдено {tp}')
     print(f'  узнал звуки (recall)   {100 * rec:.0f} %')
     print(f'  из названных звуков верно (precision) {100 * prec:.0f} %')
@@ -128,7 +134,7 @@ def main():
         print(f'   [{kind}] {page}: эталон {ref!r} → прочтено {got!r}')
     json.dump({'всего': len(rows), 'звуков': tp + fn, 'узнал': tp, 'recall': rec,
                'precision': prec, 'fp': fp, 'fn': fn},
-              open(os.path.join(ROOT, 'out', 'sfx-eval.json'), 'w'), ensure_ascii=False, indent=1)
+              open(args.out, 'w'), ensure_ascii=False, indent=1)
 
 
 if __name__ == '__main__':
