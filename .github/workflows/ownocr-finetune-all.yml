@@ -1,0 +1,115 @@
+name: дообучение чтеца на манге и манхве (все данные)
+
+# Зачем на раннере: три этапа × 8 эпох × 150 шагов CTC — это счёт на CPU.
+# Раннер даёт 4 ядра бесплатно, дома это заняло бы часы.
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'эпох на этап'
+        default: '8'
+      steps:
+        description: 'шагов на эпоху'
+        default: '150'
+      seed:
+        description: 'зерно'
+        default: '3'
+      eval_pages:
+        description: 'страницы, отложенные целиком (через запятую)'
+        default: 'kuro-p2,reader-p1'
+  push:
+    paths:
+      - 'ownocr/scripts/26_finetune_all.py'
+      - 'ownocr/scripts/27_eval_pages_ctc.py'
+      - 'ownocr/data-pages/**'
+      - '.github/workflows/ownocr-finetune-all.yml'
+
+concurrency:
+  group: ownocr-finetune-all
+  cancel-in-progress: false
+
+jobs:
+  finetune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      EPOCHS: ${{ github.event.inputs.epochs || '8' }}
+      STEPS: ${{ github.event.inputs.steps || '150' }}
+      SEED: ${{ github.event.inputs.seed || '3' }}
+      EVAL_PAGES: ${{ github.event.inputs.eval_pages || 'kuro-p2,reader-p1' }}
+      FONTS_DIR: /home/runner/fonts
+      PYTHONUNBUFFERED: '1'
+      OMP_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 'зависимости — torch только CPU'
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy opencv-python-headless pillow
+          python -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install --quiet onnx onnxruntime
+          python -c "import torch; print('torch', torch.__version__, 'ядер', torch.get_num_threads())"
+
+      - name: 'шрифты из кэша'
+        id: fonts
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/fonts
+          key: cyr-fonts-300-v1
+
+      - name: 'скачать шрифты'
+        if: steps.fonts.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$FONTS_DIR"
+          python ownocr/scripts/01_fetch_fonts.py --limit 300 --out "$FONTS_DIR" --layout /tmp/ownocr
+          ls "$FONTS_DIR" | wc -l
+
+      - name: 'замер ДО на всех размеченных страницах'
+        run: |
+          cd ownocr
+          mkdir -p out
+          python scripts/27_eval_pages_ctc.py --model model/eslav/eslav-ft.onnx \
+            --out out/eval-before.json --show 3 2>&1 | tee out/eval-before.txt
+
+      - name: 'дообучение: манга → второй шрифт → манхва'
+        run: |
+          cd ownocr
+          python scripts/26_finetune_all.py --epochs "$EPOCHS" --steps "$STEPS" \
+            --seed "$SEED" --eval-pages "$EVAL_PAGES" 2>&1 | tee out/finetune-all.txt
+
+      - name: 'экспорт в ONNX и сверка torch ↔ onnx'
+        run: |
+          cd ownocr
+          test -f out/eslav-ft.pt || { echo 'обучение не дало лучшего состояния'; exit 1; }
+          python scripts/17_export_ctc.py 2>&1 | tee out/export-all.txt
+          grep -q 'расхождение' out/export-all.txt
+
+      - name: 'замер ПОСЛЕ на всех размеченных страницах'
+        run: |
+          cd ownocr
+          python scripts/27_eval_pages_ctc.py --model out/eslav-ft.onnx \
+            --out out/eval-after.json --show 3 2>&1 | tee out/eval-after.txt
+
+      - name: 'артефакты'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslav-ft-all-pages
+          path: |
+            ownocr/out/eslav-ft.onnx
+            ownocr/out/eslav-ft.pt
+            ownocr/out/eslav-ft.json
+            ownocr/out/eval-before.json
+            ownocr/out/eval-after.json
+            ownocr/out/eval-before.txt
+            ownocr/out/eval-after.txt
+            ownocr/out/finetune-all.txt
+            ownocr/out/export-all.txt
+          retention-days: 30
