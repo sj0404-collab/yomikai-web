@@ -76,10 +76,12 @@ def _word_ok(word: str) -> tuple[bool, str]:
     # («хbЮгО», «ЮЧг») — такое слово на русской странице не читается
     if any(c in LATIN_ONLY for c in core):
         return False, ''
-    # перепутанный регистр внутри слова («хьЮгО», «щЕПоТ») — почти всегда мусор:
-    # настоящий текст либо ВЕСЬ ЗАГЛАВНЫМИ, либо строчными, либо с Заглавной
+    # Перепутанный регистр — не повод выбрасывать слово: у чтеца приложения
+    # латиница и кириллица идут вперемешку, и «ЛИ эТО» — это «ЛИ ЭТО», а не
+    # мусор. Приводим к тому регистру, которого в слове больше.
     if not (core.isupper() or core.islower() or core.istitle()):
-        return False, ''
+        upper_share = sum(1 for c in core if c.isupper()) / max(1, sum(1 for c in core if c.isalpha()))
+        core = core.upper() if upper_share >= 0.6 else core.lower()
     # двойная гласная («ии»), три согласных подряд и слова без опоры на гласные —
     # это обрывки штриховки, а не слова
     if any(upper[i] == upper[i + 1] and upper[i] in VOWELS for i in range(len(upper) - 1)):

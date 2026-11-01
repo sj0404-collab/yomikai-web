@@ -15,6 +15,7 @@ from PIL import Image
 from .text_clean import dejunk, plausible
 from .crew import Foreman, Proposal, WEIGHTS
 from .engine import OwnOCR
+from .det_tune import tune as tune_lines
 from .page_det import PageDetector, Region, bubbles_of, split_panels, text_lines
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -357,6 +358,13 @@ class OwnReader:
         # на dense-b тёмный рисунок дал лишнюю «реплику» и CER 102 %. Поэтому
         # читаем оба варианта и берём тот, где больше словарных слов.
         best = self._read_scales(g, harsh)
+        # Языковой отбор: победитель голосования может быть мусором («ЮЁЁЩ» на
+        # кропе «ВСЁ ЕЩЁ»), а другой работник — прав («BCЁ EЩE»). Тогда решает
+        # язык, а не вес голоса.
+        if best[0]:
+            alt = self._language_fallback(best[0])
+            if alt != best[0]:
+                best = (alt, best[1])
         # Мастер-наставник: если ни один работник не дал ни одного словарного
         # слова, зовём его — он читает тот же кроп на нестандартных увеличениях
         # (×4, ×5) и с выровненным контрастом. Это не «ещё один масштаб всем»:
@@ -393,6 +401,22 @@ class OwnReader:
         # поэтому подстраховка убрана — она только тратит время.
         return best
 
+    def _language_fallback(self, text: str) -> str:
+        """Если победитель голосования — мусор, взять того, чей текст читается.
+
+        Пример с dense-b: на кропе «ВСЁ ЕЩЁ» ученик выдал «ЮЁЁЩ» и выиграл по
+        весу, а приложение прочитало «BCE EЩE» — то есть верно. Такое же было с
+        «НО...» (ученик: «НАД»). Язык тут единственный судья: берём первое по
+        весу предложение, которое после чистки состоит из правдоподобных слов.
+        """
+        if not text or (plausible(dejunk(text), VOCAB) and dejunk(text)):
+            return text
+        for cand, weight, _conf in sorted(self._last_props, key=lambda p: -p[1]):
+            fixed = dejunk(cand)
+            if fixed and plausible(fixed, VOCAB):
+                return cand
+        return text
+
     def _read_rescue(self, g, harsh):
         """Мастер-наставник: нестандартные увеличения и выровненный контраст."""
         import cv2
@@ -420,6 +444,7 @@ class OwnReader:
         scales = self.scales_harsh if harsh else self.scales
         seen: list[tuple[str, float]] = []
         self._last_workers = []
+        self._last_props = []
         for i, k in enumerate(scales):
             big = cv2.resize(g, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC) if k > 1.01 else g
             if harsh and self.blur_harsh:
@@ -463,6 +488,9 @@ class OwnReader:
             text, conf = self.foreman.decide(props)
             if text:
                 best = (text, max(conf, best[1]))
+            # Запоминаем ВСЕ предложения: если победитель окажется мусором, есть
+            # из чего выбрать (см. `_language_fallback`).
+            self._last_props = [(p.text, p.weight, p.conf) for p in props]
         elif self.vote and len(seen) > 1:
             if PICK == 'score':
                 text, conf = _score_pick(seen)
@@ -499,6 +527,8 @@ STEP = int(os.environ.get('OWNOCR_PAD_STEP', '3'))      # сколько доб�
 TRIES = int(os.environ.get('OWNOCR_PAD_TRIES', '3'))    # до 9 px в каждую сторону
 PAD_MODE = os.environ.get('OWNOCR_PAD', 'off')   # по умолчанию — как настроено чтение        # edges | off | frac
 DEJUNK = os.environ.get('OWNOCR_DEJUNK', '1') == '1'
+DET_TUNE = os.environ.get('OWNOCR_DET_TUNE_ON', '1') == '1'
+DEBUG_LINES = os.environ.get('OWNOCR_DEBUG_LINES', '0') == '1'
 PAD_FRAC = float(os.environ.get('OWNOCR_PAD_FRAC', '0.0'))
 
 
@@ -602,30 +632,41 @@ def read_page(det: PageDetector, reader, rgb: np.ndarray, minconf: float = 0.8):
     boxes = det.detect_page(rgb)
     n_boxes = len(boxes)
     regions, n_lines, broken = [], 0, 0
+    # Все строки страницы собираем сразу и дочищаем вместе: детектор отдаёт
+    # одну и ту же строку по два-три раза (precision 80 % против 97,6 % после
+    # снятия дублей), а дубли внутри одной страницы видно только на всей пачке.
+    all_lines = []
     for box in boxes[:400]:
-        for (x0, y0, x1, y1) in text_lines(rgb, box):
-            n_lines += 1
-            # Поля вокруг строки. Бокс приходит обрезанным по чернилам, и на
-            # тонких штрихах сглаженный край буквы срезался: «О» теряла бок,
-            # «Ш» — зубцы. Отступ в 8 % высоты строки это лечит; страницу не
-            # расширяем за её границы.
-            crop, x0, y0, x1, y1 = _padded(rgb, x0, y0, x1, y1)
-            ok_crop, why = crop_ok(crop)
-            if not ok_crop:
-                broken += 1
-                continue
-            if crop.shape[0] > crop.shape[1] * 1.8:          # вертикальная надпись
-                crop = np.rot90(crop, k=-1)
-            if hasattr(reader, 'ocr'):
-                text, score = reader.read(np.array(Image.fromarray(crop).convert('L')), harsh=harsh)
-            else:
-                text, score = reader.read(crop)
-            text = text.strip()
-            if TIDY:
-                text = tidy(text)
-            alnum = sum(c.isalnum() for c in text)
-            if text and score >= minconf and alnum >= 2 and alnum / max(1, len(text)) >= 0.5:
-                regions.append(Region(text, x0 / W, y0 / H, x1 / W, y1 / H, score))
+        all_lines.extend(text_lines(rgb, box))
+    if DET_TUNE:
+        all_lines = tune_lines(rgb, all_lines)
+    for (x0, y0, x1, y1) in all_lines:
+        n_lines += 1
+        # Поля вокруг строки. Бокс приходит обрезанным по чернилам, и на
+        # тонких штрихах сглаженный край буквы срезался: «О» теряла бок,
+        # «Ш» — зубцы. Отступ добавляется ТОЛЬКО там, где буква касается
+        # края (см. `_padded`); ровные 8 % высоты чтение ломают.
+        crop, x0, y0, x1, y1 = _padded(rgb, x0, y0, x1, y1)
+        ok_crop, why = crop_ok(crop)
+        if not ok_crop:
+            broken += 1
+            continue
+        if crop.shape[0] > crop.shape[1] * 1.8:          # вертикальная надпись
+            crop = np.rot90(crop, k=-1)
+        if hasattr(reader, 'ocr'):
+            text, score = reader.read(np.array(Image.fromarray(crop).convert('L')), harsh=harsh)
+        else:
+            text, score = reader.read(crop)
+        text = text.strip()
+        if TIDY:
+            text = tidy(text)
+        alnum = sum(c.isalnum() for c in text)
+        ok = bool(text) and score >= minconf and alnum >= 2 and alnum / max(1, len(text)) >= 0.5
+        if DEBUG_LINES:
+            print(f'  строка y={y0:4d} x={x0:3d} {x1 - x0:3d}×{y1 - y0:2d} '
+                  f'{text!r} уверенность {score:.2f} {"принята" if ok else "ОТБРОШЕНА"}')
+        if ok:
+            regions.append(Region(text, x0 / W, y0 / H, x1 / W, y1 / H, score))
     lines = [line for panel in split_panels(regions, True) for line in bubbles_of(panel, True)]
     # Отбраковка «неречи» на уровне собранной реплики, а не отдельных кусков:
     # если фильтровать куски, мусор с рисунка перестаёт склеивать облачка и одна
