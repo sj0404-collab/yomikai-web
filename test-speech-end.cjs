@@ -68,4 +68,6 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   ok(R.spoken.has(R.spokenKey(0, 'ГОЛОС ДОЧИТАЛ')),
     'после конца фразы реплика отмечена прочитанной');
   ok(went.length >= 1, 'и только тогда чтение пошло дальше');
+  // run_all.sh считает тест пройденным только по последней строке.
+  console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })();
