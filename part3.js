@@ -630,6 +630,34 @@ const Words = {
     });
     return kept.join(' ').replace(/\s{2,}/g, ' ').trim();
   },
+  /**
+   * Служебная строка самого приложения, а не реплика.
+   *
+   * На скриншотах в кадр попадает наша же плашка «Полоса 1 распознана: 3 реплик ·
+   * 4.1 с (нативно, 14 строк)», счётчик прогресса «Распознаём… 1/6» и подписи
+   * кнопок. Читалка принимала их за реплику: на полосе 7 (скриншот 2.11) в
+   * тексте страницы оказалась ровно одна «реплика» — эта плашка.
+   *
+   * Правило по ОДНОМУ признаку ложно срабатывает на живой манге («распознала»
+   * в реплике), поэтому нужно совпадение двух признаков, кроме совсем явных
+   * случаев («14 строк)», «1/6»).
+   */
+  isServiceText(text) {
+    const t = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!t) return false;
+    if (/^\d+\s*\/\s*\d+$/.test(t)) return true;                    // «1/6»
+    if (/^\d+\s*(строк|строки|строк\))/.test(t)) return true;        // «14 строк)»
+    if (/^распозна[её]м/.test(t)) return true;                          // «Распознаём…»
+    const marks = [];
+    if (/распозна/.test(t)) marks.push(1);
+    if (/реплик/.test(t)) marks.push(1);
+    if (/\d\s*[.,]\s*\d\s*с\b|\b\d+\s*с\b/.test(t)) marks.push(1);  // «4.1 с»
+    if (/нативно|нативная|встроенн/.test(t)) marks.push(1);
+    if (/полоса\s*\d/.test(t)) marks.push(1);
+    if (/строк/.test(t) && /\d/.test(t)) marks.push(1);
+    return marks.length >= 2;
+  },
+
   /** Починка реплики: слова по словарю + висячий дефис в конце. */
   finish(text, keepAll) {
     let t = joinHyphens(String(text || ''));
@@ -685,6 +713,8 @@ const Words = {
    */
   polish(text, junkRatio, conf) {
     const raw = String(text || '');
+    // Плашка приложения и счётчик прогресса — не реплика (см. isServiceText).
+    if (this.isServiceText(raw)) return '';
     if (!this.ready) return this.finish(raw);
     const thr = junkRatio ?? 0.6;
     // {2,} а не {3,}: «Тг. чв» — тоже не реплика, а короткие настоящие слова
