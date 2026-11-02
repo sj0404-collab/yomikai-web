@@ -302,7 +302,15 @@ class OcrEngine(private val modelsDir: File) {
                 // затем — прежний `rec`, если второй не поднялся или вернул пусто.
                 var pair: Pair<String, Double> = "" to 0.0
                 try {
-                    if (eslav != null) pair = decodeEslav(crop)
+                    // Любая ошибка второго чтеца НЕ должна ломать кадр: падаем на
+                    // прежний путь `rec`. Это важно, потому что в песочнице нет
+                    // Android и поведение на телефоне проверяется только установкой.
+                    if (eslav != null) {
+                        pair = try { decodeEslav(crop) } catch (t: Throwable) {
+                            GlensEngine.log("второй чтец: ошибка ${t.message ?: t.javaClass.simpleName}, читаю прежним")
+                            "" to 0.0
+                        }
+                    }
                     if (pair.first.isBlank()) pair = decode(crop, wide)
                 } finally { crop.recycle() }
                 val (text, conf) = pair
