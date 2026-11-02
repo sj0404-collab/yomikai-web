@@ -137,8 +137,12 @@ let toastEl = null;
   const marked = [];
   api.Reader.markSpoken = (p, t) => marked.push(t);
   global.window.__komaSpeechEvent(call.id, 'start', '');
-  ok(marked.length === 1 && marked[0] === line.text, 'после start реплика отмечена прочитанной');
+  // Отметка «прочитано» ставится НЕ на старте, а на конце фразы: телефон 2.11
+  // (скриншот 20:11) показал все реплики «прочитанными» при полной тишине —
+  // Android TTS присылал start, а звука не было. Старт ничего не доказывает.
+  ok(marked.length === 0, 'после start реплика ещё НЕ отмечена прочитанной');
   global.window.__komaSpeechEvent(call.id, 'end', '');
+  ok(marked.length === 1 && marked[0] === line.text, 'после end реплика отмечена прочитанной');
   ok(thenCalled === true, 'после end читалка идёт дальше');
 
   // Ошибка движка → человеку текстом, без молчания
