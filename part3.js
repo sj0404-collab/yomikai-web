@@ -1051,7 +1051,68 @@ async function runModel(session, feeds, what) {
 }
 
 /* ── детектор: боксы текстовых блоков (KomaOcrEngine.detectTile) ── */
+/**
+ * Детектор по всей странице.
+ *
+ * Длинная страница (вебтун 1200×12000) раньше сжималась целиком до `pageSide`
+ * (1600) по длинной стороне: буквы становились 2–3 px, детектор терял облачка и
+ * отдавал найденные половинками. В отдельной сборке (`ownocr-web-single.html`)
+ * такого не было: там страница режется на плитки 1500 px и считается в полном
+ * разрешении. Теперь так же и здесь. Короткая страница (обычная манга) идёт
+ * прежним путём — для неё ничего не меняется.
+ */
 async function detectBoxes(imgCanvas, side, R) {
+  const { width: w0, height: h0 } = imgCanvas;
+  const TILE = 1500, OVER = 160;
+  if (Math.max(w0, h0) <= TILE * 1.06) return detectTileBoxes(imgCanvas, side, R);
+  const tw = Math.min(TILE, w0), th = Math.min(TILE, h0);
+  const boxes = [];
+  let pass = 'tiles';
+  for (let y0 = 0; ;) {
+    const y1 = Math.min(h0, y0 + th);
+    for (let x0 = 0; ;) {
+      const x1 = Math.min(w0, x0 + tw);
+      const sub = makeCanvas(x1 - x0, y1 - y0);
+      const sctx = sub.getContext('2d', { willReadFrequently: true });
+      sctx.drawImage(imgCanvas, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+      const got = await detectTileBoxes(sub, side, R);
+      if (got.pass && pass === 'tiles') pass = got.pass;
+      for (const b of got) boxes.push({
+        left: b.left + x0, top: b.top + y0, right: b.right + x0, bottom: b.bottom + y0,
+      });
+      if (x1 >= w0) break;
+      x0 += tw - OVER;
+    }
+    if (y1 >= h0) break;
+    y0 += th - OVER;
+  }
+  const out = dedupeBoxes(boxes);
+  out.pass = pass;
+  return out;
+}
+
+/** Слить боксы, нарезанные дважды на стыке плиток (порог 0,45 по объединению). */
+function dedupeBoxes(boxes) {
+  const keep = [];
+  for (const b of boxes) {
+    const bw = b.right - b.left, bh = b.bottom - b.top;
+    let dup = false;
+    for (const k of keep) {
+      const ov = Math.min(b.right, k.right) - Math.max(b.left, k.left);
+      const oy = Math.min(b.bottom, k.bottom) - Math.max(b.top, k.top);
+      if (ov > 0 && oy > 0) {
+        const inter = ov * oy;
+        const uni = bw * bh + (k.right - k.left) * (k.bottom - k.top) - inter;
+        if (uni > 0 && inter / uni > 0.45) { dup = true; break; }
+      }
+    }
+    if (!dup) keep.push(b);
+  }
+  return keep.sort((a, b) => a.top - b.top);
+}
+
+/** Детектор по одному кадру (плитке) — прежний путь без изменений. */
+async function detectTileBoxes(imgCanvas, side, R) {
   const { width: w0, height: h0 } = imgCanvas;
   const ratio = Math.min(1, side / Math.max(w0, h0));
   const w = Math.max(32, Math.round((w0 * ratio) / 32) * 32);

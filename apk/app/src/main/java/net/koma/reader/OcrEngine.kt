@@ -63,6 +63,9 @@ class OcrEngine(private val modelsDir: File) {
          */
         const val EMBEDDED_STAMP = "2026-11-02.1"
         private const val DET_THRESHOLD = 0.3f
+        /** Плитка детектора и перекрытие: как в отдельной сборке (core.js). */
+        private const val TILE = 1500
+        private const val OVER = 160
     }
 
     class Rules(
@@ -324,8 +327,77 @@ class OcrEngine(private val modelsDir: File) {
 
     // ── 1. Детектор ──────────────────────────────────────────────────────────
 
-    /** detectBoxes: кадр → боксы в координатах ДЕТЕКТОРА, затем обратно в кадр. */
+    /**
+     * Детектор по всей странице.
+     *
+     * Раньше кадр ВСЕГДА сжимался до `pageSide` (1600) по длинной стороне. На
+     * длинном вебтуне (1200×12000) после такого сжатия буквы становятся 2–3 px,
+     * детектор теряет облачка, а найденные отдаёт половинками — ровно то, что
+     * видно как «облачко захвачено наполовину». В отдельной сборке
+     * (`ownocr-web-single.html`) этого не было, потому что там страница режется
+     * на плитки 1500 px и детектор работает в ПОЛНОМ разрешении.
+     *
+     * Теперь так же: длинная страница режется на плитки 1500 px с перекрытием
+     * 160 px, каждая плитка считается в своём разрешении, боксы переводятся в
+     * координаты кадра, дубли на стыках склеиваются. Короткая страница (обычная
+     * манга) идёт прежним путём без изменений.
+     */
     private fun detect(src: Bitmap, side: Int, retry: Boolean): List<IntArray> {
+        val w0 = src.width; val h0 = src.height
+        if (max(w0, h0) <= (TILE * 1.06).toInt()) return detectTile(src, side, retry)
+        val tw = min(TILE, w0); val th = min(TILE, h0)
+        val boxes = ArrayList<IntArray>()
+        var y0 = 0
+        while (true) {
+            val y1 = min(h0, y0 + th)
+            var x0 = 0
+            while (true) {
+                val x1 = min(w0, x0 + tw)
+                val sub = try {
+                    Bitmap.createBitmap(src, x0, y0, x1 - x0, y1 - y0)
+                } catch (t: Throwable) { null }
+                if (sub != null) {
+                    try {
+                        for (b in detectTile(sub, side, retry)) {
+                            boxes.add(intArrayOf(b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0))
+                        }
+                    } finally { if (sub !== src) sub.recycle() }
+                }
+                if (x1 >= w0) break
+                x0 += tw - OVER
+            }
+            if (y1 >= h0) break
+            y0 += th - OVER
+        }
+        return dedupeBoxes(boxes)
+    }
+
+    /**
+     * Слить боксы, которые нарезались дважды на стыке плиток.
+     * Порог 0,45 пересечения по объединению — как в странице (`dedupeBoxes`).
+     */
+    private fun dedupeBoxes(boxes: List<IntArray>): List<IntArray> {
+        val keep = ArrayList<IntArray>()
+        for (b in boxes) {
+            val bw = (b[2] - b[0]).toLong(); val bh = (b[3] - b[1]).toLong()
+            var dup = false
+            for (k in keep) {
+                val ov = min(b[2], k[2]).toLong() - max(b[0], k[0])
+                val oy = min(b[3], k[3]).toLong() - max(b[1], k[1])
+                if (ov > 0 && oy > 0) {
+                    val inter = ov * oy
+                    val uni = bw * bh + (k[2] - k[0]).toLong() * (k[3] - k[1]) - inter
+                    if (uni > 0 && inter.toDouble() / uni > 0.45) { dup = true; break }
+                }
+            }
+            if (!dup) keep.add(b)
+        }
+        keep.sortBy { it[1] }
+        return keep
+    }
+
+    /** Детектор по одному кадру (плитке): прежний путь без изменений. */
+    private fun detectTile(src: Bitmap, side: Int, retry: Boolean): List<IntArray> {
         val w0 = src.width; val h0 = src.height
         val ratio = min(1.0, side.toDouble() / max(w0, h0))
         val w = max(32, ((w0 * ratio / 32).roundToInt()) * 32)
