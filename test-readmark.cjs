@@ -29,7 +29,9 @@ global.speechSynthesis = {
     if (mode === 'fail') { setTimeout(() => u.onerror && u.onerror({ error: 'not-allowed' }), 5); return; }
     if (mode === 'silent') return;                       // ни старта, ни ошибки
     setTimeout(() => u.onstart && u.onstart(), 5);
-    setTimeout(() => u.onend && u.onend(), 15);
+    // Реальная фраза длится, а не 15 мс: мгновенный end теперь трактуется как
+    // «движок проглотил фразу» и не отмечается прочитанным.
+    setTimeout(() => u.onend && u.onend(), 400);
   },
 };
 global.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
@@ -54,7 +56,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   mode = 'ok';
   const spoken = [];
   T.speakLine({ text: 'ПЕРВАЯ' }, () => spoken.push('end'));
-  await new Promise(r => setTimeout(r, 120));
+  await new Promise(r => setTimeout(r, 600));
   ok(R.spoken.has(R.spokenKey(0, 'ПЕРВАЯ')), 'после реальной озвучки реплика отмечена прочитанной');
   ok(spoken.length === 1, 'после озвучки чтение пошло дальше');
 
@@ -76,7 +78,7 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   mode = 'ok';
   R.spoken.clear();
   T.speakLine({ text: 'ЧЕТВЁРТАЯ' }, () => {});
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 600));
   ok(R.spoken.size > 0, 'отметка поставлена');
   R.unmarkSpoken(0, 'ЧЕТВЁРТАЯ');
   ok(!R.spoken.has(R.spokenKey(0, 'ЧЕТВЁРТАЯ')), 'отметку можно снять (unmarkSpoken)');
