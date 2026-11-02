@@ -30,8 +30,13 @@ global.speechSynthesis = {
   cancel() {}, resume() {}, pause() {},
   speak(u) {
     if (mode === 'startOnly') { setTimeout(() => u.onstart && u.onstart(), 5); return; }
+    if (mode === 'instant') {                     // «start и сразу end» — движок молчит
+      setTimeout(() => u.onstart && u.onstart(), 1);
+      setTimeout(() => u.onend && u.onend(), 3);
+      return;
+    }
     setTimeout(() => u.onstart && u.onstart(), 5);
-    setTimeout(() => u.onend && u.onend(), 15);
+    setTimeout(() => u.onend && u.onend(), 400);   // реальная фраза длится, не 15 мс
   },
 };
 global.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
@@ -60,11 +65,21 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
     'старт без конца фразы НЕ считается прочитанным');
   ok(went.length === 0, 'чтение не ушло дальше молчащей реплики');
 
-  // 2. Голос дошёл до конца — отметка есть.
+  // 2. Движок прислал start и мгновенный end — фразу он не произнёс.
+  mode = 'instant';
+  R.spoken.clear();
+  const went2 = [];
+  T.speakLine({ text: 'ЭТА ФРАЗА НЕ ПРОЗВУЧАЛА' }, () => went2.push('end'));
+  await new Promise(r => setTimeout(r, 300));
+  ok(!R.spoken.has(R.spokenKey(0, 'ЭТА ФРАЗА НЕ ПРОЗВУЧАЛА')),
+    'мгновенный end (8+ букв за <250 мс) НЕ считается прочитанным');
+  ok(went2.length === 1, 'но чтение продолжается — реплика не застревает');
+
+  // 3. Голос дошёл до конца — отметка есть.
   mode = 'full';
   R.spoken.clear();
   T.speakLine({ text: 'ГОЛОС ДОЧИТАЛ' }, () => went.push('end'));
-  await new Promise(r => setTimeout(r, 300));
+  await new Promise(r => setTimeout(r, 600));
   ok(R.spoken.has(R.spokenKey(0, 'ГОЛОС ДОЧИТАЛ')),
     'после конца фразы реплика отмечена прочитанной');
   ok(went.length >= 1, 'и только тогда чтение пошло дальше');
