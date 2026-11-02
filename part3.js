@@ -605,6 +605,64 @@ const Words = {
    * «ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, ЕЁ ЧТО ПРИБЫЛА.» вместо полной фразы.
    * Режем только если обе половины — настоящие слова не короче 4 букв.
    */
+  /**
+   * Латинские буквы, которые в манга-шрифте читаются как кириллические.
+   *
+   * Название манги «Как прожить жизнь, будучи старшей сестрой тирана» чтец
+   * выдал как «cecmpoй mиpaнa»: шрифт рисует «т» как латинскую «m», «а», «е»,
+   * «с», «о», «й» — тоже похожи. В итоге реплика уходила в голос латиницей и
+   * звучала как «сесмой мирана». Замена делается ТОЛЬКО если получившееся
+   * слово есть в словаре — иначе настоящая латиница (SFX, имена) не тронется.
+   */
+  HOMOGLYPH: { a: 'а', b: 'в', c: 'с', e: 'е', h: 'н', k: 'к', m: 'т', n: 'п',
+    o: 'о', p: 'р', t: 'т', x: 'х', y: 'у', u: 'и', i: 'и', j: 'ј', r: 'г',
+    A: 'А', B: 'В', C: 'С', E: 'Е', H: 'Н', K: 'К', M: 'М', O: 'О', P: 'Р',
+    T: 'Т', X: 'Х', Y: 'У', R: 'Г', I: 'І', J: 'Ј' },
+  /** Латинское слово → кириллица по похожим буквам (без проверки словаря). */
+  toCyr(word) {
+    let out = '';
+    for (const ch of String(word)) out += (this.HOMOGLYPH[ch] || ch);
+    return out;
+  },
+  /** Есть ли в слове латиница. */
+  hasLatin(word) { return /[A-Za-z]/.test(String(word)); },
+  /**
+   * Одно слово: латиница/смесь → кириллица, но только когда это даёт слово из
+   * словаря. «cecmpoй» → «сестрой», «mиpaнa» → «тирана»; «BANG!!» остаётся.
+   */
+  fixAlphabet(word) {
+    if (!this.ready || !this.hasLatin(word)) return word;
+    const core = String(word).replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+    if (!core) return word;
+    const low = core.toLowerCase();
+    const cyr = this.toCyr(core);
+    const cyrLow = cyr.toLowerCase();
+    if (cyrLow !== low && this.inDict(cyrLow)) return String(word).replace(core, cyr);
+    // Смесь: кириллическая часть + латинский хвост, возможно через точку:
+    // «СЛУШАЙТЕЕУ.owb». Кириллицу оставляем, латинский хвост выбрасываем, а
+    // если на стыке прилипли лишние буквы («…ЕЕУ») — снимаем до двух и
+    // проверяем словарь: «слушайте» в нём есть.
+    const mix = /([А-Яа-яЁё]{4,})[^А-Яа-яЁёA-Za-z0-9]*([A-Za-z]{2,})/.exec(String(word));
+    if (mix) {
+      const base = mix[1].toLowerCase();
+      if (this.inDict(base)) return mix[1];
+      for (let cut = 1; cut <= 2 && base.length - cut >= 4; cut++) {
+        if (this.inDict(base.slice(0, base.length - cut))) return mix[1].slice(0, mix[1].length - cut);
+      }
+    }
+    // Смесь: кириллическая часть + латинский хвост («СЛУШАЙТЕЕУ.owb»).
+    const m = /^([А-Яа-яЁё]+)([A-Za-z]+)$/.exec(core);
+    if (m) {
+      const base = m[1].toLowerCase();
+      if (this.inDict(base)) return String(word).replace(core, m[1]);
+      // Лишняя пара букв на стыке — снимаем и проверяем ещё раз.
+      for (let cut = 1; cut <= 2 && base.length - cut >= 4; cut++) {
+        const cutWord = base.slice(0, base.length - cut);
+        if (this.inDict(cutWord)) return String(word).replace(core, m[1].slice(0, m[1].length - cut));
+      }
+    }
+    return word;
+  },
   splitGlued(word) {
     const low = String(word).toLowerCase().replace(/[^а-яё]/g, '');
     if (low.length < 8 || !this.ready) return null;
@@ -684,6 +742,29 @@ const Words = {
     let t = joinHyphens(String(text || ''));
     // Дефис, прочитанный как точка: «ЕЁ ВЕ. ЛИЧЕСТВО» → «ЕЁ ВЕЛИЧЕСТВО».
     t = joinShortDot(this, t);
+    // Латиница, которая на самом деле кириллица, и латинский шум — ДО разбивки
+    // слипшихся слов: иначе «СЛУШАЙТЕЕУ.owb» сначала делится на «слуша» +
+    // «йтЕЕУ.owb» (10 кириллических букв) и латинский хвост уже не отделить.
+    if (this.ready) {
+      // Латиница, которая на самом деле кириллица: «cecmpoй mиpaнa» → «сестрой
+      // тирана». Делается ДО словарной правки, иначе слово не находится.
+      t = t.split(' ').map(w => this.fixAlphabet(w)).join(' ');
+      // Слово, целиком набранное латиницей, в русской реплике — шум чтеца
+      // («low cYnaYIowb»). Убираем, только если в реплике есть кириллица:
+      // иначе пропали бы настоящие английские звуки.
+      const hasCyr = /[А-Яа-яЁё]/.test(t);
+      // Строка целиком из латиницы, но с «рваным» регистром («low cYnaYIowb») —
+      // это шум чтеца, а не английский звук. Настоящие звуки («BANG», «KO») не
+      // трогаем: у них регистр ровный.
+      if (!hasCyr && /[a-z][A-Z]|[A-Z][a-z]/.test(t) && /[A-Za-z]{4,}/.test(t)) return '';
+      if (hasCyr) {
+        t = t.split(' ').filter(w => {
+          if (!this.hasLatin(w)) return true;
+          if (/[А-Яа-яЁё]/.test(w)) return true;      // смесь уже разобрана выше
+          return (w.replace(/[^\p{L}]/gu, '').length < 3);   // «ок», «ok» оставляем
+        }).join(' ');
+      }
+    }
     if (this.ready) {
       // Слипшиеся слова разбиваем ДО чистки: иначе чистка считает их мусором
       // и выбрасывает, а с ними уходит часть реплики.
