@@ -578,6 +578,32 @@ const Words = {
    * только если в реплике есть другие настоящие слова: иначе останется пустота.
    * Порог 8 букв выбран, чтобы не тронуть имена («БЕРСЕРК», «ДРЕГЕР»).
    */
+  /**
+   * Разбить слипшееся слово на два настоящих: «ЛИЧЕСТВОТОЛЬКО» → «ЛИЧЕСТВО ТОЛЬКО».
+   *
+   * Чтец иногда не ставит пробел на стыке строк или слов (на скриншотах это
+   * «ЛИЧЕСТВОТОЛЬКО», «БУДУЩЕМУowb»). Раньше такое слово потом выбрасывалось
+   * чисткой как «длинное и неизвестное», и реплика теряла середину:
+   * «ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, ЕЁ ЧТО ПРИБЫЛА.» вместо полной фразы.
+   * Режем только если обе половины — настоящие слова не короче 4 букв.
+   */
+  splitGlued(word) {
+    const low = String(word).toLowerCase().replace(/[^а-яё]/g, '');
+    if (low.length < 8 || !this.ready) return null;
+    if (this.inDict(low)) return null;
+    const vowel = (x) => /[аеёиоуыэюя]/.test(x);
+    let fallback = null;
+    for (let cut = 4; cut <= low.length - 4; cut++) {
+      const a = low.slice(0, cut), b = low.slice(cut);
+      if (!vowel(a) || !vowel(b)) continue;
+      const knownA = this.inDict(a), knownB = this.inDict(b);
+      if (knownA && knownB) return [a, b];
+      // Одна половина может быть с падежным окончанием, которого нет в
+      // словаре («ЛИЧЕСТВО»). Достаточно одной настоящей половины.
+      if ((knownA || knownB) && !fallback) fallback = [a, b];
+    }
+    return fallback;
+  },
   stripJunkWords(text) {
     if (!this.ready) return text;
     const words = String(text).split(' ');
@@ -592,7 +618,12 @@ const Words = {
       if (this.isKnown(low) || this.isPlausible(low)) return true;
       // «сттангасоат» (11 букв), «риооооро» (три «о» подряд) — звуки, а не слова.
       // Порог подобран так, чтобы имена («БЕРСЕРК», «ДРЕГЕР») остались.
-      if (low.length >= 10) return false;
+      // Длинное слово — ещё не мусор: чтец мог склеить два настоящих слова.
+      // «ЛИЧЕСТВОТОЛЬКО» = «ЛИЧЕСТВО» + «ТОЛЬКО» — это часть реплики.
+      // Мусор — только явные признаки: тройной повтор буквы или ни одной
+      // гласной. Просто «длинное и незнакомое» больше не повод выбрасывать:
+      // из-за этого пропадала середина реплики («…ЕЁ ЧТО ПРИБЫЛА.»).
+      if (low.length >= 10) return /(.)\1\1/.test(low) || !/[аеёиоуыэюя]/.test(low);
       if (/(.)\1\1/.test(low)) return false;
       if (low.length <= 2) return false;     // «оо», «чв» — не слова
       return true;
@@ -602,6 +633,14 @@ const Words = {
   /** Починка реплики: слова по словарю + висячий дефис в конце. */
   finish(text, keepAll) {
     let t = joinHyphens(String(text || ''));
+    if (this.ready) {
+      // Слипшиеся слова разбиваем ДО чистки: иначе чистка считает их мусором
+      // и выбрасывает, а с ними уходит часть реплики.
+      t = t.replace(/[А-Яа-яЁё]{8,}/g, (w) => {
+        const halves = this.splitGlued(w);
+        return halves ? halves.join(' ') : w;
+      });
+    }
     if (this.ready) {
       t = t.replace(/[А-Яа-яЁё]+/g, w => this.correctWord(w));
       if (!keepAll) t = this.stripJunkWords(t);

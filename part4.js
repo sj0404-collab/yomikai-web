@@ -558,6 +558,13 @@ const Reader = {
             text: Words.polish(String(r.text || ''), RULES.junkRatio, r.confidence),
           }))
           .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+        // Ни одна прочитанная строка не должна остаться за бортом реплики:
+        // именно из-за этого реплики выходили обрезками («НО РАЗВЕ»).
+        const rec = recoverLostLines(fresh, res.regions);
+        fresh = rec.replicas
+          .map(r => ({ ...r, text: Words.polish(String(r.text || ''), RULES.junkRatio, r.confidence) }))
+          .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+        OCR.recovered = rec.attached;
         OCR.readPlan = 'native';
       } else {
         fresh = readingOrder(res.regions, rtl, true, RULES);
@@ -589,7 +596,7 @@ const Reader = {
         ...res, lines, at, bands: parts.length,
         detPass, largePasses,
         ms: total, detMs: res.detMs, recMs: res.recMs, crops: res.crops,
-        boxes: res.boxes, regions: res.regions,
+        boxes: res.boxes, regions: res.regions, recovered: OCR.recovered || 0,
         bandKeys: parts.length,
       });
       await this.savePageBuffer(i);
@@ -1984,6 +1991,57 @@ function renderLensSheet(pageIndex) {
   }
 }
 
+/**
+ * Страховка от обрезанных реплик: ни одна прочитанная строка не должна пропасть.
+ *
+ * Зачем: на скриншотах 1.9.46 реплики выходили обрезками — «НО РАЗВЕ» вместо
+ * «НО РАЗВЕ НАШ ЛИДЕР УЖЕ НЕДОСТАТОЧНО ПЛОХ?», «ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, ЕЁ ЧТО
+ * ПРИБЫЛА.» без середины. Строки движок прочитал (они видны в «КАК РАСПОЗНАНО»),
+ * но в реплику не попали. Здесь проверяем КАЖДУЮ прочитанную строку: если она не
+ * лежит внутри готовой реплики, приклеиваем её к ближайшей по геометрии.
+ * Строка без пары остаётся как есть — тогда видно, что она не приклеилась.
+ */
+function recoverLostLines(replicas, regions) {
+  const letters = (t) => (String(t).match(/\p{L}/gu) || []).length;
+  const list = Array.isArray(replicas) ? replicas.slice() : [];
+  if (!list.length || !Array.isArray(regions) || !regions.length) return { replicas: list, attached: 0 };
+  const inside = (l, r, m = 0.004) => r.left >= l.left - m && r.right <= l.right + m
+    && r.top >= l.top - m && r.bottom <= l.bottom + m;
+  const join = (a, b) => {
+    const left = String(a).trim(), right = String(b).trim();
+    if (!left) return right;
+    if (!right) return left;
+    if (/[-‐‑–—]$/.test(left)) return left.slice(0, -1) + right;
+    return left + ' ' + right;
+  };
+  let attached = 0;
+  // сверху вниз: так вставка в середину реплики не перепутает порядок
+  for (const rg of regions.slice().sort((a, b) => a.top - b.top)) {
+    const t = String(rg.text || '').trim();
+    if (letters(t) < 3) continue;
+    if (list.some((l) => inside(l, rg))) continue;
+    let best = null, bestGap = Infinity;
+    for (const l of list) {
+      const ov = Math.min(l.right, rg.right) - Math.max(l.left, rg.left);
+      const minW = Math.min(l.right - l.left, rg.right - rg.left);
+      if (minW <= 0 || ov / minW < 0.35) continue;
+      const lh = Math.max(l.bottom - l.top, 0.01);
+      const gap = rg.top >= l.bottom ? rg.top - l.bottom : (l.top >= rg.bottom ? l.top - rg.bottom : 0);
+      if (gap > lh * 1.2) continue;
+      if (gap < bestGap) { bestGap = gap; best = l; }
+    }
+    if (!best) continue;
+    const above = rg.top < (best.top + best.bottom) / 2;
+    best.text = above ? join(t, best.text) : join(best.text, t);
+    best.left = Math.min(best.left, rg.left);
+    best.right = Math.max(best.right, rg.right);
+    best.top = Math.min(best.top, rg.top);
+    best.bottom = Math.max(best.bottom, rg.bottom);
+    attached++;
+  }
+  return { replicas: list, attached };
+}
+
 async function renderTextSheet(i) {
   // Открывая шторку, сначала сверяем индекс с тем, что реально на экране:
   // раньше здесь стоял «застрявший» Reader.page, и текст открывался не той
@@ -2028,6 +2086,7 @@ async function renderTextSheet(i) {
       + (data.variantRuns ? ` · перебор вариантов: ${data.variantRuns}` : '')
       + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
       + (data.wordsFixed ? ` · дочинено слов: ${data.wordsFixed}` : '')
+      + (data.recovered ? ` · строк приклеено страховкой: ${data.recovered}` : '')
       + stamp);
   // Показываем ВСЕ реплики страницы, включая уже прочитанные: прочитанное не
   // исчезает из списка, а помечается. Иначе выглядело бы, будто текст пропал.
