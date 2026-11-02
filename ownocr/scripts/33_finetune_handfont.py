@@ -36,9 +36,13 @@ from ownocr.pair import cer, clean                                 # noqa: E402
 from ownocr.synth import augment_real, elastic, random_text        # noqa: E402
 
 OUT = os.path.join(ROOT, 'out')
-DIRS = ['data-real', 'data-pages', 'data-manhua', 'data-comic']
+DIRS = ['data-real', 'data-pages', 'data-manhua', 'data-comic', 'data-hand']
 # страницы, выведенные из обучения ЦЕЛИКОМ — по ним и только по ним судим
-HOLDOUT = {'comic4', 'comic3', 'manhua2', 'manhua5', 'manhua1', 'comic2', 'kuro-p2'}
+# проверка — страницы, которые я НЕ размечал: 86 строк с 6 страниц.
+# Размеченные вручную страницы (comic1x5, comic1x7, manhua3x2, manhua2-p2,
+# kuro-p2, tyrant-p1) идут в обучение, поэтому из проверки убраны.
+HOLDOUT = {'comic2', 'comic3', 'manhua1', 'manhua4', 'manhua5', 'dense-a'}
+HAND_PAGES_LABELLED = {'comic1x5', 'comic1x7', 'manhua3x2', 'manhua2-p2', 'kuro-p2', 'tyrant-p1'}
 
 HAND_FONTS = ['Caveat', 'Amatic_SC', 'Comic_Relief', 'Bad_Script', 'Comforter_Brush',
               'Balsamiq_Sans', 'Comforter', 'Days_One', 'Alumni_Sans_Pinstripe',
@@ -209,6 +213,8 @@ def main():
     ap.add_argument('--real-share', type=float, default=0.45,
                     help='доля настоящих строк в пачке (остальное — синтез)')
     ap.add_argument('--outline-share', type=float, default=0.5)
+    ap.add_argument('--hand-limit', type=int, default=0,
+                    help='взять только N строк ручной разметки (кривая обучения)')
     a = ap.parse_args()
 
     torch.manual_seed(a.seed)
@@ -216,6 +222,14 @@ def main():
     torch.set_num_threads(max(1, (os.cpu_count() or 4)))
 
     rows = load_all()
+    if a.hand_limit:
+        # кривая обучения: сколько строк ручной разметки реально в работе
+        rng0 = np.random.default_rng(a.seed)
+        hand = [r for r in rows if r['page'] in HAND_PAGES_LABELLED]
+        rest = [r for r in rows if r['page'] not in HAND_PAGES_LABELLED]
+        idx = sorted(rng0.permutation(len(hand))[:a.hand_limit])
+        rows = rest + [hand[i] for i in idx]
+        print(f'взято строк ручной разметки: {len(idx)} из {len(hand)}', flush=True)
     train = [r for r in rows if r['page'] not in HOLDOUT]
     held = [r for r in rows if r['page'] in HOLDOUT]
     print(f'данные: {len(train)} строк в обучении · {len(held)} на проверке (7 страниц целиком вне обучения)',
