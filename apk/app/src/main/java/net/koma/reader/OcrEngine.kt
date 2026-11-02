@@ -72,15 +72,13 @@ class OcrEngine(private val modelsDir: File) {
          * раскладывает их заново только тогда, когда отпечаток в файлах разошёлся
          * со сборкой. Иначе на каждом запуске 12,6 МБ переписывались бы впустую.
          */
-        const val EMBEDDED_STAMP = "2026-11-02.2"
+        const val EMBEDDED_STAMP = "2026-11-02.3"
         private const val DET_THRESHOLD = 0.3f
         /** Плитка детектора и перекрытие: как в отдельной сборке (core.js). */
         private const val TILE = 1500
         private const val OVER = 160
-        /** Запас вокруг вырезанной строки, доля её высоты (замер: 0,4 лучший). */
-        private const val LINE_PAD = 0.4f
-        /** Растяжки по ширине, среди которых выбирается лучшее чтение строки. */
-        private val STRETCHES = floatArrayOf(1f, 0.85f, 1.15f)
+        /** Порог «чернил»: как в проверенной HTML-сборке (core.js, inkLuma). */
+        private const val INK_LUMA = 150
     }
 
     class Rules(
@@ -383,16 +381,15 @@ class OcrEngine(private val modelsDir: File) {
             progress("распознаю $done/${boxes.size}")
             val lines = textLines(page, b, rules).ifEmpty { listOf(b) }
             for (ln in lines) {
-                // Запас вокруг строки. Строка вырезается вплотную к «чернилам», и
-                // у мелкого шрифта срезаются верх и низ букв. Замер на записи с
-                // телефона: с запасом 40 % высоты строки основной чтец на облачке
-                // «НЕ СТОИТ. / СЕЙЧАС Я ЗДЕСЬ / В КАЧЕСТВЕ СОВЕТНИКА,» даёт CER
-                // 0,0 %, без запаса — 3,1 % («Е СТОИТ», «В КАЧЕСТЕЕ»).
-                val lpad = max(3, ((ln[3] - ln[1]) * LINE_PAD).toInt())
+                // Кроп — ровно строка, без запаса. Запас 40 % высоты пробовал
+                // в 1.9.45 и он ЖЕ навредил: между строками всего ~25 px, и
+                // кроп начинал захватывать соседние строки. Замер на полосе
+                // (evalwork/ab_config.py): с запасом 0,40 строка «КАК СТОИТ
+                // СКА-» превращается в «А ОА», без запаса читается верно.
                 val lx0 = max(0, ln[0] - 2)
-                val ly0 = max(0, ln[1] - lpad)
+                val ly0 = ln[1]
                 val lx1 = min(page.width, ln[2] + 2)
-                val ly1 = min(page.height, ln[3] + lpad)
+                val ly1 = ln[3]
                 val w = max(1, lx1 - lx0)
                 val h = max(1, ly1 - ly0)
                 val crop = try { Bitmap.createBitmap(page, lx0, ly0, w, h) } catch (e: Throwable) { continue }
@@ -405,7 +402,11 @@ class OcrEngine(private val modelsDir: File) {
                     // Любая ошибка второго чтеца НЕ должна ломать кадр: падаем на
                     // прежний путь `rec`. Это важно, потому что в песочнице нет
                     // Android и поведение на телефоне проверяется только установкой.
-                    val first = try { decodeBest(crop, wide) } catch (t: Throwable) { "" to 0.0 }
+                    // Одна растяжка, как в HTML-сборке. Перебор трёх растяжек
+                    // (1.9.45) выбирал по словарю «красивое» слово вместо
+                    // верного: «ЧИНАТЬ ВСТРЕЧУ,» → «ЧИТАТЬ ВТ Ч» (в словаре
+                    // есть «ЧИТАТЬ»). Замер: evalwork/ab_config.py.
+                    val first = try { decode(crop, wide) } catch (t: Throwable) { "" to 0.0 }
                     val second = if (eslav != null) try { decodeEslav(crop) } catch (t: Throwable) {
                         GlensEngine.log("второй чтец: ошибка ${t.message ?: t.javaClass.simpleName}, читаю прежним")
                         null
@@ -607,25 +608,17 @@ class OcrEngine(private val modelsDir: File) {
             val p = px[i]
             luma[i] = (((p shr 16) and 0xFF) * 77 + ((p shr 8) and 0xFF) * 151 + (p and 0xFF) * 28) shr 8
         }
-        val globalThr = inkThreshold(luma, rules)
-        if (globalThr < 0) return emptyList()
-
-        // Порог «чернил» по плиткам нужен, когда в одном блоке два разных шрифта.
-        // Но плитка не должна делать порог МЯГЧЕ общего: на полосе с цветной
-        // плашкой под текстом перцентили плитки уезжают выше плашки, плашка
-        // становится «чернилами», и три строки сливаются в один кроп. Замер
-        // (evalwork/tile_ink.py, пузырь на оранжевой плашке): с плитками одна
-        // строка высотой 221 px вместо трёх, с общим порогом — три строки.
-        val rows = clamp(rules.inkTileRows, 1, 16)
-        val tileH = max(1, ceil(h.toDouble() / rows).toInt())
-        val thr = IntArray(rows) { i ->
-            val y0 = i * tileH; val y1 = min(h, y0 + tileH)
-            if (y1 <= y0) globalThr else {
-                val t = inkThreshold(luma.copyOfRange(y0 * w, y1 * w), rules)
-                if (t < 0) globalThr else min(globalThr, t)
-            }
-        }
-        fun thrAt(y: Int) = thr[clamp(y / tileH, 0, rows - 1)]
+        // Порог «чернил» — ФИКСИРОВАННЫЙ, как в отдельной HTML-сборке, которая
+        // эти же полосы читает верно (core.js: inkLuma = 150).
+        //
+        // Раньше здесь считались перцентили (общие и по плиткам). На полосе с
+        // цветной плашкой под текстом перцентили уезжали выше плашки, плашка
+        // становилась «чернилами», и три строки сливались в один кроп — чтец
+        // получал трёхстрочную кашу («А С О В»). Тёмные страницы к этому
+        // моменту уже инвертированы (invertIfDark), поэтому порог один.
+        val thr = INK_LUMA
+        val tileH = 1
+        fun thrAt(y: Int) = thr
         val need = max(1, w / 60)
         fun rowHasInk(y: Int): Boolean {
             var cnt = 0
@@ -718,7 +711,7 @@ class OcrEngine(private val modelsDir: File) {
     // ── 4. Распознавание кропа строки ───────────────────────────────────────
 
     /** decodeCrop: кроп → (текст, средняя уверенность) жадным CTC-разбором. */
-    private fun decode(crop: Bitmap, wide: Boolean, stretch: Float = 1f): Pair<String, Double> {
+    private fun decode(crop: Bitmap, wide: Boolean): Pair<String, Double> {
         val sess = rec ?: return "" to 0.0
         val e = env ?: return "" to 0.0
         var src = crop
@@ -730,7 +723,7 @@ class OcrEngine(private val modelsDir: File) {
         }
         val w0 = src.width; val h0 = src.height
         if (w0 < 2 || h0 < 2) { if (rotated) src.recycle(); return "" to 0.0 }
-        val width = clamp(((48.0 * w0 * stretch) / h0).roundToInt(), 8, 960)
+        val width = clamp(((48.0 * w0) / h0).roundToInt(), 8, 960)
         val padded = max(320, width)
         val scaled = Bitmap.createScaledBitmap(src, width, 48, true)
         if (rotated) src.recycle()
@@ -781,26 +774,6 @@ class OcrEngine(private val modelsDir: File) {
         }
     }
 
-
-    /**
-     * Прочитать строку основным чтецом в трёх растяжках и взять лучшее по словарю.
-     *
-     * Отдельная HTML-сборка читает каждую строку так (как есть, сжатой до 85 % и
-     * растянутой до 115 % по ширине) и выбирает вариант по числу настоящих слов.
-     * На записи с телефона это дало верное «В КАЧЕСТВЕ», где одиночное чтение
-     * выдавало «В КАЧЕСТЕЕ»: CER 0,0 % против 3,1 %.
-     */
-    private fun decodeBest(crop: Bitmap, wide: Boolean): Pair<String, Double> {
-        var best: Pair<String, Double> = "" to 0.0
-        var bestScore = -1e9
-        for (st in STRETCHES) {
-            val r = try { decode(crop, wide, st) } catch (t: Throwable) { continue }
-            if (r.first.isBlank()) continue
-            val sc = vocabScore(r.first) + r.second * 0.6
-            if (sc > bestScore) { bestScore = sc; best = r }
-        }
-        return best
-    }
 
     /**
      * Прочитать кроп строки вторым чтецом («эслав»).
