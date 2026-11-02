@@ -45,6 +45,15 @@ class OcrEngine(private val modelsDir: File) {
         const val DET = "det.onnx"
         const val REC = "rec.onnx"
         const val CHARSET = "charset.txt"
+        /**
+         * Второй чтец — «эслав» (CRNN, обучен на строках манги, манхвы и маньхуа).
+         * Зачем: чтец `rec` уверенно читает латиницу и печать, но на кириллических
+         * репликах ошибается. Замер на 86 отложенных строках (страницы, которых
+         * не было в обучении): `rec` 67,9 % CER, `eslav` 7,8 % CER. Поэтому при
+         * наличии файла читаем им, а `rec` остаётся запасным.
+         */
+        const val ESL = "eslav.onnx"
+        const val ESL_CHARSET = "eslav-charset.txt"
         /** Каталог встроенных моделей внутри APK (assets/models). */
         private const val ASSET_DIR = "models"
         /**
@@ -52,7 +61,7 @@ class OcrEngine(private val modelsDir: File) {
          * раскладывает их заново только тогда, когда отпечаток в файлах разошёлся
          * со сборкой. Иначе на каждом запуске 12,6 МБ переписывались бы впустую.
          */
-        const val EMBEDDED_STAMP = "2026-10-28.1"
+        const val EMBEDDED_STAMP = "2026-11-02.1"
         private const val DET_THRESHOLD = 0.3f
     }
 
@@ -96,6 +105,9 @@ class OcrEngine(private val modelsDir: File) {
     private var det: OrtSession? = null
     private var rec: OrtSession? = null
     private var charset: List<String> = emptyList()
+    /** Второй чтец и его азбука (по одному символу, blank = размер азбуки). */
+    private var eslav: OrtSession? = null
+    private var eslavCharset: List<String> = emptyList()
     var error: String? = null
         private set
 
@@ -108,7 +120,8 @@ class OcrEngine(private val modelsDir: File) {
     fun reset() {
         try { det?.close() } catch (e: Throwable) { }
         try { rec?.close() } catch (e: Throwable) { }
-        det = null; rec = null; charset = emptyList(); error = null
+        try { eslav?.close() } catch (e: Throwable) { }
+        det = null; rec = null; eslav = null; charset = emptyList(); eslavCharset = emptyList(); error = null
     }
 
     fun modelsPresent(): Boolean =
@@ -125,6 +138,15 @@ class OcrEngine(private val modelsDir: File) {
         am.open("$ASSET_DIR/$DET").close()
         am.open("$ASSET_DIR/$REC").close()
         am.open("$ASSET_DIR/$CHARSET").close()
+        true
+    } catch (t: Throwable) {
+        false
+    }
+
+    /** Есть ли в сборке второй чтец (нужен, чтобы решить, что раскладывать). */
+    private fun eslavInAssets(am: AssetManager): Boolean = try {
+        am.open("$ASSET_DIR/$ESL").close()
+        am.open("$ASSET_DIR/$ESL_CHARSET").close()
         true
     } catch (t: Throwable) {
         false
@@ -148,6 +170,12 @@ class OcrEngine(private val modelsDir: File) {
             copyAsset(am, "$ASSET_DIR/$DET", File(modelsDir, DET))
             copyAsset(am, "$ASSET_DIR/$REC", File(modelsDir, REC))
             copyAsset(am, "$ASSET_DIR/$CHARSET", File(modelsDir, CHARSET))
+            // Второй чтец кладём рядом. Если в сборке его нет — не ошибка:
+            // приложение просто работает на одном `rec`, как раньше.
+            if (eslavInAssets(am)) {
+                copyAsset(am, "$ASSET_DIR/$ESL", File(modelsDir, ESL))
+                copyAsset(am, "$ASSET_DIR/$ESL_CHARSET", File(modelsDir, ESL_CHARSET))
+            }
             stamp.writeText(EMBEDDED_STAMP)
             reset()
             GlensEngine.log("нативный OCR: встроенные модели разложены в ${modelsDir.absolutePath}")
@@ -183,9 +211,23 @@ class OcrEngine(private val modelsDir: File) {
             det = e.createSession(File(modelsDir, DET).absolutePath, opts)
             rec = e.createSession(File(modelsDir, REC).absolutePath, opts)
             charset = readCharset(File(modelsDir, CHARSET))
+            // Второй чтец необязателен: если файлов нет, приложение работает как
+            // раньше, только на `rec`. Ошибка в нём не должна ломать распознавание.
+            val eslFile = File(modelsDir, ESL)
+            val eslCs = File(modelsDir, ESL_CHARSET)
+            if (eslFile.exists() && eslCs.exists()) {
+                try {
+                    eslav = e.createSession(eslFile.absolutePath, opts)
+                    eslavCharset = readEslavCharset(eslCs)
+                } catch (t: Throwable) {
+                    eslav = null; eslavCharset = emptyList()
+                    GlensEngine.log("нативный OCR: второй чтец не поднялся — ${t.message ?: ""}")
+                }
+            }
             env = e
             if (charset.isEmpty()) { error = "файл азбуки пуст"; return false }
-            GlensEngine.log("нативный OCR: модели загружены, классов ${charset.size}")
+            GlensEngine.log("нативный OCR: модели загружены, классов ${charset.size}" +
+                (if (eslav != null) ", второй чтец ${eslavCharset.size}" else ""))
             true
         } catch (t: Throwable) {
             error = "модели не загрузились: ${t.message ?: t.javaClass.simpleName}"
@@ -204,11 +246,21 @@ class OcrEngine(private val modelsDir: File) {
         return listOf("") + lines + listOf(" ")
     }
 
+    /**
+     * Азбука второго чтеца. В отличие от `rec` здесь НЕ blank-первым: файл — это
+     * одна строка символов, класс `i` означает `charset[i]`, а «пусто» — класс
+     * с номером, равным длине азбуки (109 у нашей модели).
+     */
+    private fun readEslavCharset(f: File): List<String> =
+        f.readText().replace("\r", "").trimEnd('\n').filter { it != '\n' }.map { it.toString() }
+
     fun status(): JSONObject {
         val o = JSONObject()
         o.put("ready", ready())
         o.put("models", modelsPresent())
         o.put("classes", charset.size)
+        o.put("eslav", eslav != null)
+        o.put("eslavClasses", eslavCharset.size)
         o.put("error", error ?: "")
         o.put("ort", "onnxruntime-android")
         o.put("files", JSONObject()
@@ -246,7 +298,14 @@ class OcrEngine(private val modelsDir: File) {
                 val h = max(1, ln[3] - ln[1])
                 val crop = try { Bitmap.createBitmap(page, ln[0], ln[1], w, h) } catch (e: Throwable) { continue }
                 val wide = w.toDouble() / page.width >= 0.25
-                val (text, conf) = try { decode(crop, wide) } finally { crop.recycle() }
+                // Сначала второй чтец (обучен на репликах манги/манхвы/маньхуа),
+                // затем — прежний `rec`, если второй не поднялся или вернул пусто.
+                var pair: Pair<String, Double> = "" to 0.0
+                try {
+                    if (eslav != null) pair = decodeEslav(crop)
+                    if (pair.first.isBlank()) pair = decode(crop, wide)
+                } finally { crop.recycle() }
+                val (text, conf) = pair
                 if (text.isBlank() || conf <= rules.minConfidence) continue
                 out.add(Item(text.trim(), ln[0], ln[1], ln[2], ln[3], conf))
             }
@@ -502,6 +561,86 @@ class OcrEngine(private val modelsDir: File) {
                     if (best != 0 && best != prev) {
                         if (best < chars.size) sb.append(chars[best])
                         score += bestV; count++
+                    }
+                    prev = best
+                }
+                return sb.toString() to (if (count > 0) score / count else 0.0)
+            }
+        }
+    }
+
+
+    /**
+     * Прочитать кроп строки вторым чтецом («эслав»).
+     *
+     * Отличия от `decode`: серый вход (не 3 канала), высота 32 px, нормировка
+     * /127.5-1 без полей, «пусто» — класс с номером `eslavCharset.size`.
+     * Уверенность — средняя вероятность выбранных букв после softmax: без
+     * softmax выход модели это логиты (значения до 15), и порог 0,25 в правилах
+     * страницы не отсекал бы ничего.
+     */
+    private fun decodeEslav(crop: Bitmap): Pair<String, Double> {
+        val sess = eslav ?: return "" to 0.0
+        val e = env ?: return "" to 0.0
+        val cs = eslavCharset
+        if (cs.isEmpty()) return "" to 0.0
+        var src = crop
+        var rotated = false
+        if (crop.height > crop.width * 1.8) {
+            val m = android.graphics.Matrix().apply { postRotate(90f) }
+            src = Bitmap.createBitmap(crop, 0, 0, crop.width, crop.height, m, true)
+            rotated = true
+        }
+        val w0 = src.width; val h0 = src.height
+        if (w0 < 4 || h0 < 4) { if (rotated) src.recycle(); return "" to 0.0 }
+        val H = 32
+        val width = clamp(((H.toDouble() * w0) / h0).roundToInt(), 8, 2000)
+        val scaled = Bitmap.createScaledBitmap(src, width, H, true)
+        if (rotated) src.recycle()
+        val px = IntArray(width * H)
+        scaled.getPixels(px, 0, width, 0, 0, width, H)
+        scaled.recycle()
+        // Яркость — по стандарту (0.299R + 0.587G + 0.114B), как в странице.
+        val f = FloatArray(H * width)
+        for (i in 0 until width * H) {
+            val p = px[i]
+            val luma = (299 * ((p shr 16) and 0xFF) + 587 * ((p shr 8) and 0xFF) + 114 * (p and 0xFF)) / 1000f
+            f[i] = luma / 127.5f - 1f
+        }
+        val name = sess.inputNames.first()
+        val shape = longArrayOf(1, 1, H.toLong(), width.toLong())
+        OnnxTensor.createTensor(e, FloatBuffer.wrap(f), shape).use { tensor ->
+            sess.run(mapOf(name to tensor)).use { res ->
+                val t = res[0] as OnnxTensor
+                val info = t.info as ai.onnxruntime.TensorInfo
+                val dims = info.shape
+                val T = dims[1].toInt()
+                val C = dims[2].toInt()
+                val values = FloatArray(T * C)
+                t.floatBuffer.get(values)
+                val blank = cs.size
+                val sb = StringBuilder()
+                var prev = -1
+                var score = 0.0
+                var count = 0
+                for (ti in 0 until T) {
+                    val base = ti * C
+                    var best = 0
+                    var bestV = values[base]
+                    var mx = values[base]
+                    for (ci in 1 until C) {
+                        val v = values[base + ci]
+                        if (v > bestV) { bestV = v; best = ci }
+                        if (v > mx) mx = v
+                    }
+                    if (best != prev && best < blank && best < cs.size) {
+                        // softmax только для одного выбранного класса: exp(v-mx) /
+                        // сумма exp(v-mx) по всем классам — одна и та же mx на шаг.
+                        var sum = 0.0
+                        for (ci in 0 until C) sum += Math.exp((values[base + ci] - mx).toDouble())
+                        val prob = if (sum > 0.0) Math.exp((bestV - mx).toDouble()) / sum else 0.0
+                        sb.append(cs[best])
+                        score += prob; count++
                     }
                     prev = best
                 }
