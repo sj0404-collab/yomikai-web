@@ -277,7 +277,11 @@ class CtcLineReader:
         mx = out.max(axis=1)
         idx = out.argmax(axis=1)
         keep = idx != self.E.BLANK
-        conf = float(np.exp(np.log(np.clip(np.exp(mx[keep]), 1e-6, 1.0))).mean()) if keep.any() else 0.0
+        # Была двойная экспонента (np.exp от уже вероятности) — уверенность
+        # залипала на 1.0 у всех строк, и по ней нельзя было ничего отсечь.
+        # Теперь это честное среднее геометрическое вероятностей выбранных букв.
+        conf = float(np.exp(np.log(np.clip(mx[keep], 1e-6, 1.0)).mean())) if keep.any() else 0.0
+        self.last_min_conf = float(np.clip(mx[keep], 1e-6, 1.0).min()) if keep.any() else 0.0
         return self.E.decode_logits(out), float(np.clip(conf, 0.0, 1.0))
 
 
