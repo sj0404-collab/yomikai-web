@@ -1442,6 +1442,7 @@ const TTS = {
     // голоса, not-allowed), строка считалась прочитанной и при продолжении
     // чтения ПРОПУСКАЛАСЬ — то есть текст терялся. Отказ = не отмечаем.
     let marked = false;
+    const t0 = Date.now();          // для проверки «движок проглотил фразу»
     if (!VOICE.available()) {
       toast('В этой среде нет синтеза речи: ни системного голоса, ни движка АПК', 8000);
       return;
@@ -1507,10 +1508,25 @@ const TTS = {
       try { SpeakCursor.start(line.text, this.rate); } catch (e) { /* не критично */ }
     };
     const finished = () => {
-      marked = true;
-      try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
       clearTimeout(this._watch);
       try { SpeakCursor.stop(); } catch (e) {}
+      // Движок может «проглотить» фразу: прислать start и сразу end. На телефоне
+      // 2.11 (скриншот 20:11) так и вышло — реплики «прочитаны», звука нет.
+      // Мерило простое и проверяемое: фразу из 8+ букв нельзя произнести за
+      // 250 мс. Если end пришёл раньше — считаем, что не сказал: НЕ отмечаем
+      // «прочитано» (реплика не потеряется) и один раз говорим, где проверить.
+      const ms = Date.now() - t0;
+      const letters = (String(line.text || '').match(/\p{L}/gu) || []).length;
+      if (letters >= 8 && ms < 250) {
+        if (!this._fastSilentHinted) {
+          this._fastSilentHinted = true;
+          toast('Голос ответил мгновенно — похоже, движок молчит: ⚙ → «Проверить голос»', 8000);
+        }
+        if (then) then();
+        return;
+      }
+      marked = true;
+      try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
       if (then) then();
     };
     const failed = (code) => {
