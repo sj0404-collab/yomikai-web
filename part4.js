@@ -1498,17 +1498,26 @@ const TTS = {
     let started = false;
     const started0 = () => {
       started = true;
-      marked = true;
-      try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+      // Отметку «прочитано» ставим ТОЛЬКО когда голос дошёл до конца (finished).
+      // На телефоне 2.11 (скриншот 20:11) вышло иначе: отметка ставилась на
+      // «начал говорить», а звука не было слышно, и реплики оказались
+      // «прочитанными» без озвучки. Отметка на старте — это обещание, которое
+      // нельзя проверить; на конце фразы оно проверено.
       // Тень по буквам стартует вместе со звуком, а не по нажатию кнопки.
       try { SpeakCursor.start(line.text, this.rate); } catch (e) { /* не критично */ }
     };
-    const finished = () => { try { SpeakCursor.stop(); } catch (e) {} if (then) then(); };
+    const finished = () => {
+      marked = true;
+      try { Reader.markSpoken(Reader.page, line.text); } catch (e) { /* не критично */ }
+      clearTimeout(this._watch);
+      try { SpeakCursor.stop(); } catch (e) {}
+      if (then) then();
+    };
     const failed = (code) => {
       this.speaking = false;
       try { SpeakCursor.stop(); } catch (err) {}
-      // Не заговорил — снимаем возможную отметку, иначе строка потеряется.
-      if (!started && marked) { try { Reader.unmarkSpoken(Reader.page, line.text); } catch (err) {} }
+      // Не заговорил — отметки быть не должно (ставится только в finished).
+      if (marked) { try { Reader.unmarkSpoken(Reader.page, line.text); } catch (err) {} marked = false; }
       // Молчать нельзя: раньше «голос не работает» выглядело как поломка
       // читалки, хотя движок просто отбил озвучку.
       if (code === 'not-allowed') toast('Браузер не разрешил озвучку — нажмите ▶ ещё раз', 5000);
