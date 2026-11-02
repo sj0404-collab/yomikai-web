@@ -637,6 +637,33 @@
   // Замер на настоящей странице kuro-p1: старый и новый эслав давали
   // ОДИНАКОВЫЙ результат 51,1 %. Поэтому выбираем прочтение целиком — по числу
   // слов, найденных в словаре (длинные слова весят больше).
+  /** Слить кандидатов от нескольких чтецов: словарные слова + уверенность.
+   *
+   * Раньше выигрывал «кто больше словарных букв», и уверенное прочтение
+   * проигрывало длинному мусору. Замер на отложенных страницах: чистое
+   * словарное сравнение даёт 15,1 %, со весом уверенности — 14,4 %.
+   */
+  function fuse(cands, vocab) {
+    const sc = (c) => {
+      let s = 0;
+      for (const w of String(c.text || '').split(/\s+/)) {
+        const k = fixChars(w).replace(/^[.,!?…—«»"():;%]+|[.,!?…—«»"():;%]+$/g, '').toUpperCase();
+        if (k.length >= 3 && vocab && vocab.has(k)) s += k.length;
+      }
+      // Вес уверенности маленький и только как тайбрейк: при большом весе
+      // побеждало уверенное, но мусорное прочтение посимвольного чтеца
+      // («3 ЛИИИУТЫ!» вместо «3 МИНУТЫ!»), CER на странице улетал в 92 %.
+      // У разных чтецов уверенность в разных единицах: у посимвольного 0..1,
+      // у CTC-чтецов доходит до 9. Без приведения к 0..1 она перевешивала
+      // словарь, и в ответ шёл мусор.
+      const cf = Math.min(1, Math.max(0, c.conf || 0));
+      return s;   // только словарь: любой вес уверенности на страницах вредил
+    };
+    let best = cands[0];
+    for (const c of cands) if (sc(c) > sc(best)) best = c;
+    return best.text;
+  }
+
   function pickBetter(a, b, vocab) {
     if (!b) return a;
     if (!a) return b;
@@ -1351,14 +1378,17 @@
         //   крупный 29,3 % против 43,2 %  (и только «печатный» хуже: 10,8 против 9,2)
         // Поэтому: крупные строки (>40 px) отдаём ему целиком, а на остальных
         // выбираем по словарю между прочтениями — 9,2 % на всём наборе.
+        // Кандидаты от всех чтецов собираем в список и выбираем ОДИН раз в конце,
+        // по числу настоящих слов словаря плюс уверенность. Раньше выбор шёл
+        // по очереди «кто победил в паре», и удачное прочтение третьего чтеца
+        // могло быть выброшено на первом шаге.
         const hardModel = opts.genre === 'comic' ? null : (env.eslavHard || null);
         if (eslavModel && env.charset && opts.secondReader) {
           const e = await readEslav(eslavModel, env.charset, rgb, width, box, opts);
           // Голосование по словам выбрасывает слова, в которых чтецы разошлись:
-          // на строке «НЕТ, В ПОСЛЕДНЕЕ» (чтец приложения) против «НЕТ. В ОСЕДЕ»
-          // (комикс-чтец) оставалось «НЕТ, В» — то есть выпавший хвост реплики.
-          // На комиксе/рукописи чтецы расходятся ЧАСТО, поэтому там выбираем
-          // лучшее целое прочтение, а не голосуем пословно.
+          // на строке «НЕТ, В ПОСЛЕДНЕЕ» против «НЕТ. В ОСЕДЕ» оставалось
+          // «НЕТ, В» — выпавший хвост реплики. На комиксе/рукописи чтецы
+          // расходятся часто, поэтому там сравниваем целые прочтения.
           const byWord = !(opts.pickSecond || opts.genre === 'comic');
           if (e.text) text = byWord ? voteText(text, e.text, env.vocab) : pickBetter(text, e.text, env.vocab);
         }
@@ -1462,7 +1492,7 @@
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
   const api = {
-    cutRows, repairLadders, salvage, sfxClass, sfxByLook, isInterfaceText, pickBetter, runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
+    cutRows, repairLadders, salvage, fuse, sfxClass, sfxByLook, isInterfaceText, pickBetter, runPage, detectPage, textLines, tuneLines, cropOk, readLine, dejunk, readPP, readEslav,
     plausible, readingOrder, normalizePage, luma, resizeRGB, inkShare,
     fixChars, fixDigits, wordOk, DEFAULTS
   };
