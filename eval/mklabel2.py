@@ -116,16 +116,24 @@ def cut_rows(img, box, ink_luma=150):
     for y0, y1 in merged:
         if y1 - y0 < 2 or (y1 - y0) < med_run * 0.4:
             continue
-        ty = max(0, int(round(y0 / scale)) + t - 2)
-        by = min(img.shape[0], int(round(y1 / scale)) + t + 2)
+        # Отступ по вертикали — 6 % высоты строки: с 2 px верхушки букв и
+        # подчёркивания срезались («ТОЧНО» → «ТОЧНО» без хвостов).
+        hh = max(2, int(round((y1 - y0) / scale)))
+        vp = max(2, int(round(hh * 0.06)))
+        ty = max(0, int(round(y0 / scale)) + t - vp)
+        by = min(img.shape[0], int(round(y1 / scale)) + t + vp)
         light = ink.mean() > 0 and (small[y0:y1] > 255 - ink_luma).sum() > (small[y0:y1] < ink_luma).sum()
         colmask = (small[y0:y1] > 255 - ink_luma) if light else (small[y0:y1] < ink_luma)
         xs = np.where(colmask.any(axis=0))[0]
+        # Горизонтальный отступ — 10 % высоты строки. С прежними 2 px у строк
+        # срезалась первая буква: «Я ХОЧУ БЫТЬ» сохранялось как «1 ХОЧУ БЫТЬ»,
+        # и модель училась на обрубках.
+        hp = max(3, int(round(hh * 0.10)))
         if len(xs) == 0:
             lx, rx = l, r
         else:
-            lx = max(0, int(round(xs[0] / scale)) + l - 2)
-            rx = min(img.shape[1], int(round(xs[-1] / scale)) + l + 2)
+            lx = max(0, int(round(xs[0] / scale)) + l - hp)
+            rx = min(img.shape[1], int(round(xs[-1] / scale)) + l + hp)
         out.append([lx, ty, rx, by])
     return out
 
@@ -185,6 +193,30 @@ def cmd_prep(name, png, per_sheet=6):
 
 
 # ---------- шаг 3–4: сборка датасета ----------
+def widen_to_gaps(crops, box, shape):
+    """Расширить каждую строку до середины промежутка с соседями.
+
+    Так буквы не могут быть обрезаны: сверху и снизу забираем половину пустого
+    промежутка, а по бокам — всю ширину облачка (там только поля).
+    """
+    if not crops:
+        return crops
+    bx1, by1, bx2, by2 = [int(round(v)) for v in box]
+    H, W = shape[:2]
+    out = []
+    for i, (x1, y1, x2, y2) in enumerate(crops):
+        # Берём треть промежутка с соседом, а не половину: половина затаскивала
+        # в кроп верхушки соседней строки.
+        top = by1 if i == 0 else y1 - max(0, (y1 - crops[i - 1][3]) // 3)
+        bot = by2 if i == len(crops) - 1 else y2 + max(0, (crops[i + 1][1] - y2) // 3)
+        nx1, ny1 = max(0, min(bx1, x1)), max(0, min(top, y1))
+        nx2, ny2 = min(W, max(bx2, x2)), min(H, max(bot, y2))
+        if nx2 - nx1 < 4 or ny2 - ny1 < 4:      # расширение съело строку — оставить как было
+            nx1, ny1, nx2, ny2 = x1, y1, x2, y2
+        out.append([nx1, ny1, nx2, ny2])
+    return out
+
+
 def cmd_build(name):
     png = None
     for cand in os.listdir('/home/user/manhwa-shots/pages'):
@@ -239,6 +271,7 @@ def cmd_build(name):
             print(f'  облачко #{key}: нарезано {len(crops)} строк, в эталоне {len(texts)} — пропуск')
             skipped += 1
             continue
+        crops = widen_to_gaps(crops, m['box'], img.shape)
         for j, (c, t) in enumerate(zip(crops, texts)):
             fn = f'{name}-b{key}-{j:02d}.png'
             x1, y1, x2, y2 = c
@@ -261,6 +294,11 @@ PAGES = {
     'tyrant-p1': '/home/user/manhwa-shots/pages/tyrant-p1.png',
     'reader-p1': '/home/user/manhwa-shots/pages/reader-p1-seg8.png',
     'manhua1': '/home/user/manhwa-shots/pages/manhua1-p1.png',
+    'tyrant-p2': '/home/user/manhwa-shots/pages/tyrant-p2.png',
+    'reader-g5-p1': '/home/user/manhwa-shots/pages/reader-g5-p1.png',
+    'tyrant-g5-p1': '/home/user/manhwa-shots/pages/tyrant-g5-p1.png',
+    'reader-long': '/home/user/manhwa-shots/manhwa-reader-part1.png',
+    'tyrant-long': '/home/user/manhwa-shots/manhwa-tyrant-part4.png',
 }
 
 if __name__ == '__main__':

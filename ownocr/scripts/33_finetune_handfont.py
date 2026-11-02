@@ -42,7 +42,8 @@ DIRS = ['data-real', 'data-pages', 'data-manhua', 'data-comic', 'data-hand']
 # Размеченные вручную страницы (comic1x5, comic1x7, manhua3x2, manhua2-p2,
 # kuro-p2, tyrant-p1) идут в обучение, поэтому из проверки убраны.
 HOLDOUT = {'comic2', 'comic3', 'manhua1', 'manhua4', 'manhua5', 'dense-a'}
-HAND_PAGES_LABELLED = {'comic1x5', 'comic1x7', 'manhua3x2', 'manhua2-p2', 'kuro-p2', 'tyrant-p1'}
+HAND_PAGES_LABELLED = {'comic1x5', 'comic1x7', 'manhua3x2', 'manhua2-p2', 'kuro-p2',
+                       'tyrant-p1', 'tyrant-p2', 'reader-long', 'tyrant-long'}
 
 HAND_FONTS = ['Caveat', 'Amatic_SC', 'Comic_Relief', 'Bad_Script', 'Comforter_Brush',
               'Balsamiq_Sans', 'Comforter', 'Days_One', 'Alumni_Sans_Pinstripe',
@@ -248,7 +249,7 @@ def main():
         raise SystemExit(f'нет файла инициализации {a.init_pt} — обнови модель '
                          f'(python3 evalwork/fetch_models.py)')
     net = E.build_torch()
-    net.load_state_dict(torch.load(a.init_pt, map_location='cpu'))
+    net.load_state_dict(torch.load(a.init_pt, map_location='cpu', weights_only=False))
     print('старт:', os.path.basename(a.init_pt), flush=True)
     net.train()
     opt = torch.optim.Adam([p for p in net.parameters() if p.requires_grad], lr=a.lr)
