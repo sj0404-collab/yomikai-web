@@ -152,7 +152,15 @@ class ReadEngine {
             val aAdv = adv(a)
             val bAdv = adv(b)
             if (aAdv <= 0.0 || bAdv <= 0.0) return false
-            if (max(aAdv, bAdv) / min(aAdv, bAdv) > 1.35) return false
+            // Порог 1,35 был подобран на целых строках. На полосе 4 детектор
+            // разрезал ОДНУ строку на два тонких куска («не позвелЯйтЕ» и
+            // «пь товоляиь»), «типичная высота» облачка от этого поехала, и
+            // третья строка «СЕБЕ УВЛЕЧЬСЯ ЕЁ» (те же буквы того же кегля)
+            // получила отношение 1,76 — облачко рвалось на две реплики.
+            // Плотная укладка (зазор меньше высоты строки) — признак того, что
+            // это одно и то же облачко, поэтому здесь допуск шире.
+            val tight = gap <= min(a.lh, b.lh) * 0.9
+            if (max(aAdv, bAdv) / min(aAdv, bAdv) > (if (tight) 1.9 else 1.35)) return false
             if (min(a.h, b.h) < max(a.h, b.h) * 0.3) return false
         }
         val mergedTop = min(a.top, b.top)
