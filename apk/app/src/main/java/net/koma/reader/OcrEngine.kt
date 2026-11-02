@@ -54,6 +54,17 @@ class OcrEngine(private val modelsDir: File) {
          */
         const val ESL = "eslav.onnx"
         const val ESL_CHARSET = "eslav-charset.txt"
+        /**
+         * Словарь русских слов для ВЫБОРА чтеца.
+         *
+         * Зачем: на записи со телефона (полоса вебтуна) основной чтец `rec`
+         * прочитал облачко «УЖЕ ПОРА НА- / ЧИНАТЬ ВСТРЕЧУ, ...» без единой
+         * ошибки (CER 0,0 %), а второй чтец на тех же строках дал 18,8 % — и
+         * приложение, которое брало второго чтеца ВСЕГДА, портило верный текст.
+         * Правило «кто больше настоящих слов сказал, того и текст» (как в
+         * отдельной HTML-сборке) даёт на этой полосе 0,0 % вместо 20,2 %.
+         */
+        const val VOCAB = "vocab-ru.txt"
         /** Каталог встроенных моделей внутри APK (assets/models). */
         private const val ASSET_DIR = "models"
         /**
@@ -61,11 +72,15 @@ class OcrEngine(private val modelsDir: File) {
          * раскладывает их заново только тогда, когда отпечаток в файлах разошёлся
          * со сборкой. Иначе на каждом запуске 12,6 МБ переписывались бы впустую.
          */
-        const val EMBEDDED_STAMP = "2026-11-02.1"
+        const val EMBEDDED_STAMP = "2026-11-02.2"
         private const val DET_THRESHOLD = 0.3f
         /** Плитка детектора и перекрытие: как в отдельной сборке (core.js). */
         private const val TILE = 1500
         private const val OVER = 160
+        /** Запас вокруг вырезанной строки, доля её высоты (замер: 0,4 лучший). */
+        private const val LINE_PAD = 0.4f
+        /** Растяжки по ширине, среди которых выбирается лучшее чтение строки. */
+        private val STRETCHES = floatArrayOf(1f, 0.85f, 1.15f)
     }
 
     class Rules(
@@ -111,6 +126,8 @@ class OcrEngine(private val modelsDir: File) {
     /** Второй чтец и его азбука (по одному символу, blank = размер азбуки). */
     private var eslav: OrtSession? = null
     private var eslavCharset: List<String> = emptyList()
+    /** Русские слова для выбора чтеца. Пустой набор — выбор по длине слов. */
+    private var vocab: Set<String> = emptySet()
     var error: String? = null
         private set
 
@@ -155,6 +172,13 @@ class OcrEngine(private val modelsDir: File) {
         false
     }
 
+    private fun vocabInAssets(am: AssetManager): Boolean = try {
+        am.open("$ASSET_DIR/$VOCAB").close()
+        true
+    } catch (t: Throwable) {
+        false
+    }
+
     /**
      * Разложить встроенные модели в filesDir/models.
      *
@@ -179,6 +203,8 @@ class OcrEngine(private val modelsDir: File) {
                 copyAsset(am, "$ASSET_DIR/$ESL", File(modelsDir, ESL))
                 copyAsset(am, "$ASSET_DIR/$ESL_CHARSET", File(modelsDir, ESL_CHARSET))
             }
+            // Словарь нужен для выбора чтеца. Нет его — работаем как раньше.
+            if (vocabInAssets(am)) copyAsset(am, "$ASSET_DIR/$VOCAB", File(modelsDir, VOCAB))
             stamp.writeText(EMBEDDED_STAMP)
             reset()
             GlensEngine.log("нативный OCR: встроенные модели разложены в ${modelsDir.absolutePath}")
@@ -227,6 +253,11 @@ class OcrEngine(private val modelsDir: File) {
                     GlensEngine.log("нативный OCR: второй чтец не поднялся — ${t.message ?: ""}")
                 }
             }
+            vocab = try {
+                val f = File(modelsDir, VOCAB)
+                if (f.exists()) f.readLines().map { it.trim().uppercase() }.filter { it.length >= 2 }.toHashSet()
+                else emptySet()
+            } catch (t: Throwable) { emptySet() }
             env = e
             if (charset.isEmpty()) { error = "файл азбуки пуст"; return false }
             GlensEngine.log("нативный OCR: модели загружены, классов ${charset.size}" +
@@ -282,8 +313,63 @@ class OcrEngine(private val modelsDir: File) {
         return recognizeBitmap(page, Rules.from(rulesJson), progress)
     }
 
-    fun recognizeBitmap(page: Bitmap, rules: Rules, progress: (String) -> Unit): List<Item> {
+    fun recognizeBitmap(rawPage: Bitmap, rules: Rules, progress: (String) -> Unit): List<Item> {
         val t0 = System.currentTimeMillis()
+        // Тёмная страница: буквы светлее фона, а весь разбор считает наоборот.
+        // Отдельная HTML-сборка в этом случае инвертирует кадр — без этого на
+        // ночных страницах «чернила» ищутся не там. Инверсия только для чтения
+        // и только когда тёмных пикселей больше половины (замер по выборке).
+        val inverted = invertIfDark(rawPage)
+        val page = inverted ?: rawPage
+        try {
+            return recognizePage(page, rules, progress, t0)
+        } finally {
+            if (inverted != null) inverted.recycle()
+        }
+    }
+
+    /** Инверсия кадра, если он тёмный; иначе null (кадр не копируется). */
+    private fun invertIfDark(src: Bitmap): Bitmap? = try {
+        invertIfDarkInner(src)
+    } catch (t: Throwable) {
+        // Аппаратный Bitmap не отдаёт пиксели — тогда без инверсии, как раньше.
+        null
+    }
+
+    private fun invertIfDarkInner(src: Bitmap): Bitmap? {
+        var dark = 0
+        var total = 0
+        val stepX = max(1, src.width / 64)
+        val stepY = max(1, src.height / 64)
+        var y = 0
+        while (y < src.height) {
+            var x = 0
+            while (x < src.width) {
+                val p = src.getPixel(x, y)
+                val l = (299 * ((p shr 16) and 0xFF) + 587 * ((p shr 8) and 0xFF) + 114 * (p and 0xFF)) / 1000
+                if (l < 128) dark++
+                total++
+                x += stepX
+            }
+            y += stepY
+        }
+        if (total == 0 || dark.toDouble() / total <= 0.55) return null
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(out)
+        val paint = android.graphics.Paint().apply {
+            colorFilter = android.graphics.ColorMatrixColorFilter(
+                android.graphics.ColorMatrix(floatArrayOf(
+                    -1f, 0f, 0f, 0f, 255f,
+                    0f, -1f, 0f, 0f, 255f,
+                    0f, 0f, -1f, 0f, 255f,
+                    0f, 0f, 0f, 1f, 0f)))
+        }
+        canvas.drawBitmap(src, 0f, 0f, paint)
+        GlensEngine.log("нативный OCR: страница тёмная — читаю в инверсии")
+        return out
+    }
+
+    private fun recognizePage(page: Bitmap, rules: Rules, progress: (String) -> Unit, t0: Long): List<Item> {
         progress("детектор: ищу блоки текста")
         val boxes = detect(page, rules.pageSide, rules.detRetry)
         val detMs = System.currentTimeMillis() - t0
@@ -297,24 +383,34 @@ class OcrEngine(private val modelsDir: File) {
             progress("распознаю $done/${boxes.size}")
             val lines = textLines(page, b, rules).ifEmpty { listOf(b) }
             for (ln in lines) {
-                val w = max(1, ln[2] - ln[0])
-                val h = max(1, ln[3] - ln[1])
-                val crop = try { Bitmap.createBitmap(page, ln[0], ln[1], w, h) } catch (e: Throwable) { continue }
+                // Запас вокруг строки. Строка вырезается вплотную к «чернилам», и
+                // у мелкого шрифта срезаются верх и низ букв. Замер на записи с
+                // телефона: с запасом 40 % высоты строки основной чтец на облачке
+                // «НЕ СТОИТ. / СЕЙЧАС Я ЗДЕСЬ / В КАЧЕСТВЕ СОВЕТНИКА,» даёт CER
+                // 0,0 %, без запаса — 3,1 % («Е СТОИТ», «В КАЧЕСТЕЕ»).
+                val lpad = max(3, ((ln[3] - ln[1]) * LINE_PAD).toInt())
+                val lx0 = max(0, ln[0] - 2)
+                val ly0 = max(0, ln[1] - lpad)
+                val lx1 = min(page.width, ln[2] + 2)
+                val ly1 = min(page.height, ln[3] + lpad)
+                val w = max(1, lx1 - lx0)
+                val h = max(1, ly1 - ly0)
+                val crop = try { Bitmap.createBitmap(page, lx0, ly0, w, h) } catch (e: Throwable) { continue }
                 val wide = w.toDouble() / page.width >= 0.25
-                // Сначала второй чтец (обучен на репликах манги/манхвы/маньхуа),
-                // затем — прежний `rec`, если второй не поднялся или вернул пусто.
+                // Оба чтеца читают строку, победителя выбирает словарь.
+                // Раньше второй чтец подменял первый всегда — и на мелких
+                // рукописных строках его мусор затирал верное чтение.
                 var pair: Pair<String, Double> = "" to 0.0
                 try {
                     // Любая ошибка второго чтеца НЕ должна ломать кадр: падаем на
                     // прежний путь `rec`. Это важно, потому что в песочнице нет
                     // Android и поведение на телефоне проверяется только установкой.
-                    if (eslav != null) {
-                        pair = try { decodeEslav(crop) } catch (t: Throwable) {
-                            GlensEngine.log("второй чтец: ошибка ${t.message ?: t.javaClass.simpleName}, читаю прежним")
-                            "" to 0.0
-                        }
-                    }
-                    if (pair.first.isBlank()) pair = decode(crop, wide)
+                    val first = try { decodeBest(crop, wide) } catch (t: Throwable) { "" to 0.0 }
+                    val second = if (eslav != null) try { decodeEslav(crop) } catch (t: Throwable) {
+                        GlensEngine.log("второй чтец: ошибка ${t.message ?: t.javaClass.simpleName}, читаю прежним")
+                        null
+                    } else null
+                    pair = pickBetter(first, second)
                 } finally { crop.recycle() }
                 val (text, conf) = pair
                 if (text.isBlank() || conf <= rules.minConfidence) continue
@@ -511,13 +607,23 @@ class OcrEngine(private val modelsDir: File) {
             val p = px[i]
             luma[i] = (((p shr 16) and 0xFF) * 77 + ((p shr 8) and 0xFF) * 151 + (p and 0xFF) * 28) shr 8
         }
-        if (inkThreshold(luma, rules) < 0) return emptyList()
+        val globalThr = inkThreshold(luma, rules)
+        if (globalThr < 0) return emptyList()
 
+        // Порог «чернил» по плиткам нужен, когда в одном блоке два разных шрифта.
+        // Но плитка не должна делать порог МЯГЧЕ общего: на полосе с цветной
+        // плашкой под текстом перцентили плитки уезжают выше плашки, плашка
+        // становится «чернилами», и три строки сливаются в один кроп. Замер
+        // (evalwork/tile_ink.py, пузырь на оранжевой плашке): с плитками одна
+        // строка высотой 221 px вместо трёх, с общим порогом — три строки.
         val rows = clamp(rules.inkTileRows, 1, 16)
         val tileH = max(1, ceil(h.toDouble() / rows).toInt())
         val thr = IntArray(rows) { i ->
             val y0 = i * tileH; val y1 = min(h, y0 + tileH)
-            if (y1 <= y0) -1 else inkThreshold(luma.copyOfRange(y0 * w, y1 * w), rules)
+            if (y1 <= y0) globalThr else {
+                val t = inkThreshold(luma.copyOfRange(y0 * w, y1 * w), rules)
+                if (t < 0) globalThr else min(globalThr, t)
+            }
         }
         fun thrAt(y: Int) = thr[clamp(y / tileH, 0, rows - 1)]
         val need = max(1, w / 60)
@@ -583,10 +689,36 @@ class OcrEngine(private val modelsDir: File) {
         return clamp((low + (high - low) * rules.inkCoefficient).roundToInt(), rules.inkMin, rules.inkMax)
     }
 
-    // ── 3. Распознавание кропа строки ───────────────────────────────────────
+    // ── 3. Выбор чтеца по словарю ───────────────────────────────────────────
+
+    /** Словарный счёт текста: слова из 3+ букв, которые есть в словаре. */
+    private fun vocabScore(text: String): Int {
+        var s = 0
+        for (w in text.split(' ', '\n', '\t')) {
+            val k = w.trim().trim('.', ',', '!', '?', '…', '—', '«', '»', '"', ':', ';', '%').uppercase()
+            if (k.length >= 3 && vocab.contains(k)) s += k.length
+        }
+        return s
+    }
+
+    /**
+     * Какой из двух чтецов сказал больше настоящих слов — того и текст.
+     *
+     * В 1.9.44 второй чтец подменял первый ВСЕГДА, если вернул непустую строку.
+     * На мелких рукописных строках он выдаёт мусор («ИУЮРИИП?»), и верное
+     * чтение основного чтеца («НЕ УВЕРЕН,») терялось — это и виделось как
+     * «А С О В» и «НЕ УВЕРЕН, КАК СТОИТ СКАЙ».
+     */
+    private fun pickBetter(a: Pair<String, Double>, b: Pair<String, Double>?): Pair<String, Double> {
+        if (b == null || b.first.isBlank()) return a
+        if (a.first.isBlank()) return b
+        return if (vocabScore(b.first) > vocabScore(a.first)) b else a
+    }
+
+    // ── 4. Распознавание кропа строки ───────────────────────────────────────
 
     /** decodeCrop: кроп → (текст, средняя уверенность) жадным CTC-разбором. */
-    private fun decode(crop: Bitmap, wide: Boolean): Pair<String, Double> {
+    private fun decode(crop: Bitmap, wide: Boolean, stretch: Float = 1f): Pair<String, Double> {
         val sess = rec ?: return "" to 0.0
         val e = env ?: return "" to 0.0
         var src = crop
@@ -598,7 +730,7 @@ class OcrEngine(private val modelsDir: File) {
         }
         val w0 = src.width; val h0 = src.height
         if (w0 < 2 || h0 < 2) { if (rotated) src.recycle(); return "" to 0.0 }
-        val width = clamp(((48.0 * w0) / h0).roundToInt(), 8, 960)
+        val width = clamp(((48.0 * w0 * stretch) / h0).roundToInt(), 8, 960)
         val padded = max(320, width)
         val scaled = Bitmap.createScaledBitmap(src, width, 48, true)
         if (rotated) src.recycle()
@@ -649,6 +781,26 @@ class OcrEngine(private val modelsDir: File) {
         }
     }
 
+
+    /**
+     * Прочитать строку основным чтецом в трёх растяжках и взять лучшее по словарю.
+     *
+     * Отдельная HTML-сборка читает каждую строку так (как есть, сжатой до 85 % и
+     * растянутой до 115 % по ширине) и выбирает вариант по числу настоящих слов.
+     * На записи с телефона это дало верное «В КАЧЕСТВЕ», где одиночное чтение
+     * выдавало «В КАЧЕСТЕЕ»: CER 0,0 % против 3,1 %.
+     */
+    private fun decodeBest(crop: Bitmap, wide: Boolean): Pair<String, Double> {
+        var best: Pair<String, Double> = "" to 0.0
+        var bestScore = -1e9
+        for (st in STRETCHES) {
+            val r = try { decode(crop, wide, st) } catch (t: Throwable) { continue }
+            if (r.first.isBlank()) continue
+            val sc = vocabScore(r.first) + r.second * 0.6
+            if (sc > bestScore) { bestScore = sc; best = r }
+        }
+        return best
+    }
 
     /**
      * Прочитать кроп строки вторым чтецом («эслав»).

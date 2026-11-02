@@ -1195,15 +1195,21 @@ function textLines(imgCanvas, box, R) {
   ctx.drawImage(imgCanvas, left, top, right - left, bottom - top, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h).data;
   const luma = lumaFrom(data, w, h);
-  if (inkThreshold(luma, R) < 0) return [];
+  const globalThr = inkThreshold(luma, R);
+  if (globalThr < 0) return [];
 
-  // подблочные пороги: несколько шрифтов в одном боксе
+  // Подблочные пороги: несколько шрифтов в одном боксе. Но плитка НЕ должна
+  // делать порог мягче общего: на полосе с цветной плашкой перцентили плитки
+  // уезжают выше плашки, плашка становится «чернилами», и строки сливаются в
+  // один кроп (замер: пузырь на оранжевой плашке — 1 кроп вместо 3 строк).
   const rows = clamp(Math.round(R.inkTileRows), 1, 16);
   const tileH = Math.max(1, Math.ceil(h / rows));
   const thr = new Array(rows);
   for (let i = 0; i < rows; i++) {
     const y0 = i * tileH, y1 = Math.min(h, y0 + tileH);
-    thr[i] = y1 <= y0 ? -1 : inkThreshold(luma.subarray(y0 * w, y1 * w), R);
+    if (y1 <= y0) { thr[i] = globalThr; continue; }
+    const t = inkThreshold(luma.subarray(y0 * w, y1 * w), R);
+    thr[i] = t < 0 ? globalThr : Math.min(globalThr, t);
   }
   const grey = R.inkLevels >= 2 ? greyInkRange(luma, R) : null;
   const thrAt = (y) => thr[clamp(Math.floor(y / tileH), 0, rows - 1)];
