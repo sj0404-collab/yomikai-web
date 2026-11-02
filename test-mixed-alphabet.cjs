@@ -37,4 +37,6 @@ const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process
   // трогает — поэтому здесь проверяем именно отсутствие подмены.
   ok(W.fixAlphabet('BANG') === 'BANG', 'звук «BANG» не превращается в кириллицу');
   ok(W.fixAlphabet('owb') === 'owb', 'и «owb» тоже не подменяется');
+  // run_all.sh считает тест пройденным только по последней строке.
+  console.log(process.exitCode ? 'FAILED' : 'ALL PASSED');
 })();
