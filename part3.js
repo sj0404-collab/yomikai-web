@@ -636,9 +636,17 @@ const Words = {
     if (this.ready) {
       // Слипшиеся слова разбиваем ДО чистки: иначе чистка считает их мусором
       // и выбрасывает, а с ними уходит часть реплики.
+      //
+      // Но сперва правим буквы в целом слове. Иначе «ПОШЕВЕАИТЬСЯ» (буква «Л»,
+      // прочитанная как «А») режется на «пошеве» + «литься» — тест
+      // test-dict-embed ловил ровно это 2.11 («пошевели ться»). После правки
+      // буквы слово уже есть в словаре, и делить его нельзя.
       t = t.replace(/[А-Яа-яЁё]{8,}/g, (w) => {
-        const halves = this.splitGlued(w);
-        return halves ? halves.join(' ') : w;
+        const fixed = this.correctWord(w);
+        const low = String(fixed).toLowerCase().replace(/[^а-яё]/g, '');
+        if (this.inDict(low)) return fixed;
+        const halves = this.splitGlued(fixed) || this.splitGlued(w);
+        return halves ? halves.map((h) => this.correctWord(h)).join(' ') : fixed;
       });
     }
     if (this.ready) {
