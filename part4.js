@@ -842,17 +842,43 @@ const Buffer = {
     // хотя распознавание прошло нормально (замечено 28.10 на прозе).
     if (!Reader.book || !Reader.book.id) return;
     const key = 'buf:' + Reader.book.id + ':' + page;
-    await DB.put('kv', { k: key, v: { page, at: Date.now(), rules: RULES.version, lines } });
+    // В записи храним ИМЯ КНИГИ, а не только её ключ: тогда даже если ключи
+    // когда-нибудь совпадут по префиксу, чужие строки в чужую страницу не
+    // попадут — при чтении сверяем книгу ещё раз.
+    await DB.put('kv', { k: key, v: { page, book: Reader.book.id, at: Date.now(), rules: RULES.version, lines } });
   },
   async get(page) {
     return (await DB.get('kv', 'buf:' + Reader.book.id + ':' + page))?.v || null;
   },
+  /**
+   * Ключ книги в буфере — С ДВОЕТОЧИЕМ на конце.
+   *
+   * Было `startsWith('buf:' + id)`: у книги `b1` под это подходили и строки
+   * книги `b12`, и на экране страница одной манги показывала реплики другой
+   * (телефон 17:51: «Как прожить жизнь, будучи старшей сестрой тирана» и
+   * «Пиксель хоррор» в одном списке). Разделитель обязателен ещё и потому, что
+   * без книги префикс `buf:` совпадал со всем буфером сразу.
+   */
+  keyPrefix() {
+    const id = Reader.book && Reader.book.id;
+    return id ? 'buf:' + id + ':' : null;
+  },
   async all() {
-    const rows = (await DB.all('kv') || []).filter(r => r.k.startsWith('buf:' + (Reader.book?.id || '')));
-    return rows.map(r => r.v).sort((a, b) => a.page - b.page);
+    const prefix = this.keyPrefix();
+    if (!prefix) return [];
+    const id = Reader.book.id;
+    const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string' && r.k.startsWith(prefix));
+    return rows.map(r => r.v)
+      .filter(v => v && typeof v.page === 'number')
+      // Записи прежних версий поля book не имеют — их оставляем (ключ уже
+      // проверен), а новые обязаны совпасть по книге.
+      .filter(v => !v.book || v.book === id)
+      .sort((a, b) => a.page - b.page);
   },
   async clear() {
-    const rows = (await DB.all('kv') || []).filter(r => r.k.startsWith('buf:' + (Reader.book?.id || '')));
+    const prefix = this.keyPrefix();
+    if (!prefix) return;
+    const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string' && r.k.startsWith(prefix));
     for (const r of rows) await DB.del('kv', r.k);
   },
 };
@@ -1905,6 +1931,19 @@ async function cleanLines(lines) {
     // звукового эффекта приклеивается к реплике уже при склейке строк.
     let text = Words.ready ? Words.polish(ln.text, RULES.junkRatio, ln.confidence) : ln.text;
     text = trimJunkEdges(text || '');
+    // Слово, в котором смешаны кириллица и латиница, — почти всегда обрывок
+    // распознавания, а не имя: «ПОДУМАЛАw» (телефон 17:51). Латиницу, приклеенную
+    // к кириллическому слову, снимаем; если от строки остаётся мусор без гласных
+    // («сапьYwb» → «сапь»), строку выбрасываем целиком.
+    const hadMixed = /[А-Яа-яЁё][A-Za-z]|[A-Za-z][А-Яа-яЁё]/.test(text);
+    text = text
+      .replace(/([А-Яа-яЁё]{2,})([A-Za-z]{1,3})(?![A-Za-zА-Яа-яЁё])/g, '$1')
+      .replace(/(^|[^A-Za-zА-Яа-яЁё])([A-Za-z]{1,3})([А-Яа-яЁё]{2,})/g, '$1$3')
+      .trim();
+    if (hadMixed && !/[А-Яа-яЁёАЕЁИОУЫЭЮЯаеёиоуыэюя]/.test(text.replace(/[A-Za-z]/g, ''))) {
+      if (text.replace(/[^\p{L}\p{N}]/gu, '').length <= 6) continue;
+    }
+    if (hadMixed && !/[аеёиоуыэюя]/i.test(text) && text.replace(/[^\p{L}]/gu, '').length <= 6) continue;
     // Регистр: «ОНА Вс ШЕПЧЕТ» → «ОНА ВС ШЕПЧЕТ» (см. fixCaseInCaps).
     text = fixCaseInCaps(text);
     if (!text) continue;
